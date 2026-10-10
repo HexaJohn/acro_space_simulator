@@ -16,7 +16,10 @@
 ///  1. votes its laws (the auto-vote every self-governing colony runs);
 ///  2. sets the tax to the highest rate that keeps the mood at 0.5;
 ///  3. if food, water or (where people breathe what is made) oxygen run
-///     short, builds the cheapest life-support building it can afford;
+///     short, fixes the cause: the generator when life support is dark, the
+///     missing input (a farm's water) first, else the cheapest producer it
+///     can afford and run — and nothing when hands, not buildings, are what
+///     is short;
 ///  4. past the waste or corpse lines with no landfill or deathcare, builds
 ///     one;
 ///  5. otherwise zones a couple of free lots, the use the RCI demand asks for
@@ -98,7 +101,7 @@ class IndependentGovernorTuning {
 }
 
 /// What a sitting did.
-enum GovernorActKind { laws, tax, lifeSupport, waste, deathcare, zone }
+enum GovernorActKind { laws, tax, lifeSupport, power, waste, deathcare, zone }
 
 /// One line of the governor's log.
 class GovernorAct {
@@ -212,32 +215,20 @@ extension IndependentGovernorSim on CitySim {
     // sim makes people breathe what is made — the life-support step's own
     // rule; read here, never changed.
     if (pop > 1e-9) {
-      final needs = <(String, double)>[
-        (Commodity.food, pop * CitySim.foodPerPersonPerSec),
-        (Commodity.water, pop * CitySim.waterPerPersonPerSec),
+      final needs = <String, double>{
+        Commodity.food: pop * CitySim.foodPerPersonPerSec,
+        Commodity.water: pop * CitySim.waterPerPersonPerSec,
         if (systemOn(0.3) && !breathable)
-          (
-            Commodity.oxygen,
-            pop * CitySim.waterPerPersonPerSec * (1 - airO2.clamp(0.0, 1.0))
-          ),
-      ];
-      for (final (c, need) in needs) {
+          Commodity.oxygen:
+              pop * CitySim.waterPerPersonPerSec * (1 - airO2.clamp(0.0, 1.0)),
+      };
+      final plant = _lifePlant();
+      for (final MapEntry(key: c, value: need) in needs.entries) {
         final short = (c == Commodity.food && starved) ||
             (localNet[c] ?? 0) < need - 1e-9;
         if (!short) continue;
-        final options = [
-          for (final s in kUtilCatalog)
-            if (CitySim.isLifeSupport(s) && (s.outputs[c] ?? 0) > 0) s,
-        ];
-        final b = _buildCheapest(options, t);
-        if (b != null) {
-          return (
-            GovernorActKind.lifeSupport,
-            'built ${_a(b.label)}: short of '
-                '${Commodity.name(c).toLowerCase()}',
-            b.buildCost
-          );
-        }
+        final fix = _fixShortage(c, needs, plant, t);
+        if (fix != null) return fix;
       }
     }
     // Waste: past the line with nothing that takes garbage.
@@ -281,6 +272,168 @@ extension IndependentGovernorSim on CitySim {
   static String _a(String label) =>
       '${'AEIOU'.contains(label[0]) ? 'an' : 'a'} $label';
 
+  /// What fixes a shortage of [c], built — or null when no building would.
+  ///
+  /// The shortage is read off what the colony MADE (`localNet`), which the
+  /// life throttle has already scaled; the fix is chosen against what it
+  /// could make at full throttle ([plant]). A council that answered every
+  /// short reading with another producer would, with the power out, put up
+  /// farm after farm that none of them could run — each one more draw on a
+  /// grid that has none — until the ore was down to the reserve and the
+  /// colony starved anyway. So, in order:
+  ///
+  ///  1. life support drawing more watts than the colony makes: a generator,
+  ///     since whatever else it built would stand dark too;
+  ///  2. producers of [c] it already has, held back by hands (or compute)
+  ///     rather than watts: nothing — another building is more jobs for the
+  ///     same few people;
+  ///  3. producers that would cover the need at full throttle: whatever they
+  ///     are starved of (the water a farm draws), else nothing;
+  ///  4. otherwise the cheapest producer it can run: one whose inputs the
+  ///     colony makes enough of — else the input first, so a water-short
+  ///     town gets its pump before another thirsty farm — and whose draw
+  ///     the grid can carry — else the generator first.
+  ///
+  /// [extra] is demand on [c] beyond its people's: the draw of the building
+  /// that wants it, when [c] is that building's input. [depth] bounds the
+  /// chain at one input deep (no life-support input has an input of its own
+  /// that is not already on the list).
+  (GovernorActKind, String, double)? _fixShortage(String c,
+      Map<String, double> needs, _LifePlant plant, IndependentGovernorTuning t,
+      {double extra = 0, int depth = 0, String? forLabel}) {
+    final need = (needs[c] ?? 0) + extra;
+    final name = Commodity.name(c).toLowerCase();
+    final why = forLabel == null
+        ? 'short of $name'
+        : 'short of $name for ${_a(forLabel)}';
+    // 1. Watts.
+    if (plant.draw > powerOut + 1e-9) {
+      return _buildPower(t, 'life support is short of power');
+    }
+    final makers = plant.makers[c] ?? const <CityBuildingSpec>{};
+    if (makers.isNotEmpty) {
+      // 2. Hands. Power covers life support here, so a life throttle under
+      // one is the staffing (or compute) share.
+      if (lifeThrottle < 0.98) return null;
+      // 3. Built enough, starved of an input.
+      if ((plant.capacity[c] ?? 0) >= need - 1e-9) {
+        for (final s in makers) {
+          for (final MapEntry(key: k, value: v) in s.inputs.entries) {
+            if (stockOf(k) >= v) continue;
+            if (depth > 0 || !needs.containsKey(k)) return null;
+            return _fixShortage(k, needs, plant, t,
+                depth: depth + 1, forLabel: s.label);
+          }
+        }
+        return null;
+      }
+    }
+    // 4. Build enough.
+    final options = [
+      for (final s in kUtilCatalog)
+        if (CitySim.isLifeSupport(s) && (s.outputs[c] ?? 0) > 0) s,
+    ];
+    for (final s in _affordable(options, t)) {
+      String? thirsty;
+      var feedable = true;
+      for (final MapEntry(key: k, value: v) in s.inputs.entries) {
+        if (needs.containsKey(k)) {
+          if ((plant.capacity[k] ?? 0) - v < needs[k]! - 1e-9) {
+            thirsty = k;
+            break;
+          }
+        } else if (stockOf(k) < v) {
+          feedable = false;
+          break;
+        }
+      }
+      if (!feedable) continue;
+      final input = thirsty;
+      if (input != null) {
+        if (depth > 0) return null;
+        return _fixShortage(input, needs, plant, t,
+            extra: s.inputs[input]!, depth: depth + 1, forLabel: s.label);
+      }
+      if (plant.draw + s.powerDraw > powerOut + 1e-9) {
+        return _buildPower(t, 'too little power to run ${_a(s.label)}');
+      }
+      if (_place(s, t)) {
+        return (
+          GovernorActKind.lifeSupport,
+          'built ${_a(s.label)}: $why',
+          s.buildCost
+        );
+      }
+    }
+    return null;
+  }
+
+  /// The generator that gives the most watts for its ore here — feeding on
+  /// nothing, so it cannot itself run dry — built, or null.
+  (GovernorActKind, String, double)? _buildPower(
+      IndependentGovernorTuning t, String why) {
+    double watts(CityBuildingSpec s) => s.powerOutput * powerFactor(s.type);
+    final options = [
+      for (final s in kUtilCatalog)
+        if (s.inputs.isEmpty && watts(s) > 1e-6) s,
+    ];
+    final order = [
+      for (var i = 0; i < options.length; i++) (i, options[i]),
+    ]..sort((a, b) {
+        final c = (a.$2.buildCost / watts(a.$2))
+            .compareTo(b.$2.buildCost / watts(b.$2));
+        return c != 0 ? c : a.$1.compareTo(b.$1);
+      });
+    for (final s in _affordable([for (final (_, s) in order) s], t,
+        sorted: true)) {
+      if (_place(s, t)) {
+        return (GovernorActKind.power, 'built ${_a(s.label)}: $why',
+            s.buildCost);
+      }
+    }
+    return null;
+  }
+
+  /// The colony's life support as built, at full throttle.
+  _LifePlant _lifePlant() {
+    final p = _LifePlant();
+    const life = {Commodity.food, Commodity.water, Commodity.oxygen};
+    // The production step's own sums, without its throttle: a grid cell runs
+    // whole, a lot by its occupancy.
+    void tally(CityBuildingSpec s, double uf, double share) {
+      final isLife = CitySim.isLifeSupport(s);
+      if (isLife) {
+        p.draw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
+      }
+      s.inputs.forEach((k, v) {
+        if (life.contains(k)) p.capacity[k] = (p.capacity[k] ?? 0) - v * share;
+      });
+      if (!isLife) return;
+      s.outputs.forEach((k, v) {
+        if (!life.contains(k)) return;
+        p.capacity[k] = (p.capacity[k] ?? 0) +
+            v * share * biomeMult(k) * bountyMult * eventProductionMult;
+        (p.makers[k] ??= <CityBuildingSpec>{}).add(s);
+      });
+    }
+
+    for (final e in activeSpecs) {
+      tally(e.value, utilFactor(e.key), 1.0);
+    }
+    if (layout.parcels.isNotEmpty) {
+      final net = parcelNetwork();
+      for (final (parcel, s) in parcelBuiltLots()) {
+        if (!net.lotServed(parcel.id)) continue;
+        final uf = parcelBuildings.containsKey(parcel.id)
+            ? 1.0
+            : parcelUtil(parcel.id);
+        if (uf <= 0) continue;
+        tally(s, uf, uf);
+      }
+    }
+    return p;
+  }
+
   bool _hasBuilding(bool Function(CityBuildingSpec) test) {
     for (final (_, s) in buildingParcels()) {
       if (test(s)) return true;
@@ -289,24 +442,38 @@ extension IndependentGovernorSim on CitySim {
   }
 
   /// Build the cheapest of [options] the colony can afford and place, or
-  /// null. Cheapest first, catalogue order breaking a tie, so the same
-  /// colony picks the same building every time.
+  /// null.
   CityBuildingSpec? _buildCheapest(
       List<CityBuildingSpec> options, IndependentGovernorTuning t) {
-    final order = [
-      for (var i = 0; i < options.length; i++) (i, options[i]),
-    ]..sort((a, b) {
-        final c = a.$2.buildCost.compareTo(b.$2.buildCost);
-        return c != 0 ? c : a.$1.compareTo(b.$1);
-      });
-    for (final (_, s) in order) {
-      if (!unlocked(s)) continue;
-      if (!_placeable(s)) continue;
-      // Never the last of the ore: the reserve stays in the store.
-      if (stockOf(Commodity.ore) - s.buildCost < t.oreReserve) continue;
+    for (final s in _affordable(options, t)) {
       if (_place(s, t)) return s;
     }
     return null;
+  }
+
+  /// [options] the colony may build and pay for, cheapest first (catalogue
+  /// order breaking a tie, so the same colony picks the same building every
+  /// time), or in the given order when [sorted].
+  List<CityBuildingSpec> _affordable(
+      List<CityBuildingSpec> options, IndependentGovernorTuning t,
+      {bool sorted = false}) {
+    final order = [
+      for (var i = 0; i < options.length; i++) (i, options[i]),
+    ];
+    if (!sorted) {
+      order.sort((a, b) {
+        final c = a.$2.buildCost.compareTo(b.$2.buildCost);
+        return c != 0 ? c : a.$1.compareTo(b.$1);
+      });
+    }
+    return [
+      for (final (_, s) in order)
+        // Never the last of the ore: the reserve stays in the store.
+        if (unlocked(s) &&
+            _placeable(s) &&
+            stockOf(Commodity.ore) - s.buildCost >= t.oreReserve)
+          s,
+    ];
   }
 
   /// The flat builder's own refusals, which the domain does not make: a
@@ -385,12 +552,15 @@ extension IndependentGovernorSim on CitySim {
         final c = x.$2.length.compareTo(y.$2.length);
         return c != 0 ? c : x.$1.compareTo(y.$1);
       });
+    // Each kept lot's bounding box, not its centroid: a plot that misses a
+    // deep lot's centre can still bite its back half, and the re-cut then
+    // drops the whole lot.
     final taken = [
       for (final p in layout.autoParcels)
         if (p.use != ParcelUse.unzoned ||
             parcelBuildings.containsKey(p.id) ||
             grownParcels.containsKey(p.id))
-          p.centroid,
+          _bounds(p),
     ];
     var checks = 0;
     Vec2? last;
@@ -400,12 +570,29 @@ extension IndependentGovernorSim on CitySim {
       if (last != null && last.distanceTo(c) < 1e-6) continue;
       last = c;
       if (checks++ >= t.maxSiteChecks) break;
-      final covers = taken.any((p) =>
-          (p.e - c.e).abs() <= hw + 1 && (p.n - c.n).abs() <= hd + 1);
+      final covers = taken.any((b) =>
+          b.minE <= c.e + hw + 1 &&
+          b.maxE >= c.e - hw - 1 &&
+          b.minN <= c.n + hd + 1 &&
+          b.maxN >= c.n - hd - 1);
       if (covers) continue;
       if (siteBlockedReason(s, c) == null) return c;
     }
     return null;
+  }
+
+  /// [p]'s east/north bounding box.
+  static ({double minE, double maxE, double minN, double maxN}) _bounds(
+      Parcel p) {
+    var minE = double.infinity, maxE = -double.infinity;
+    var minN = double.infinity, maxN = -double.infinity;
+    for (final v in p.polygon) {
+      minE = math.min(minE, v.e);
+      maxE = math.max(maxE, v.e);
+      minN = math.min(minN, v.n);
+      maxN = math.max(maxN, v.n);
+    }
+    return (minE: minE, maxE: maxE, minN: minN, maxN: maxN);
   }
 
   /// A staked plot standing empty that is big enough for [s]'s site, in
@@ -417,15 +604,8 @@ extension IndependentGovernorSim on CitySim {
       if (p.use != ParcelUse.unzoned) continue;
       if (parcelBuildings.containsKey(p.id)) continue;
       if (!net.lotServed(p.id)) continue;
-      var minE = double.infinity, maxE = -double.infinity;
-      var minN = double.infinity, maxN = -double.infinity;
-      for (final v in p.polygon) {
-        minE = math.min(minE, v.e);
-        maxE = math.max(maxE, v.e);
-        minN = math.min(minN, v.n);
-        maxN = math.max(maxN, v.n);
-      }
-      final w = maxE - minE, d = maxN - minN;
+      final b = _bounds(p);
+      final w = b.maxE - b.minE, d = b.maxN - b.minN;
       bool fits(double a, double b) =>
           a >= 0.95 * size.width && b >= 0.95 * size.depth;
       if (fits(w, d) || fits(d, w)) return p;
@@ -473,6 +653,15 @@ extension IndependentGovernorSim on CitySim {
   /// the demand asks for most against what is already zoned for it — so a
   /// town whose shops are always wanted still gets homes once it has a few
   /// shops. Null when it zoned nothing.
+  ///
+  /// The pending cap is per use. Counted over every use, two shop lots left
+  /// stuck when the shops' demand settled on the growth line — growing a
+  /// hair, decaying a hair, never built — held the cap full for good, and a
+  /// town whose homes were wanted twice over never zoned another lot.
+  /// Per use, stuck shops hold back only more shops, which is what the
+  /// demand sitting on the line says anyway. And a shop or works lot goods
+  /// cannot reach is never zoned: it would never grow, and would hold its
+  /// use's cap full the same way.
   String? _governorZone(IndependentGovernorTuning t) {
     const uses = [
       ParcelUse.residential,
@@ -486,14 +675,14 @@ extension IndependentGovernorSim on CitySim {
         };
     final plat = layout.roads.isNotEmpty;
     final zoned = {for (final u in uses) u: 0};
-    var pending = 0;
+    final pending = {for (final u in uses) u: 0};
     if (plat) {
       for (final p in layout.autoParcels) {
         if (!zoned.containsKey(p.use)) continue;
         zoned[p.use] = zoned[p.use]! + 1;
         if (!parcelBuildings.containsKey(p.id) &&
             (grownParcels[p.id] ?? 0) < CitySim.parcelConstructFrac) {
-          pending++;
+          pending[p.use] = pending[p.use]! + 1;
         }
       }
     } else {
@@ -504,13 +693,13 @@ extension IndependentGovernorSim on CitySim {
           _ => ParcelUse.industrial,
         };
         zoned[u] = zoned[u]! + 1;
-        if (!grown.contains(e.key)) pending++;
+        if (!grown.contains(e.key)) pending[u] = pending[u]! + 1;
       }
     }
-    if (pending >= t.maxPendingZones) return null;
     ParcelUse? best;
     var bestScore = 0.0;
     for (final u in uses) {
+      if (pending[u]! >= t.maxPendingZones) continue;
       final d = demandOf(u);
       if (d < CitySim.growThreshold) continue;
       final score = d / (1 + zoned[u]!);
@@ -521,10 +710,15 @@ extension IndependentGovernorSim on CitySim {
     }
     final use = best;
     if (use == null) return null;
-    final want = math.min(t.zonePerSitting, t.maxPendingZones - pending);
+    final want = math.min(t.zonePerSitting, t.maxPendingZones - pending[use]!);
     var n = 0;
     if (plat) {
-      for (final p in _freeLots().take(want).toList()) {
+      final goods = use != ParcelUse.residential;
+      final lots = _freeLots()
+          .where((p) => !goods || trafficReadout.deliveryReach(p.id))
+          .take(want)
+          .toList();
+      for (final p in lots) {
         if (layout.setUse(p.id, use)) n++;
       }
     } else {
@@ -542,4 +736,19 @@ extension IndependentGovernorSim on CitySim {
     if (n == 0) return null;
     return 'zoned $n ${CitySim.zoneKindOf(use)} lot${n == 1 ? '' : 's'}';
   }
+}
+
+/// The colony's life support as built, at full throttle — what
+/// [IndependentGovernorSim]'s shortage fix reads a shortage's cause off.
+class _LifePlant {
+  /// Per life commodity, what the served buildings would make of it at full
+  /// throttle, net of what every building would draw of it.
+  final Map<String, double> capacity = {};
+
+  /// The life-support buildings that make each commodity.
+  final Map<String, Set<CityBuildingSpec>> makers = {};
+
+  /// The watts life support draws at full throttle: it takes the first of
+  /// the colony's power, so this against `powerOut` says whether it is dark.
+  double draw = 0;
 }

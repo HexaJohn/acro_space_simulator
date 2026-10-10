@@ -66,7 +66,7 @@ extension _SimulationViewColony on _SimulationViewState {
       // road's deck is measured on. (A radius here would stand every deck
       // a planet's radius up.)
       _cityEdit.groundAt = (p) => _groundAtLocal(colony, p) - body.radius;
-      _cityEdit.set(CityEditTool.zone);
+      _cityEdit.enter(colony, CityEditTool.zone);
     });
   }
 
@@ -651,22 +651,9 @@ extension _SimulationViewColony on _SimulationViewState {
     // shrank it to whatever lot it landed on.
     final held = _cityEdit.selectedUtil;
     if (_cityEdit.tool == CityEditTool.utility && held.claimsOwnSite) {
-      final centre = Vec2(hit.east, hit.north);
-      rebuild(() {
-        // The control gate (secession §5), asked here as the editor's own
-        // tools ask it: this path stakes a plot without going through them.
-        if (!_cityEdit.mayActOn(city)) return;
-        if (!city.unlocked(held)) {
-          _cityEdit.blocked =
-              '${held.label} needs ${held.unlockPop} population.';
-          return;
-        }
-        // Graded either way: free build drops the slope gate, not the pad
-        // (see [CityEditController.ignoreTerrain]).
-        final claimed = city.claimSite(held, centre);
-        _cityEdit.blocked = claimed == null ? city.blocked : null;
-        if (claimed != null) city.attend(); // secession §3.3
-      });
+      // Behind the control gate (secession §5), inside the controller.
+      rebuild(() =>
+          _cityEdit.claimOwnSite(city, Vec2(hit.east, hit.north)));
       return;
     }
 

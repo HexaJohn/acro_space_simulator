@@ -310,7 +310,11 @@ when tapped, never silently dead:
 - `CityGameHud`: the Budget tax slider.
 - `city_site_actions.dart`: `gatedSiteAction` for meltdown, Design & launch, lander pad, relief and demolish;
   the delivery sheet stays readable but its add, edit, remove, reorder and save are refused.
-- `simulation_view_colony.dart`: the own-site `claimSite` path, through `CityEditController.mayActOn`.
+- `simulation_view_colony.dart`: the own-site `claimSite` path, now `CityEditController.claimOwnSite` so the
+  sweep reaches it. Opening the editor goes through `CityEditController.enter(colony, tool)`, which points the
+  gate at the colony being opened *before* picking the tool. Before this, `gateCity` was only set when the
+  toolbar built, so the opening tool was asked about the colony edited last: a colonial town opened after an
+  independent one showed that colony's refusal and kept its old tool. An independent colony opens on Look.
 - `CityBuilderScreen`: tap, drag-paint and rect fill for every tool, the tool chips, and calls phase 1 missed:
   the toolbar's Clear-all, Relief, Plant and Buy land, the lander menu's flag and launch, and the host's
   Pilot a landing / Launch in 3D rows. `_Tool` is now the public `CityBuilderTool` (with `acts`) so the sweep
@@ -328,6 +332,21 @@ paint, rect, lot, cell, click, right-click, spline commit, junction, adjust, ren
 the save, which includes the loyalty clock, so an act that still stamped attention fails too, plus the
 deliveries, lander pad, flag, relief and craft. A check during the build confirmed it fails when one gate is
 removed (editor zone, flat paint, site demolish).
+After review, the sweep was tightened so that every control it lists can actually fail:
+- The site sheet's hooks count their calls, and the test then makes the colony colonial and taps again to show
+  the hooks were reachable. A no-op `onOpenVab` cannot tell a bypass from a refusal.
+- Each gated row must carry the reason as its own subtitle. Before, one row anywhere on the sheet was enough.
+  Only Details, Target this pad and the delivery book are left ungated.
+- The flat builder's own site sheet (Pilot a landing, Launch in 3D sim, Design & launch) is driven on a grid
+  spaceport through `CityBuilderToolDriver.debugInspect`. A `NavigatorObserver` fails the test if any row
+  pushes a screen.
+- The fixture gets a cell-map building so the toolbar's Clear renders, and a missing toolbar control now fails
+  the test instead of being skipped.
+- The own-site claim is tried at a site that is known to be open, and then shown to build once the colony is
+  colonial again.
+Mutation-checked: removing the `gatedSiteAction` gate, the claim gate or the Clear gate each fails the sweep.
+The relief row stays doubly shut. Phase 1's `portHoldReason` already empties its action, so the gate's only
+visible effect there is the reason on its subtitle, and that is what the test asserts.
 
 **Independent governor (§4)**, `independent_governor.dart`, called from `CitySim.advance` right after the
 loyalty step and inert unless `allegiance == independent`:
@@ -336,29 +355,60 @@ loyalty step and inert unless `allegiance == independent`:
   load sits on the same days, and one warped step that spans boundaries sits once.
 - *Sitting*: auto-vote the laws (self-government already votes them every tick, so this is mostly a log line);
   move the tax at most ±0.05 toward the rate whose mood cost leaves happiness at 0.5; then **one** build, the
-  most urgent first: the cheapest affordable life-support building for food, water or (only where the sim
-  makes people breathe made oxygen; read, never changed) oxygen when own production is below need or the
-  colony is starving; then a landfill past waste backlog 0.3 with nothing taking garbage; then the cheapest
-  deathcare past max(3, 2% of the living) corpses with none. With nothing built, it zones up to 2 free served
-  street lots for the use with the highest `demand / (1 + lots already zoned for it)`, and stops while 2
-  zoned lots are still unbuilt. Scoring by raw demand zoned shops forever, because commercial demand sits
-  near 1 with no leisure.
+  most urgent first. Life support comes first: food, water, or oxygen (oxygen only where the sim makes people
+  breathe made oxygen; that rule is read, never changed) when own production is below need or the colony is
+  starving. Then a landfill past waste backlog 0.3 with nothing taking garbage, then the cheapest deathcare
+  past max(3, 2% of the living) corpses with none. With nothing built, it zones up to 2 free served street
+  lots for the use with the highest `demand / (1 + lots already zoned for it)`. Scoring by raw demand zoned
+  shops forever, because commercial demand sits near 1 with no leisure.
+- *What it builds for a shortage* (`_fixShortage`). The shortage is read off what was made, but the fix is
+  chosen against what the existing buildings could make at full throttle (`_LifePlant`). The first version
+  answered every short reading with another cheapest producer. With the power out, that built farm after
+  water plant that none of them could run, each adding draw to a dead grid, until the ore reached the
+  reserve. A reviewer's probe showed 395 ore spent on 10 dark buildings while the colony starved from 65 to
+  3.6. Now, in order:
+  1. If life support draws more watts than the colony makes, it builds the generator with the most watts per
+     ore that feeds on nothing (a new `GovernorActKind.power`).
+  2. If the existing producers are held back by staffing or compute (life throttle under 0.98 with power
+     covered), it builds nothing.
+  3. If the existing producers would cover the need at full throttle, it builds whatever they are starved of,
+     one input deep.
+  4. Otherwise it builds the cheapest producer whose inputs the colony makes enough of and whose draw the
+     grid can carry. If the input is short, it builds the input first, counting the new building's draw: a
+     water-short town gets a pump before another thirsty farm. If the grid cannot carry it, it builds the
+     generator first.
+- *Pending cap per use.* Zoning stops for a use while 2 of its lots are zoned and unbuilt, rather than while
+  any 2 are. Two shop lots stuck on the growth line (demand hovering at 0.2, growing a hair and decaying a
+  hair) held a single shared cap full for good. Shop and works lots that goods cannot reach are never zoned,
+  since they could never grow.
 - *Placement*: an ordinary building goes on the first free served street lot. A building that stakes its own
   plot (farm, landfill, aquifer) first reuses an empty staked plot big enough, such as the field a burned
   farm stood on, then searches for a site beside a road: off each side, past each end and at each corner of
   samples along every road, nearest the centre first, at most 400 checks, through the editor's own
   `siteBlockedReason`, and never covering a zoned or built street lot. Re-cutting the lots under it would
-  demolish them. A colony with no plat (the flat sandbox) uses the cell grid instead.
+  demolish them. "Covering" tests each kept lot's bounding box. The first version tested only its centroid,
+  and the new test caught a plot that missed two deep lots' centres, bit their back halves, and dropped both
+  in the re-cut. A colony with no plat (the flat sandbox) uses the cell grid instead.
 - *Budget*: ore only, since building costs ore, and never below a 10-ore reserve. It spends no money and
   never lays roads or demolishes.
 - *Log*: `governorLog` (bounded, display only, not saved; kept in an `Expando` beside the colony).
-- Tests (`test/colony/independent_governor_test.dart`): a seceded starter-kit Earth town stays alive and grows
-  over 40 days; it rebuilds a farm when food runs short; it never spends below its reserve or touches funds;
-  it does nothing to a colonial colony; its calendar survives a save.
+- Tests (`test/colony/independent_governor_test.dart`):
+  - a seceded starter-kit Earth town stays alive and grows over 40 days;
+  - it rebuilds a farm when food runs short;
+  - with the power out it builds a generator first and does not drain its ore;
+  - a water-starved town, on the plat or on the flat grid, gets water before another farm;
+  - a short-staffed farm gets no twin;
+  - the tax steps up, steps down and stops at the bearable rate;
+  - landfill and deathcare appear past their lines and not under them;
+  - zoning picks by demand per zoned lot, and stalled lots hold back only their own use;
+  - a new plot staked through `_findSite` keeps every zoned, grown or built lot's id, use and building;
+  - it never spends below its reserve or touches funds, and does nothing to a colonial colony;
+  - its calendar survives a save, and at least one sitting acts in the first window.
 
 **Independent HUD state.** `IndependencePanel` (`city_control_ui.dart`) shows "Independent since day N",
-the causes, what its council has done lately, and a placeholder **Reclaim** section saying the routes come in
-phase 3 (negotiate, win hearts) and phase 4 (force). It appears as a compact card under the City Game HUD's top
+the causes, what its council has done lately, and a placeholder **Reclaim** section ("Ways to win it back
+(negotiation, goodwill, force) are not available yet"). It is worded for players, not with the plan's phase
+numbers, because master ships to prod. It appears as a compact card under the City Game HUD's top
 bar, in full when the loyalty chip is tapped, and in the Politics drawer's LOYALTY section. Readouts stay live,
 and tools are greyed by the gate. The causes are saved: `CityLoyalty.independenceCauses` (`independentWhy` in
 the save), recorded at the declaration, because the live causes have moved on by the time anyone reads the panel.
@@ -373,13 +423,18 @@ the same rule.
 - Stretch not done: a **player-flown vessel** landing at a seized or independent pad has its cargo impounded
   (phase 1) but is **not held**. Holding it means locking a player vessel's throttle or launch, which is
   flight-side (input or `advance_simulation_tick.dart`) and invasive, so it is left for a later pass.
-- The governor builds no power, services or housing beyond zoning. A starter-kit town under it grows (6 → ~65
+- The governor builds power only when life support is dark, and no services or housing beyond zoning. A starter-kit town under it grows (6 → ~65
   settlers in 20 days in a debug run of the test fixture), but its mood sags to ~0.2 as services fall short
   and the tax goes to 0, and it can still revolt. It is dumb by design. Whether it should build a clinic or a
   generator is a tuning question for the user.
 - The governor's tax and phase 1's tax revolt both act on an independent colony (stage `seceded` is
   self-governing). The revolt only pulls down; the governor can also raise it, a step per sitting.
 - The governor's log is not saved; the panel's "its council" list restarts after a load.
+- A starter-kit town under the governor levels off at about 64 settlers after roughly 20 days. This is not
+  the pending cap: it is the sim's own RCI balance. Residential demand is `0.2 + (jobs − housing)/120`, so it
+  sits on the 0.2 growth line once homes match jobs, and commercial demand `1 − leisure/pop` sits there too.
+  New lots of either use flicker around the line and never build. Breaking this needs the governor to add
+  jobs or services, a design question left with the user.
 - Phase 2 leaves `airO2`, oxygen consumption and the sufficiency/breathable rules untouched (the terraforming
   lane owns them); the governor only reads `airO2` and `breathable` to decide whether oxygen is short.
 

@@ -115,10 +115,11 @@ class IndependencePanel extends StatelessWidget {
           if (!compact) ...[
             const SizedBox(height: 8),
             Text('RECLAIM', style: AppTheme.dim.copyWith(fontSize: 10)),
+            // Player-facing: in-world words, not the plan's phase numbers.
             Text(
-                'No way back yet. Negotiating terms, and winning its people '
-                'back through how well your other colonies are run, come in '
-                'phase 3; retaking it by force comes in phase 4.',
+                'Ways to win it back (negotiation, goodwill, force) are not '
+                'available yet.',
+                key: const ValueKey('independence-reclaim'),
                 style: AppTheme.dim),
           ],
         ],

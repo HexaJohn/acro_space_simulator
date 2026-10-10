@@ -90,6 +90,10 @@ enum CityBuilderTool {
 @visibleForTesting
 abstract interface class CityBuilderToolDriver {
   void debugUseTool(CityBuilderTool tool, int x, int y);
+
+  /// A single Look tap on cell ([x], [y]): the building's site sheet, with
+  /// this screen's own rows (Pilot a landing, Launch in 3D sim), opens.
+  void debugInspect(int x, int y);
 }
 
 /// How the zone/road tools apply: one tile per tap, continuous drag-paint, or
@@ -355,6 +359,12 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     _rectStart = null;
     _rectHover = null;
     _fillRect(k, k);
+  }
+
+  @override
+  void debugInspect(int x, int y) {
+    setState(() => _tool = CityBuilderTool.inspect);
+    _onTapCell(x, y);
   }
 
   void _onTapCell(int x, int y) {

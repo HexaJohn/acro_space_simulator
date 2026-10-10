@@ -159,6 +159,24 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   /// usable until the click.
   CitySim? gateCity;
 
+  /// Opens the editor over [city]: the colony the gate asks about from now
+  /// on, holding [preferred] when [city] takes orders or [preferred] only
+  /// looks, else Look — with no refusal carried over from the colony edited
+  /// before.
+  ///
+  /// [gateCity] is otherwise set when the toolbar builds, which is after
+  /// the host picks the opening tool: asked then, the gate answered for the
+  /// LAST colony edited, so a colonial town opened after an independent one
+  /// wore that one's refusal and kept its old tool, and an independent town
+  /// opened after a colonial one came up holding a greyed Zone.
+  void enter(CitySim city, CityEditTool preferred) {
+    gateCity = city;
+    blocked = null;
+    set(!preferred.acts || city.playerControl.allowed
+        ? preferred
+        : CityEditTool.inspect);
+  }
+
   /// Whether an acting tool may be picked up. Refused, the toolbar's
   /// blocked line says why.
   bool _mayHold() {
@@ -214,6 +232,31 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
       case CityEditTool.support:
         return;
     }
+  }
+
+  /// Stake the held installation's own plot on [city] at [centre] and build
+  /// it: the path a sprawling building (a 780 m solar farm, a quarry) takes
+  /// in place of a lot, since no subdivided lot could hold it. Whether it
+  /// built; refused, [blocked] says why.
+  ///
+  /// Here rather than in the host's tap handler so the control gate's sweep
+  /// reaches it: it stakes a plot without going through [applyToLot].
+  bool claimOwnSite(CitySim city, Vec2 centre) {
+    blocked = null;
+    if (!mayActOn(city)) return false;
+    final held = selectedUtil;
+    if (!city.unlocked(held)) {
+      blocked = '${held.label} needs ${held.unlockPop} population.';
+      notifyListeners();
+      return false;
+    }
+    // Graded either way: free build drops the slope gate, not the pad
+    // (see [ignoreTerrain]).
+    final claimed = city.claimSite(held, centre);
+    blocked = claimed == null ? city.blocked : null;
+    if (claimed != null) city.attend(); // secession §3.3
+    notifyListeners();
+    return claimed != null;
   }
 
   ParcelUse _useForKind() => switch (zoneKind) {
