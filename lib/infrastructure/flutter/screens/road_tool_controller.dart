@@ -687,6 +687,7 @@ mixin RoadToolEditing on ChangeNotifier {
       return false;
     }
     lastRoadId = r.roadId;
+    city.attend(); // an act of governance (secession §3.3)
     final line = snapped.controls;
     // The chain carries the deck on only where its end is off the ground.
     // A ramp brought back down ends AT GRADE, and the next stretch is laid
@@ -793,6 +794,7 @@ mixin RoadToolEditing on ChangeNotifier {
     lastQuote = q;
     lastRoadId = id;
     blocked = q.ok ? null : q.reason;
+    if (q.ok) city.attend();
     // Re-quoted on the next hover: the road is not what it was.
     upgradeRoadId = null;
     upgradeQuote = null;
@@ -806,6 +808,7 @@ mixin RoadToolEditing on ChangeNotifier {
     if (id == null) return false;
     final ok = city.reverseRoad(id);
     blocked = ok ? null : city.blocked;
+    if (ok) city.attend();
     upgradeRoadId = null;
     upgradeQuote = null;
     changed();
@@ -861,6 +864,7 @@ mixin RoadToolEditing on ChangeNotifier {
       return;
     }
     lastRoadId = r.roadId;
+    city.attend();
     pending.clear();
     previewGradePct = null;
     blocked = null;
@@ -928,6 +932,7 @@ mixin RoadToolEditing on ChangeNotifier {
         return false;
       }
       city.setJunctionOverride(current.copyWith(lights: !plan.lights));
+      city.attend();
       blocked = null;
       changed();
       return true;
@@ -962,6 +967,7 @@ mixin RoadToolEditing on ChangeNotifier {
       if (!had) node.legs[best].heading,
     ];
     city.setJunctionOverride(current.copyWith(stopHeadings: stops));
+    city.attend();
     blocked = null;
     changed();
     return true;
@@ -1102,6 +1108,7 @@ mixin RoadToolEditing on ChangeNotifier {
       blocked = null;
       lastRoadId = newId;
       selectedRoadId = _pieceNear(city, newId, end) ?? selectedRoadId;
+      city.attend();
     }
     changed();
     return r;
@@ -1188,6 +1195,7 @@ mixin RoadToolEditing on ChangeNotifier {
     if (id == null) return false;
     final trimmed = name.trim();
     final ok = city.renameRoad(id, trimmed.isEmpty ? null : trimmed);
+    if (ok) city.attend();
     changed();
     return ok;
   }

@@ -13,7 +13,7 @@
 // than the split is worth today.
 part of 'simulation_view.dart';
 
-extension SimulationViewColony on _SimulationViewState {
+extension _SimulationViewColony on _SimulationViewState {
   /// Found a colony where the landed [v] sits.
   ///
   /// The colony is registered with the WORLD, not handed to a screen. It then
@@ -662,6 +662,7 @@ extension SimulationViewColony on _SimulationViewState {
         // (see [CityEditController.ignoreTerrain]).
         final claimed = city.claimSite(held, centre);
         _cityEdit.blocked = claimed == null ? city.blocked : null;
+        if (claimed != null) city.attend(); // secession §3.3
       });
       return;
     }

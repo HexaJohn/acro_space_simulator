@@ -1682,8 +1682,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // altitude are opened up to match a camera that stands back.
       ScatterNodes.anchorAtFocus = true;
       ScatterNodes.viewDistanceScale =
-          SimulationViewColony.cityScatterRangeScale;
-      ScatterNodes.maxAltitudeM = SimulationViewColony.cityScatterMaxAltitudeM;
+          _SimulationViewColony.cityScatterRangeScale;
+      ScatterNodes.maxAltitudeM = _SimulationViewColony.cityScatterMaxAltitudeM;
       // A wider region is more cells to fill, and this mode has the cores to
       // fill them with: nothing is flying, so the main isolate is not
       // competing with physics for them. Both are in-flight caps, not
@@ -2392,8 +2392,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         _view = _view.copyWith(
           azimuth: _view.azimuth + az,
           elevation: (_view.elevation + el).clamp(
-              SimulationViewColony.cityCameraMinElevation,
-              SimulationViewColony.cityCameraMaxElevation),
+              _SimulationViewColony.cityCameraMinElevation,
+              _SimulationViewColony.cityCameraMaxElevation),
         );
       } else if (_freecam) {
         // FPS-style look: the EYE stays put and the view direction pans —

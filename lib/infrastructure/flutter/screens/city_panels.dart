@@ -20,10 +20,12 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/planetary/planet_surface.dart';
 import '../../../domain/universe/celestial_body.dart';
 import 'app_theme.dart';
+import 'city_loyalty_ui.dart';
 import 'city_model.dart';
 import 'city_site_actions.dart';
 
@@ -265,7 +267,59 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         _socialBar('Inequality', sim.inequality, const Color(0xFFE3A857)),
         _socialBar('Rebellion', sim.rebellion, AppTheme.danger),
         _socialBar('Disease', sim.disease, const Color(0xFF9CCC65)),
+        const SizedBox(height: 12),
+        const Text('LOYALTY', style: AppTheme.heading),
+        const SizedBox(height: 6),
+        ..._loyaltyRows(),
       ];
+
+  /// Loyalty, its stage and causes, and how close the colony is to being
+  /// able to leave (docs/plans/colony-secession.md §3). Tap for the full
+  /// explanation.
+  List<Widget> _loyaltyRows() {
+    final l = sim.loyalty;
+    final colour = switch (l.stage) {
+      LoyaltyStage.loyal => AppTheme.accent2,
+      LoyaltyStage.restless => AppTheme.warn,
+      _ => AppTheme.danger,
+    };
+    return [
+      InkWell(
+        onTap: () => explainLoyalty(context, sim),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(
+                child: Text(
+                    l.allegiance == Allegiance.independent
+                        ? 'Independent'
+                        : l.stage.label,
+                    style: AppTheme.body.copyWith(color: colour))),
+            Text('${(l.level * 100).round()}%',
+                style: AppTheme.mono.copyWith(color: colour)),
+            const SizedBox(width: 4),
+            Icon(Icons.info_outline, size: 13, color: colour),
+          ]),
+          const SizedBox(height: 3),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+                value: l.level.clamp(0.0, 1.0),
+                minHeight: 5,
+                backgroundColor: AppTheme.panelLight,
+                color: colour),
+          ),
+          const SizedBox(height: 3),
+          Text(sim.loyaltyCauses().join('; '), style: AppTheme.dim),
+        ]),
+      ),
+      _statRow('Self-sufficiency',
+          '${(l.selfSufficiency * 100).round()}% / ${(l.independenceBar * 100).round()}%'),
+      _statRow('Desperation', '${(l.desperation * 100).round()}%'),
+      if (l.portHoldReason != null)
+        Text('Spaceport: ${l.portHoldReason}',
+            style: AppTheme.dim.copyWith(color: AppTheme.danger)),
+    ];
+  }
   /// Corpses + death-rate readout — a CITY metric (vital stats), not politics.
   ///
   /// Rows render whenever the colony is populated (not gated on the live value)
@@ -964,7 +1018,10 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         children: [
           for (final e in Economy.values)
             _pill(e.label, sim.economy == e, AppTheme.accent,
-                () => setState(() => sim.economy = e)),
+                () => setState(() {
+                      sim.economy = e;
+                      sim.attend(); // an act of governance (secession §3.3)
+                    })),
         ],
       );
   Widget _govtPicker() => Wrap(
@@ -974,6 +1031,7 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
           for (final g in Govt.values)
             _pill(g.label, sim.govt == g, AppTheme.accent2, () => setState(() {
                   sim.govt = g;
+                  sim.attend();
                   if (g.lawsAutoVoted) sim.autoVote();
                 })),
         ],
@@ -1012,7 +1070,12 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
           child: Slider(
               value: tax.clamp(0.0, 0.4),
               max: 0.4,
-              onChanged: controllable ? (v) => setState(() => sim.taxRate = v) : null),
+              onChanged: controllable
+                  ? (v) => setState(() {
+                        sim.taxRate = v;
+                        sim.attend();
+                      })
+                  : null),
         ),
       ]),
     );
@@ -1044,8 +1107,10 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
               Switch(
                   value: sim.laws.contains(l),
                   activeThumbColor: AppTheme.accent2,
-                  onChanged: (v) =>
-                      setState(() => v ? sim.laws.add(l) : sim.laws.remove(l))),
+                  onChanged: (v) => setState(() {
+                        v ? sim.laws.add(l) : sim.laws.remove(l);
+                        sim.attend();
+                      })),
           ]),
         ),
     ];
