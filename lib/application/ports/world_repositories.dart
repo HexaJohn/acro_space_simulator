@@ -40,7 +40,8 @@ abstract class CityRepository {
 /// Every body's gas inventory (docs/plans/terraforming.md §3.1): the air as
 /// world state, which the tick integrates and republishes onto the bodies.
 abstract class AtmosphereRepository {
-  /// [bodyId]'s inventory, or null for a body with no air to change.
+  /// [bodyId]'s inventory, or null for a body that cannot hold a sky (the
+  /// star, the giants). An airless world has one, empty.
   PlanetAtmosphere? forBody(String bodyId);
 
   /// Every inventory, in body-id order — the tick, the save and the

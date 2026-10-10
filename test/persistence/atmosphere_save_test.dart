@@ -12,6 +12,8 @@ import 'package:acro_space_simulator/application/persistence/game_state_codec.da
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/planetary/atmospheric_composition.dart';
+import 'package:acro_space_simulator/domain/planetary/planet_atmosphere.dart';
+import 'package:acro_space_simulator/domain/planetary/planet_atmosphere_service.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
@@ -88,15 +90,49 @@ void main() {
     // And the rebuilt universe carries that air, not the reference.
     final body = after.universe.current().require(mars);
     expect(body.atmosphere!.seaLevelPressure,
-        closeTo(state.air.seaLevelPressure, 1e-9));
+        closeTo(state.air!.seaLevelPressure, 1e-9));
     expect(body.composition!.fractions[AtmosphereGas.oxygen],
-        closeTo(state.composition.fractions[AtmosphereGas.oxygen]!, 1e-12));
+        closeTo(state.composition!.fractions[AtmosphereGas.oxygen]!, 1e-12));
     // Untouched worlds keep their reference air — the very same (const)
     // model the system definition built.
     final earth = after.universe.current().require(const BodyId('earth'));
     expect(
         identical(earth.atmosphere,
             RealSolarSystem.build().require(const BodyId('earth')).atmosphere),
+        isTrue);
+  });
+
+  test("a warmed Mars's stores, agent and leaking Moon survive a load", () {
+    // Terraforming phase 2: the caps and soil, the super-greenhouse agent
+    // and an airless world's vented sky are state too.
+    final before = freshWorld();
+    final state = before.air.forBody('mars')!;
+    state.greenhouseAgentMoles =
+        3 / (PlanetAtmosphere.agentMolarMass * state.pascalsPerKg);
+    const PlanetAtmosphereService()
+        .advance(state, AtmosphereFlows(), dt: 10 * 686.98 * 86400);
+    final moon = before.air.forBody('moon')!
+      ..add(AtmosphereGas.oxygen, 1e17)
+      ..escapeSuppression = 0.5;
+    final json = save(before.air, before.cities);
+
+    final after = freshWorld();
+    load(json, after);
+    final restored = after.air.forBody('mars')!;
+    expect(restored.greenhouseAgentMoles, state.greenhouseAgentMoles);
+    for (var i = 0; i < state.reservoirs.length; i++) {
+      expect(restored.reservoirs[i].moles, state.reservoirs[i].moles,
+          reason: state.reservoirs[i].name);
+      expect(restored.reservoirs[i].moles,
+          isNot(restored.reservoirs[i].referenceMoles),
+          reason: 'the warming moved it');
+    }
+    expect(after.universe.current().require(mars).atmosphere!
+        .seaLevelTemperature, closeTo(state.surfaceTemperatureK, 1e-9));
+    final lunar = after.air.forBody('moon')!;
+    expect(lunar.molesOf(AtmosphereGas.oxygen), moon.molesOf(AtmosphereGas.oxygen));
+    expect(lunar.escapeSuppression, 0.5);
+    expect(after.universe.current().require(const BodyId('moon')).hasAtmosphere,
         isTrue);
   });
 

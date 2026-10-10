@@ -123,9 +123,15 @@ class CelestialBody {
   /// Returns a copy with selected fields replaced. Used by debug/terraforming
   /// tools that re-skin a body's atmosphere (its composition + air model) at
   /// runtime to show the render react to a chemistry change.
+  ///
+  /// [clearAtmosphere] / [clearComposition] drop the field instead: a null
+  /// argument means "keep", so without them a world whose vented air has
+  /// leaked away could never be published airless again.
   CelestialBody copyWith({
     AtmosphereModel? atmosphere,
     AtmosphericComposition? composition,
+    bool clearAtmosphere = false,
+    bool clearComposition = false,
   }) =>
       CelestialBody(
         id: id,
@@ -141,14 +147,15 @@ class CelestialBody {
         orbitInclination: orbitInclination,
         orbitLongitudeAscending: orbitLongitudeAscending,
         orbitArgPeriapsis: orbitArgPeriapsis,
-        atmosphere: atmosphere ?? this.atmosphere,
+        atmosphere: clearAtmosphere ? null : (atmosphere ?? this.atmosphere),
         solarFlux: solarFlux,
         axialTilt: axialTilt,
         orbitsParentEquator: orbitsParentEquator,
         j2: j2,
         dipoleMoment: dipoleMoment,
         surface: surface,
-        composition: composition ?? this.composition,
+        composition:
+            clearComposition ? null : (composition ?? this.composition),
         terrain: terrain,
       );
 

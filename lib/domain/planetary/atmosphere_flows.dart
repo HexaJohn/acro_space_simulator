@@ -38,6 +38,11 @@ class AtmosphereFlows {
   /// Terraforming-tower running time: Σ throttle × seconds.
   double oxygenatorRun = 0;
 
+  /// Oxygen the colonies' Atmospheric Harvesters drew out of the sky into
+  /// their stock, in the city's stock units (Σ stock/s × seconds). The
+  /// integration converts it to moles and takes it OUT of the air.
+  double o2Harvested = 0;
+
   /// Seconds each colony's recorded steps cover, by colony id.
   final Map<String, double> _seconds = {};
 
@@ -58,20 +63,27 @@ class AtmosphereFlows {
     return s;
   }
 
-  bool get isEmpty => pollution == 0 && emission == 0 && oxygenatorRun == 0;
+  bool get isEmpty =>
+      pollution == 0 &&
+      emission == 0 &&
+      oxygenatorRun == 0 &&
+      o2Harvested == 0;
 
-  /// One step of the colony [colony]: [pollutionRate] (its `emissionRate`)
-  /// and [oxygenatorRun] (Σ tower throttle) held for [dt] seconds.
+  /// One step of the colony [colony]: [pollutionRate] (its `emissionRate`),
+  /// [oxygenatorRun] (Σ tower throttle) and [o2HarvestRate] (stock units/s
+  /// its harvesters made) held for [dt] seconds.
   void addColony({
     required double pollutionRate,
     required double oxygenatorRun,
     required double dt,
+    double o2HarvestRate = 0,
     String colony = '',
   }) {
     if (dt <= 0) return;
     pollution += pollutionRate * dt;
     emission += math.max(0.0, pollutionRate) * dt;
     this.oxygenatorRun += math.max(0.0, oxygenatorRun) * dt;
+    o2Harvested += math.max(0.0, o2HarvestRate) * dt;
     _seconds[colony] = (_seconds[colony] ?? 0) + dt;
   }
 
@@ -79,6 +91,7 @@ class AtmosphereFlows {
     'pollution': pollution,
     'emission': emission,
     'tower': oxygenatorRun,
+    if (o2Harvested != 0) 'harvest': o2Harvested,
     'seconds': {
       for (final id in (_seconds.keys.toList()..sort())) id: _seconds[id],
     },
@@ -89,7 +102,8 @@ class AtmosphereFlows {
     final f = AtmosphereFlows()
       ..pollution = read('pollution')
       ..emission = math.max(0.0, read('emission'))
-      ..oxygenatorRun = math.max(0.0, read('tower'));
+      ..oxygenatorRun = math.max(0.0, read('tower'))
+      ..o2Harvested = math.max(0.0, read('harvest'));
     final seconds = (json['seconds'] as Map?) ?? const {};
     for (final e in seconds.entries) {
       final v = e.value;

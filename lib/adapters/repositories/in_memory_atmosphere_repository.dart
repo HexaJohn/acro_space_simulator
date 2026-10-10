@@ -21,7 +21,10 @@ class InMemoryAtmosphereRepository implements AtmosphereRepository {
     }
   }
 
-  /// An inventory for every body in [system] that has air to change.
+  /// An inventory for every body in [system] that can hold a sky: every
+  /// world with reference air, and (since escape, phase 2) every airless
+  /// rocky one, seeded empty — gas vented there leaks away rather than
+  /// vanishing on the spot. Not the star or the giants.
   factory InMemoryAtmosphereRepository.seeded(StarSystem system) =>
       InMemoryAtmosphereRepository([
         for (final b in system.all) ?PlanetAtmosphere.seed(b),

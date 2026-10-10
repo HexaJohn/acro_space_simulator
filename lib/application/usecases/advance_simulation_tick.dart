@@ -564,6 +564,7 @@ class AdvanceSimulationTick {
     state.pendingFlows.addColony(
       pollutionRate: city.emissionRate,
       oxygenatorRun: city.oxygenatorRun,
+      o2HarvestRate: city.o2HarvestRate,
       dt: dt,
       colony: city.id,
     );
@@ -575,11 +576,12 @@ class AdvanceSimulationTick {
   /// Against the real mole count of an atmosphere, so the answer is honest
   /// rather than arbitrary: an Earth-thick sky absorbs a colony without
   /// noticing, a Mars-thin one does not. Bodies with no colony still advance
-  /// — their haze settles.
+  /// — their haze settles, their gas leaks, their caps answer the warmth —
+  /// until they are back at rest.
   void _advanceAtmospheres(double dt) {
     for (final state in atmosphere.all()) {
+      if (state.isAtRest) continue;
       final flows = state.takePendingFlows();
-      if (flows == null && state.aerosolBurden == 0) continue;
       planetAtmosphere.advance(state, flows ?? AtmosphereFlows(), dt: dt);
       atmosphere.save(state);
       if (!state.needsPublish()) continue;

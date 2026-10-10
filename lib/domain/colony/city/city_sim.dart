@@ -624,10 +624,7 @@ class CitySim {
 
   /// Wind effectiveness: ∝ atmospheric density (airless bodies = ~0, thick
   /// atmospheres = more), normalised so Earth = 1.0 and capped.
-  double get windFactor {
-    final d = body.atmosphere?.seaLevelDensity ?? 0;
-    return (d / earthDensity).clamp(0.0, 3.0);
-  }
+  double get windFactor => sky.airDensity.clamp(0.0, 3.0);
 
   /// Daylight level 0 (deep night) .. 1 (noon), a smooth sun curve over the day
   /// phase. Sunrise ~0.25, noon 0.5, sunset ~0.75. Used to tint the map + switch
@@ -639,41 +636,68 @@ class CitySim {
     return (s * s).clamp(0.0, 1.0);
   }
 
-  /// O2 mole fraction of the host atmosphere (0 if airless / no data).
-  double get o2Fraction =>
-      body.composition?.fractions[AtmosphereGas.oxygen] ?? 0;
+  /// The planet's air where this colony stands: [SurfaceConditions] of the
+  /// body's DERIVED air (its gas inventory and greenhouse temperature), with
+  /// none of the colony's own damage blended in. What life support, the
+  /// sky's oxygen cover and the weather read (docs/plans/terraforming.md
+  /// §3.4).
+  ///
+  /// Not [surface]: that adds the colony's local smog to the toxicity, and
+  /// smog is a health hazard (masks, disease), not a missing gas — an Earth
+  /// town whose pollution hovered near 180 flipped between free air and
+  /// suffocation every few ticks as its toxicity crossed 0.2. Colonies on
+  /// one world share one sky (§7 Q5); their smog is their own.
+  SurfaceConditions get sky =>
+      SurfaceConditions.of(body, biome: biome, waterTable: waterTable);
+
+  /// O2 mole fraction of the host atmosphere (0 if airless / no data): the
+  /// body's derived air, through [sky].
+  double get o2Fraction => sky.o2Fraction;
 
   /// Breathable worlds (Earth-like O2 + real atmosphere) supply oxygen for free
   /// — no city oxygen production needed.
   ///
-  /// Half an atmosphere at least, as [SurfaceConditions.breathable] has it:
-  /// with the body's air now mutable, a Mars vented to 0.17 atm of nearly
-  /// pure oxygen passes the density and fraction tests alone, and nobody
-  /// breathes that without a suit.
-  bool get breathable =>
-      (body.atmosphere?.seaLevelDensity ?? 0) > 0.3 &&
-      (body.atmosphere?.seaLevelPressure ?? 0) >= 0.5 * 101325 &&
-      o2Fraction >= 0.15;
+  /// [SurfaceConditions.breathable] on the body's DERIVED air ([sky],
+  /// docs/plans/terraforming.md §3.4): o2 ≥ 0.15, at least half an
+  /// atmosphere, gas toxicity under 0.2 — the one definition, so life
+  /// support, sealed tubes, agents and disasters can no longer disagree
+  /// about the same sky. A Mars vented to 0.17 atm of nearly pure oxygen
+  /// fails it (too thin).
+  bool get breathable => sky.breathable;
 
   /// The share of a colonist's oxygen the sky supplies, 0..1 — what makes
   /// the air a LOCAL source in the self-sufficiency measure
-  /// (docs/plans/colony-secession.md §3.4). All or nothing for now, on
-  /// [breathable]; docs/plans/terraforming.md §3.4 replaces it with the
-  /// share the body's real, mutable O2 partial pressure supplies, so a
-  /// thickening Mars sky counts for more as its towers work.
+  /// (docs/plans/colony-secession.md §3.4) and what life support no longer
+  /// has to make (docs/plans/terraforming.md §3.4):
+  /// `clamp(pO2 / 0.16 atm)` above the Armstrong limit in non-toxic air
+  /// ([SurfaceConditions.oxygenCover]), and all of it where the air is
+  /// [breathable].
   ///
-  /// It stays all-or-nothing until life support itself charges
-  /// `population × (1 − airO2)`: oxygen use below is still full whenever
-  /// O2 is managed, so a partial share here would let a half-terraformed
-  /// colony count sky it cannot breathe — measure itself self-sufficient,
-  /// keep a standoff population its plants cannot feed, and suffocate.
-  /// Switch both together (terraforming phase 2).
-  double get airO2 => breathable ? 1.0 : 0.0;
+  /// The three uses switched TOGETHER in terraforming phase 2: life support
+  /// charges `population × (1 − airO2)`, the independence measure counts
+  /// `airO2` of the need as local, and the standoff's supportable head count
+  /// divides by the `(1 − airO2)` left unmet. Any one alone lets a
+  /// half-oxygenated colony count sky it cannot breathe — measure itself
+  /// self-sufficient, keep a population its plants cannot supply, and
+  /// suffocate — or, the other way, buy oxygen its sky already gives.
+  double get airO2 {
+    final s = sky;
+    return s.breathable ? 1.0 : s.oxygenCover;
+  }
 
   /// Can an atmospheric harvester pull O2 here? (Some breathable-enough O2 in a
-  /// real atmosphere, but not free-breathable.)
-  bool get o2Harvestable =>
-      (body.atmosphere?.seaLevelDensity ?? 0) > 0.05 && o2Fraction >= 0.02;
+  /// real atmosphere, but not free-breathable.) Read off the derived air, so
+  /// a sky the harvesters have thinned below 2% oxygen stops yielding.
+  bool get o2Harvestable {
+    final s = sky;
+    return s.airDensity * earthDensity > 0.05 && s.o2Fraction >= 0.02;
+  }
+
+  /// Oxygen this tick's Atmospheric Harvesters drew from the sky, stock
+  /// units per second. The planetary-atmosphere phase takes it OUT of the
+  /// body's inventory, so harvesting thins the sky everyone on the world
+  /// breathes (docs/plans/terraforming.md, phase 2).
+  double o2HarvestRate = 0;
 
   /// Per-biome economic buffs/debuffs. Multipliers on food/water/ore/solar
   /// production + a flat happiness + pollution-scrub modifier.
@@ -1418,6 +1442,10 @@ class CitySim {
     //    building's outputs if its inputs can't be met (no free lunch).
     var pollutionRate = 0.0;
     var towerRun = 0.0;
+    // Atmospheric Harvesters only yield from a sky with oxygen in it, and
+    // what they make they take out of it.
+    final skyO2 = o2Harvestable;
+    var harvested = 0.0;
     final emissionCut = has(Law.emissionsCap) ? 0.5 : 1.0;
     // What the buildings make, net of what they use, of each life-support
     // commodity, per second: the supply side of [supportablePop].
@@ -1442,7 +1470,7 @@ class CitySim {
       s.inputs.forEach((k, v) {
         if (stockOf(k) < v * th * dt) canRun = false;
       });
-      final run = canRun ? th : 0.0;
+      final run = canRun && (s.type != 'o2harvester' || skyO2) ? th : 0.0;
       if (s.type == 'terraformer') towerRun += run;
       s.inputs.forEach((k, v) {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
@@ -1452,6 +1480,7 @@ class CitySim {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
         flow(k, made, isLifeSupport(s));
+        if (s.type == 'o2harvester' && k == Commodity.oxygen) harvested += made;
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
@@ -1466,7 +1495,8 @@ class CitySim {
       s.inputs.forEach((k, v) {
         if (stockOf(k) < v * th * uf * dt) canRun = false;
       });
-      final run = canRun ? th * uf : 0.0;
+      final run =
+          canRun && (s.type != 'o2harvester' || skyO2) ? th * uf : 0.0;
       if (s.type == 'terraformer') towerRun += run;
       s.inputs.forEach((k, v) {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
@@ -1476,12 +1506,14 @@ class CitySim {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
         flow(k, made, isLifeSupport(s));
+        if (s.type == 'o2harvester' && k == Commodity.oxygen) harvested += made;
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
 
     emissionRate = pollutionRate;
     oxygenatorRun = towerRun;
+    o2HarvestRate = harvested;
 
     // 1.4 Pollution accumulates (industry/power emit, parks + low activity decay).
     var parks = 0.0;
@@ -1548,7 +1580,10 @@ class CitySim {
     // Oxygen is a managed system only at COMPLEXITY >= 0.3 (and off breathable
     // worlds). Below that, life support ignores it for a gentler game.
     final o2Managed = systemOn(0.3) && !breathable;
-    final o2PerSec = o2Managed ? population * waterPerPersonPerSec : 0.0;
+    // What a colonist needs that the sky does not give (§3.4): a thin,
+    // oxygen-rich sky is drawn through compressors and counts for its share.
+    final o2PerPerson = waterPerPersonPerSec * (1 - airO2);
+    final o2PerSec = o2Managed ? population * o2PerPerson : 0.0;
     if (!o2Managed) {
       stock[Commodity.oxygen] = stockCap; // free / not tracked
     } else {
@@ -1563,14 +1598,14 @@ class CitySim {
     double supported(double runway) {
       var people = double.infinity;
       void need(String c, double perPerson, bool managed) {
-        if (!managed) return;
+        if (!managed || perPerson <= 0) return;
         final perSec = math.max(0.0, (lifeNet[c] ?? 0) + stockOf(c) / runway);
         people = math.min(people, perSec / perPerson);
       }
 
       need(Commodity.food, foodPerPersonPerSec, true);
       need(Commodity.water, waterPerPersonPerSec, true);
-      need(Commodity.oxygen, waterPerPersonPerSec, o2Managed);
+      need(Commodity.oxygen, o2PerPerson, o2Managed);
       return people;
     }
 
@@ -2166,14 +2201,23 @@ class CitySim {
   /// Environment tick: disasters, radiation, nuclear winter, terraforming.
   /// Whether the host body has a real (weather-bearing) atmosphere — required
   /// for wind/precip-type events. Airless/near-vacuum worlds get no weather.
-  bool get hasWeatherAir => (body.atmosphere?.seaLevelDensity ?? 0) > 0.05;
+  /// Read off the derived air ([sky]), so a sky a colony has thickened
+  /// grows weather and one that has leaked away loses it.
+  bool get hasWeatherAir => sky.airDensity * earthDensity > 0.05;
 
   // --- World-condition flags driving the exotic, condition-based disasters. ---
   /// Scorching world (close to the Sun / runaway greenhouse) — Venus, Mercury.
-  bool get isHot => solarFactor > 1.6 || (co2Fraction > 0.5 && hasWeatherAir);
+  /// By the derived surface temperature now that the air has one (it used to
+  /// be "mostly CO2 with weather", which a CO2-thickened 230 K Mars would
+  /// pass): over 330 K with weather, the [SurfaceConditions.summary]
+  /// "Scorching" band.
+  bool get isHot =>
+      solarFactor > 1.6 || (sky.temperatureK > 330 && hasWeatherAir);
   /// Cryogenic world (very far from the Sun, icy) — outer moons, Pluto-likes.
   bool get isFrozen => solarFactor < 0.15;
   /// Hydrogen/methane/ammonia-rich reducing atmosphere — gas/ice giants & moons.
+  /// The body's composition is the derived mix (republished as the inventory
+  /// moves), so this and [co2Fraction] follow the real air.
   bool get hasReducingAtmo {
     final f = body.composition?.fractions;
     if (f == null) return false;

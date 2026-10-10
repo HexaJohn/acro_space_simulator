@@ -67,7 +67,7 @@ void main() {
     );
 
     final marsAir = mars.atmosphere!;
-    final changed = state.air;
+    final changed = state.air!;
 
     expect(state.isMeasurable, isTrue);
     // Mars is already almost pure CO2, so adding more barely moves the mean
