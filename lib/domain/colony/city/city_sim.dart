@@ -605,7 +605,8 @@ class CitySim {
   // powered first, everything else shares what is left (see the tick).
   double lifeThrottle = 1.0, restThrottle = 1.0;
   // People the colony can keep fed, watered and breathing: what it makes of
-  // each, net of what its buildings use, plus the stockpile drawn down over
+  // each, net of what its buildings use, plus the freight booked to bring it
+  // ([bookedLifeImports]), plus the stockpile drawn down over
   // [settleRunwaySec]. Infinite until the first tick has measured it.
   double supportablePop = double.infinity;
   double powerOut = 0, powerDraw = 0;
@@ -1539,6 +1540,10 @@ class CitySim {
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
     }
+
+    // The freighters the player has booked are supply too, if never local
+    // ([bookedLifeImports]).
+    bookedLifeImports().forEach((c, perSec) => flow(c, perSec, false));
 
     emissionRate = pollutionRate;
     oxygenatorRun = towerRun;
@@ -5122,6 +5127,27 @@ class CitySim {
         'grownParcels': Map<String, double>.from(grownParcels),
         'shuttleInterval': shuttleIntervalSec,
         'nextShuttle': nextShuttleEpoch,
+        // The player's booked runs, by spaceport site: logistics the player
+        // MADE, and on an off-world starter colony the air it breathes — a
+        // load that dropped them suffocated the town it restored. Omitted
+        // when nothing is booked, so such a colony saves as it always has.
+        // The craft on the pads are transient and are not saved.
+        if (deliveries.isNotEmpty)
+          'deliveries': {
+            for (final e in deliveries.entries)
+              e.key: [
+                for (final s in e.value)
+                  {
+                    'res': s.resource,
+                    'every': s.intervalSec,
+                    'amount': s.amount,
+                    'timer': s.timer,
+                    if (s.padIndex != null) 'pad': s.padIndex,
+                    if (!s.spareFuel) 'spareFuel': false,
+                    if (s.recurring) 'recurring': true,
+                  },
+              ],
+          },
         // Legacy cell state, so a grid colony survives a save too.
         'zones': {
           for (final e in zones.entries)
@@ -5311,6 +5337,30 @@ class CitySim {
       for (final e in (j['grownParcels'] as Map).entries)
         e.key as String: (e.value as num).toDouble(),
     });
+    // Booked runs (see [toJson]); absent in an old save, which booked none
+    // that survived. Tolerant: a run this build cannot read is skipped.
+    final booked = j['deliveries'];
+    if (booked is Map) {
+      booked.forEach((site, runs) {
+        if (site is! String || runs is! List) return;
+        final list = <DeliverySchedule>[
+          for (final r in runs)
+            if (r is Map &&
+                r['res'] is String &&
+                r['every'] is num &&
+                r['amount'] is num)
+              DeliverySchedule(
+                resource: r['res'] as String,
+                intervalSec: (r['every'] as num).toDouble(),
+                amount: (r['amount'] as num).toDouble(),
+                timer: (r['timer'] as num?)?.toDouble() ?? 0,
+                padIndex: (r['pad'] as num?)?.toInt(),
+                spareFuel: r['spareFuel'] != false,
+              )..recurring = r['recurring'] == true,
+        ];
+        if (list.isNotEmpty) sim.deliveries[site] = list;
+      });
+    }
 
     // Legacy cells.
     (j['zones'] as Map).forEach((cell, packed) {
@@ -5865,14 +5915,12 @@ class CitySim {
   /// Send one delivery craft to [pad], applying the schedule's fuel rule.
   /// False when it is grounded for want of fuel and nothing was sent.
   bool dispatchDelivery(String site, int pad, DeliverySchedule sched) {
-    // People are passengers, not cargo: their count isn't cut by return fuel.
-    // Commodities are: self-fuelling shaves the return propellant off the load.
-    final isPeople = sched.resource == kDeliveryPeople;
+    // A self-fuelling craft burns its return out of its cargo
+    // ([landedPayloadOf]); otherwise the colony fuels it, or it stays down.
     final returnFuel = returnFuelFor(sched.amount);
     double delivered;
     if (sched.spareFuel) {
-      delivered =
-          isPeople ? sched.amount : (sched.amount - returnFuel).clamp(0.0, sched.amount);
+      delivered = landedPayloadOf(sched);
     } else {
       final half = returnFuel / 2;
       if (stockOf(Commodity.fuel) < half ||
@@ -5896,6 +5944,68 @@ class CitySim {
         resource: sched.resource,
         payload: delivered));
     return true;
+  }
+
+  /// What one run of [sched] puts on the pad: its booked [amount], less the
+  /// return propellant a self-fuelling craft burns out of its own cargo.
+  /// People are passengers, not cargo, and arrive in full.
+  double landedPayloadOf(DeliverySchedule sched) {
+    if (!sched.spareFuel || sched.resource == kDeliveryPeople) {
+      return sched.amount;
+    }
+    return (sched.amount - returnFuelFor(sched.amount))
+        .clamp(0.0, sched.amount);
+  }
+
+  /// Life support the player's booked runs bring in, per second, by
+  /// commodity: every recurring food, water and oxygen delivery at a working
+  /// spaceport, its landed payload over its interval.
+  ///
+  /// The supply side of [supportablePop] counts it as it counts the port's
+  /// own trickle — a freighter due every day is as real a source as a farm,
+  /// and a colony that lives on one (the starter kit's, off-world) is sized
+  /// by what is booked, not by how full the tank happened to be when it was
+  /// last looked at. Never a LOCAL source: self-sufficiency (secession §3.4)
+  /// does not see it, so a colony fed by freighters is dependent however
+  /// well it is fed.
+  ///
+  /// Only what can actually land. A port the player cannot use — held by
+  /// rebels, or an independent colony's (§4.1) — receives nothing, so a
+  /// seizure takes the supply away the moment it happens rather than when the
+  /// tank runs dry; a colony-fuelled run counts only while the colony could
+  /// fuel it; and a port booked past what its pads can turn round
+  /// ([craftTotalSec] each) counts the share that fits.
+  Map<String, double> bookedLifeImports() {
+    final rates = <String, double>{};
+    if (loyalty.portClosedToPlayer) return rates;
+    deliveries.forEach((site, list) {
+      if (siteSpec(site)?.type != 'spaceport' || !siteConnected(site)) return;
+      var runsPerSec = 0.0;
+      final booked = <String, double>{};
+      for (final s in list) {
+        if (!s.recurring || s.intervalSec <= 0) continue;
+        runsPerSec += 1 / s.intervalSec;
+        if (s.resource != Commodity.food &&
+            s.resource != Commodity.water &&
+            s.resource != Commodity.oxygen) {
+          continue;
+        }
+        if (!s.spareFuel) {
+          final half = returnFuelFor(s.amount) / 2;
+          if (stockOf(Commodity.fuel) < half ||
+              stockOf(Commodity.oxidizer) < half) {
+            continue;
+          }
+        }
+        booked[s.resource] =
+            (booked[s.resource] ?? 0) + landedPayloadOf(s) / s.intervalSec;
+      }
+      final turnRound = padCountOf(site) / craftTotalSec;
+      final fits =
+          runsPerSec <= turnRound ? 1.0 : turnRound / runsPerSec;
+      booked.forEach((c, r) => rates[c] = (rates[c] ?? 0) + r * fits);
+    });
+    return rates;
   }
 
   /// Resources that can be flown in on a scheduled delivery. 'people' is a

@@ -13,10 +13,21 @@
 /// city-builder starts: a connection to the outside world, a crossroads, a
 /// treasury, and everything else left to draw.
 ///
+/// Off Earth the connection is also the lifeline. A kit founded on the Moon
+/// with its farm, its pump and no air opened on a crew that could never land:
+/// oxygen is managed there, nothing in the kit makes it, and a colony that
+/// cannot supply a single breath supports nobody. So an off-world colony lives
+/// on the player's supply chain from its first day — the kit stocks what the
+/// world withholds and books the freight that keeps the town it was built for
+/// breathing ([CityStarterKit.shortfall]); outgrowing that freight, or losing
+/// the port it lands at, is the player's problem, which is the point.
+///
 /// Domain, not screen: the setup UI picks a world and a difficulty, and this
 /// turns that into a live colony. A test — or a headless driver — can found the
 /// same starting position with no widgets in the process.
 library;
+
+import 'dart:math' as math;
 
 import 'city_building_spec.dart';
 import 'city_config.dart';
@@ -89,7 +100,8 @@ enum CityStart {
   /// all — see [CityStarterKit.found].
   final double ore;
 
-  /// Opening food + water, in stock units each. Life support runway.
+  /// Opening food + water, in stock units each — and oxygen, on a world whose
+  /// sky gives none ([CityStarterKit.shortfall]). Life support runway.
   final double supplies;
 
   final double hostility;
@@ -146,6 +158,22 @@ class CityStarterKit {
   /// the moment it is placed — the first thing the player would otherwise have
   /// to debug is why nobody is arriving.
   static const double padOffsetM = 60;
+
+  /// How far past the design town's need the kit's standing orders run
+  /// ([shortfall]). A quarter over: a freighter turned away by a busy pad, or
+  /// a day the town ran a little large, should not open on a suffocation.
+  static const double supplyHeadroom = 1.25;
+
+  /// The kit's standing orders fly once a colony day — the reference day the
+  /// loyalty calendar counts in — and that is also the longest interval the
+  /// delivery editor offers, so the player can open one and save it unchanged.
+  /// Three runs a day still leave the kit's one pad free between them
+  /// ([CitySim.craftTotalSec] each).
+  static const double supplyIntervalSec = 120;
+
+  /// A shortfall under this, per second, is not booked: a third of one
+  /// settler's oxygen, so nothing worth a freighter.
+  static const double minShortfallPerSec = 0.01;
 
   /// Found a colony with a crossroads, a working spaceport and a treasury.
   ///
@@ -256,6 +284,12 @@ class CityStarterKit {
     sim.stock[Commodity.food] = start.supplies;
     sim.stock[Commodity.water] = start.supplies;
 
+    // What the world will not give, the player's supply chain does, from the
+    // first day: an opening stock and a standing order at the port for each
+    // shortfall ([shortfall]). Nothing at all on Earth, which breathes, eats
+    // and drinks off its own ground.
+    if (pad != null) _bookSupply(sim, start, pad.id);
+
     // The agents build nothing until the colony first advances.
     if (agentTraffic) sim.agents.enabled = true;
 
@@ -270,6 +304,114 @@ class CityStarterKit {
     sim.siteAccess.sync(sim, sim.roadGraph,
         maxUnits: SiteAccessBook.unlimited, maxChecks: SiteAccessBook.unlimited);
     return sim;
+  }
+
+  /// The town the kit is built for at [sim]'s site: as many people as its farm
+  /// and pump feed running flat out — on this ground and at these odds (the
+  /// biome's yield, the difficulty's bounty) — and never fewer than the
+  /// lander's crew. Growing past it is the player's to provide for: more
+  /// farms, more pumps, and off-world more freight.
+  static double designPopulation(CitySim sim) {
+    final full = _kitLifeNet(sim, 1.0);
+    final fed = (full[Commodity.food] ?? 0) / CitySim.foodPerPersonPerSec;
+    final watered =
+        (full[Commodity.water] ?? 0) / CitySim.waterPerPersonPerSec;
+    return math.max(CitySim.landerCrew.toDouble(), math.min(fed, watered));
+  }
+
+  /// What the kit's own buildings cannot make at [sim]'s site for its
+  /// [designPopulation], per second, by commodity, with [supplyHeadroom] —
+  /// the standing orders [found] books. Empty where the world provides
+  /// (Earth): the rule asks what the WORLD withholds, never whether the
+  /// odds are kind, so a harsh desert town on Earth is still the player's to
+  /// water with pumps, as it always was.
+  ///
+  /// - **Oxygen**, wherever life support manages it (off a breathable world,
+  ///   at COMPLEXITY 0.3 up — [CitySim.o2NeedPerSec]): the kit brings no
+  ///   plant, so all of the town's that the sky does not give
+  ///   ([CitySim.airO2]).
+  /// - **Food and water**, where the sun is too weak to run the farm and the
+  ///   pump: the solar farm is the kit's only generator, and life support
+  ///   draws first, so what it cannot power — Titan's, Europa's, Ceres's
+  ///   twilight — is what is lost. Nothing on the Moon, Mars or Venus, whose
+  ///   panels run both in full; the biome and the aquifer are no gate, since
+  ///   the pump and the farm are sealed plants that run on any ground.
+  static Map<String, double> shortfall(CitySim sim) {
+    final pop = designPopulation(sim);
+    final full = _kitLifeNet(sim, 1.0);
+    final here = _kitLifeNet(sim, _kitLifePower(sim));
+    final gaps = <String, double>{};
+    void gap(String c, double perSec) {
+      final booked = perSec * supplyHeadroom;
+      if (booked > minShortfallPerSec) gaps[c] = booked;
+    }
+
+    if (sim.systemOn(0.3) && !sim.breathable) {
+      gap(Commodity.oxygen,
+          pop * CitySim.waterPerPersonPerSec * (1 - sim.airO2) -
+              (here[Commodity.oxygen] ?? 0));
+    }
+    for (final (c, perPerson) in const [
+      (Commodity.water, CitySim.waterPerPersonPerSec),
+      (Commodity.food, CitySim.foodPerPersonPerSec),
+    ]) {
+      final built = math.min(pop * perPerson, full[c] ?? 0);
+      gap(c, built - (here[c] ?? 0));
+    }
+    return gaps;
+  }
+
+  /// Opening stock and standing orders at [site] for the [shortfall]. The
+  /// orders are ordinary player deliveries — recurring, self-fuelling so the
+  /// colony needs no propellant to receive them, editable and cancellable
+  /// like any other — booked in order of urgency (air, water, food), each
+  /// sized so what LANDS, after the craft burns its return fuel out of its
+  /// cargo, is a day's shortfall.
+  static void _bookSupply(CitySim sim, CityStart start, String site) {
+    final need = shortfall(sim);
+    if (need.isEmpty) return;
+    // Food and water are already stocked; the air is the one the larder
+    // forgot.
+    if (need.containsKey(Commodity.oxygen)) {
+      sim.stock[Commodity.oxygen] = start.supplies;
+    }
+    // The return burn is affine in the cargo it lifts, so the booked amount
+    // that lands a given payload is one division.
+    final fixed = sim.returnFuelFor(0);
+    final perUnit = sim.returnFuelFor(1) - fixed;
+    for (final c in const [Commodity.oxygen, Commodity.water, Commodity.food]) {
+      final perSec = need[c];
+      if (perSec == null) continue;
+      final landed = perSec * supplyIntervalSec;
+      (sim.deliveries[site] ??= []).add(DeliverySchedule(
+        resource: c,
+        intervalSec: supplyIntervalSec,
+        amount: (landed + fixed) / (1 - perUnit),
+        spareFuel: true,
+        timer: supplyIntervalSec,
+      )..recurring = true);
+    }
+  }
+
+  /// The kit's life support at [run] (0..1 of nameplate), net of what it
+  /// uses, per second: the farm's and the pump's outputs at this site's yield
+  /// and the difficulty's bounty, as the tick produces them.
+  static Map<String, double> _kitLifeNet(CitySim sim, double run) {
+    final net = <String, double>{};
+    for (final s in [_farm, _pump]) {
+      s.outputs.forEach((c, v) => net[c] =
+          (net[c] ?? 0) + v * run * sim.biomeMult(c) * sim.bountyMult);
+      s.inputs.forEach((c, v) => net[c] = (net[c] ?? 0) - v * run);
+    }
+    return net;
+  }
+
+  /// The share of the farm and pump the kit's solar farm can power, as the
+  /// tick's life-first split gives it them (`lifeThrottle`'s power term).
+  static double _kitLifePower(CitySim sim) {
+    final out = _solar.powerOutput * sim.powerFactor(_solar.type);
+    final draw = _farm.powerDraw + _pump.powerDraw;
+    return draw <= 0 ? 1.0 : (out / draw).clamp(0.0, 1.0);
   }
 
   /// The base catalogue spaceport — the smallest one, and the only one open at
