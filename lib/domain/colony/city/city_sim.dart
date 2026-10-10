@@ -1346,6 +1346,13 @@ class CitySim {
           (stockOf(Commodity.medicine) / (medDemand + 0.01)).clamp(0.0, 1.0);
       services['health'] = (services['health'] ?? 0) * medCov;
     }
+    // The spaceport is the colony's market town: what the settlement cannot
+    // treat goes up the pad to orbit, as a village sends its sick to the
+    // hospital a day's ride away. Not gated on local medicine — the care is
+    // somewhere else.
+    if (hasSpaceport) {
+      services['health'] = (services['health'] ?? 0) + portMedevacPeople;
+    }
 
     // 1. Production: inputs drain, outputs fill, scaled by throttle. Skip a
     //    building's outputs if its inputs can't be met (no free lunch).
@@ -1559,17 +1566,13 @@ class CitySim {
     final pop = population;
     // Disease: rises with weak health coverage, pollution, crowding, and a big
     // corpse pile; falls with hospitals. A small, healthy settlement looks after
-    // itself — the "no hospital" penalty only bites once the population grows
-    // past what the lander's own crew can manage (so the starter crew don't
-    // sicken and die in a fed, clean colony). The unmet-health demand is the
-    // SHARE of the population above that grace size that has no coverage — so
-    // the twenty-first settler adds one person's worth of risk, not the whole
-    // no-hospital penalty at once.
-    const healthGrace = 20.0; // people who need no formal healthcare
-    final needHealth = math.max(0.0, pop - healthGrace);
-    final uncovered = needHealth <= 0
-        ? 0.0
-        : ((needHealth - (services['health'] ?? 0)) / pop).clamp(0.0, 1.0);
+    // itself ([communityShare]: family, a medic among the crew), so the
+    // starter crew don't sicken and die in a fed, clean colony. The unmet
+    // demand is the SHARE of the population nobody covers, so each settler
+    // past what the community manages adds one person's worth of risk, not the
+    // whole no-hospital penalty at once.
+    final uncovered =
+        pop <= 0 ? 0.0 : ((pop - coverOf('health')) / pop).clamp(0.0, 1.0);
     final corpseFrac = pop > 0 ? (corpses / pop).clamp(0.0, 1.0) : 0.0;
     final diseaseTarget = (0.35 * uncovered +
             0.2 * (pollution / 200).clamp(0.0, 1.0) +
@@ -1981,8 +1984,7 @@ class CitySim {
     final unemployedFrac = pop > 0
         ? math.max(((pop - workforce) / pop).clamp(0.0, 1.0), autoDisplaced)
         : 0.0;
-    final safety = services['safety'] ?? 0;
-    final safetyCov = pop > 0 ? (safety / pop).clamp(0.0, 1.0) : 1.0;
+    final safetyCov = pop > 0 ? (coverOf('safety') / pop).clamp(0.0, 1.0) : 1.0;
     var crimeTarget = (0.5 * unemployedFrac +
             0.4 * homelessFrac * shelterRelief +
             0.3 * (1 - safetyCov))
@@ -3018,11 +3020,40 @@ class CitySim {
   }
 
   static const requiredServices = ['safety', 'health', 'leisure'];
+
+  /// Below this many people, the community covers every required service
+  /// itself: everyone knows everyone, so reputation keeps the peace, family
+  /// and a crew medic nurse the sick, and the square is the leisure.
+  static const double communityFullPop = 25.0;
+
+  /// By this many people (Dunbar's ~150) strangers outnumber neighbours and
+  /// the informal versions are gone: a town needs the formal ones.
+  static const double communityFadePop = 150.0;
+
+  /// People a road-connected spaceport covers for health: medevac to orbit.
+  static const double portMedevacPeople = 25.0;
+
+  /// The share of [pop] its own community covers for each required service:
+  /// all of it up to [communityFullPop], fading to none at
+  /// [communityFadePop].
+  static double communityShare(double pop) => pop <= communityFullPop
+      ? 1.0
+      : (1 - (pop - communityFullPop) / (communityFadePop - communityFullPop))
+          .clamp(0.0, 1.0);
+
+  /// People covered for required service [t]: the buildings that provide it,
+  /// plus what the community does informally.
+  double coverOf(String t) =>
+      (services[t] ?? 0) +
+      (requiredServices.contains(t)
+          ? population * communityShare(population)
+          : 0.0);
+
   double serviceCoverage() {
     final pop = population <= 0 ? 1.0 : population;
     var minCov = 1.0;
     for (final t in requiredServices) {
-      final cov = ((services[t] ?? 0) / pop).clamp(0.0, 1.0);
+      final cov = (coverOf(t) / pop).clamp(0.0, 1.0);
       if (cov < minCov) minCov = cov;
     }
     return minCov;
