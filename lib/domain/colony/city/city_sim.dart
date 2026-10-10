@@ -1530,11 +1530,14 @@ class CitySim {
     //      loop). Whatever isn't processed PILES UP — a big backlog leaks
     //      pollution + disease + drags happiness. Only active at higher
     //      COMPLEXITY (one of the systems the player opts into).
+    //      A village composts its scraps and digs its latrines: only the
+    //      share of the population the community no longer covers makes
+    //      waste the colony has to process ([wasteMakers]).
     if (systemOn(0.5)) {
       stock[Commodity.garbage] = stockOf(Commodity.garbage) +
-          population * garbagePerPersonPerSec * dt;
+          wasteMakers * garbagePerPersonPerSec * dt;
       stock[Commodity.sewage] = stockOf(Commodity.sewage) +
-          population * sewagePerPersonPerSec * dt;
+          wasteMakers * sewagePerPersonPerSec * dt;
       wasteBacklog = population <= 0
           ? 0.0
           : ((stockOf(Commodity.garbage) + stockOf(Commodity.sewage)) /
@@ -1617,12 +1620,17 @@ class CitySim {
     }
     corpses += died;
     // Deathcare processing.
-    // A settlement buries its own dead by hand, a few a minute; deathcare is
-    // for a town whose dying outpaces that. Without it the first settler to
-    // die held a home forever (the living housing is housing − corpses), and
-    // a colony with no cemetery shrank, a death at a time, toward nobody.
+    // A settlement buries its own dead by hand; deathcare is for a town whose
+    // dying outpaces that. Without it the first settler to die held a home
+    // forever (the living housing is housing − corpses), and a colony with no
+    // cemetery shrank, a death at a time, toward nobody. A few a minute
+    // always, and a village's families bury their own: enough for its dead
+    // through a bad outbreak (disease 0.5 kills 0.5% a second), fading with
+    // the community share so a town needs its morgue.
     const handBurialRate = 0.05; // people/s
-    var careRate = handBurialRate;
+    const familyBurialPerSettler = 0.005; // people/s each
+    var careRate = handBurialRate +
+        pop * communityShare(pop) * familyBurialPerSettler;
     for (final e in activeSpecs) {
       careRate += e.value.deathcareRate;
     }
@@ -3046,6 +3054,10 @@ class CitySim {
       ? 1.0
       : (1 - (pop - communityFullPop) / (communityFadePop - communityFullPop))
           .clamp(0.0, 1.0);
+
+  /// People whose garbage and sewage the colony must process: those the
+  /// community no longer covers (a village composts and digs latrines).
+  double get wasteMakers => population * (1 - communityShare(population));
 
   /// People covered for required service [t]: the buildings that provide it,
   /// plus what the community does informally.

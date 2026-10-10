@@ -90,4 +90,34 @@ void main() {
     expect(city.communityRoadPerWeek, 0.0);
     expect(city.roadUpkeepRate, closeTo(gross, 1e-12));
   });
+
+  test('a village of fifty buries its own dead', () {
+    // The live founding's every-lot-residential town reached fifty, then
+    // lost the race against its own dead: 0.05/s of hand burial against
+    // 0.1/s of deaths. The corpses took homes and bred more disease, and
+    // fifty fell to nineteen.
+    final city = starterKit(agentTraffic: true);
+    zoneAll(city, const [ParcelUse.residential]);
+    var peak = 0.0;
+    for (var i = 0; i < 24; i++) {
+      run(city, 50);
+      if (city.population > peak) peak = city.population;
+    }
+    // ignore: avoid_print
+    print('village: peak ${peak.toStringAsFixed(1)}, end '
+        '${city.population.toStringAsFixed(1)}, corpses '
+        '${city.corpses.toStringAsFixed(1)}, disease '
+        '${city.disease.toStringAsFixed(2)}');
+    expect(peak, greaterThan(45));
+    expect(city.corpses, lessThan(3));
+    expect(city.population, greaterThan(30), reason: 'it holds a village');
+  });
+
+  test('a village makes no waste to haul; a town does', () {
+    final city = starterKit();
+    city.population = CitySim.communityFullPop;
+    expect(city.wasteMakers, 0.0, reason: 'compost and latrines');
+    city.population = CitySim.communityFadePop;
+    expect(city.wasteMakers, CitySim.communityFadePop);
+  });
 }

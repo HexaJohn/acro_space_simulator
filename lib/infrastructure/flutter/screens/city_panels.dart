@@ -676,9 +676,9 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     }
     // Population GENERATES waste (positive net = it's piling up).
     r[Commodity.garbage] =
-        (r[Commodity.garbage] ?? 0) + sim.population * CitySim.garbagePerPersonPerSec;
+        (r[Commodity.garbage] ?? 0) + sim.wasteMakers * CitySim.garbagePerPersonPerSec;
     r[Commodity.sewage] =
-        (r[Commodity.sewage] ?? 0) + sim.population * CitySim.sewagePerPersonPerSec;
+        (r[Commodity.sewage] ?? 0) + sim.wasteMakers * CitySim.sewagePerPersonPerSec;
     return r;
   }
   String fmtRate(double r) =>
