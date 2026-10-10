@@ -607,7 +607,9 @@ class CitySim {
   // People the colony can keep fed, watered and breathing: what it makes of
   // each, net of what its buildings use, plus the freight booked to bring it
   // ([bookedLifeImports]), plus the stockpile drawn down over
-  // [settleRunwaySec]. Infinite until the first tick has measured it.
+  // [settleRunwaySec] — of a booked commodity, only what is spare past the
+  // wait for its next run ([freightSpare]). Infinite until the first tick has
+  // measured it.
   double supportablePop = double.infinity;
   double powerOut = 0, powerDraw = 0;
   double resTarget = 0, comTarget = 0, indTarget = 0; // RCI demand
@@ -1543,7 +1545,8 @@ class CitySim {
 
     // The freighters the player has booked are supply too, if never local
     // ([bookedLifeImports]).
-    bookedLifeImports().forEach((c, perSec) => flow(c, perSec, false));
+    final imports = bookedLifeImports();
+    imports.forEach((c, perSec) => flow(c, perSec, false));
 
     emissionRate = pollutionRate;
     oxygenatorRun = towerRun;
@@ -1629,13 +1632,26 @@ class CitySim {
     // down over [runway] seconds. With ~zero consumption (tiny pop) security
     // is full, but it gets there smoothly via the ease, not by a hard pop<=0
     // branch.
+    //
+    // Booked freight arrives a lump a run, so the two runways read it
+    // differently. Settling, the town counts only the stock it can spare
+    // past the wait for its next run ([freightSpare]) — not the lump that
+    // has to last until then. Secure, it counts the run's rate only while
+    // there is something in the tank to breathe out of: freight still in
+    // orbit feeds nobody, and a town that ran its tank dry before the run
+    // came down is short, not breathing on an average.
     const targetRunway = 30.0; // 30 s buffer = "secure"
-    double supported(double runway) {
+    final spare = imports.isEmpty ? const <String, double>{} : freightSpare();
+    double supported(double runway, {required bool settle}) {
       var people = double.infinity;
       void need(String c, double perPerson, bool managed) {
         if (!managed || perPerson <= 0) return;
-        final perSec = math.max(0.0, (lifeNet[c] ?? 0) + stockOf(c) / runway);
-        people = math.min(people, perSec / perPerson);
+        final held = stockOf(c);
+        final perSec = settle
+            ? (lifeNet[c] ?? 0) + (spare[c] ?? held) / runway
+            : (lifeNet[c] ?? 0) - (held > 0 ? 0.0 : imports[c] ?? 0.0) +
+                held / runway;
+        people = math.min(people, math.max(0.0, perSec) / perPerson);
       }
 
       need(Commodity.food, foodPerPersonPerSec, true);
@@ -1646,8 +1662,9 @@ class CitySim {
 
     final secTarget = foodPerSec < 1e-6
         ? 1.0
-        : (supported(targetRunway) / population).clamp(0.0, 1.0);
-    supportablePop = supported(settleRunwaySec);
+        : (supported(targetRunway, settle: false) / population)
+            .clamp(0.0, 1.0);
+    supportablePop = supported(settleRunwaySec, settle: true);
     // Ease slowly so transient dips don't whip the flag.
     foodSecurity =
         (foodSecurity + (secTarget - foodSecurity) * (0.6 * dt).clamp(0.0, 1.0))
@@ -5131,7 +5148,8 @@ class CitySim {
         // MADE, and on an off-world starter colony the air it breathes — a
         // load that dropped them suffocated the town it restored. Omitted
         // when nothing is booked, so such a colony saves as it always has.
-        // The craft on the pads are transient and are not saved.
+        // The craft on the pads are transient and are not saved, but for
+        // those still coming down with a run's cargo (below).
         if (deliveries.isNotEmpty)
           'deliveries': {
             for (final e in deliveries.entries)
@@ -5148,6 +5166,20 @@ class CitySim {
                   },
               ],
           },
+        // A run's craft still descending has been sent — its schedule rearmed
+        // for tomorrow — but not landed: dropped from a save, that day's air
+        // was never delivered and nothing said so. Omitted when none is.
+        if (craft.any(_inbound))
+          'inbound': [
+            for (final c in craft.where(_inbound))
+              {
+                'site': c.site,
+                'pad': c.padIndex,
+                'res': c.resource,
+                'payload': c.payload,
+                'phase': c.phase,
+              },
+          ],
         // Legacy cell state, so a grid colony survives a save too.
         'zones': {
           for (final e in zones.entries)
@@ -5360,6 +5392,26 @@ class CitySim {
         ];
         if (list.isNotEmpty) sim.deliveries[site] = list;
       });
+    }
+    // Cargo still coming down (see [toJson]), as tolerant.
+    final inbound = j['inbound'];
+    if (inbound is List) {
+      for (final c in inbound) {
+        if (c is! Map ||
+            c['site'] is! String ||
+            c['pad'] is! num ||
+            c['res'] is! String ||
+            c['payload'] is! num) {
+          continue;
+        }
+        sim.craft.add(LandedCraft(
+          site: c['site'] as String,
+          padIndex: (c['pad'] as num).toInt(),
+          isRelief: false,
+          resource: c['res'] as String,
+          payload: (c['payload'] as num).toDouble(),
+        )..phase = (c['phase'] as num?)?.toDouble() ?? 0);
+      }
     }
 
     // Legacy cells.
@@ -5741,6 +5793,10 @@ class CitySim {
   static const double craftDwellSec = 30.0;
   static const double craftTotalSec = craftDwellSec / 0.76;
 
+  /// The share of its pad timeline a craft spends coming down: its cargo is
+  /// the colony's at this phase, some five seconds after it was sent.
+  static const double craftLandPhase = 0.12;
+
   /// A free pad of [site] (not occupied by a craft), or null if every pad is
   /// taken.
   int? freePad(String site) {
@@ -5872,7 +5928,7 @@ class CitySim {
         c.phase = 0.5;
         c.held = true;
       }
-      if (!c.granted && c.phase >= 0.12) {
+      if (!c.granted && c.phase >= craftLandPhase) {
         c.granted = true;
         // Landed at a held port: what it brought is the rebels' now. It
         // still goes into the stock, below — the colony's own — and the
@@ -5973,39 +6029,97 @@ class CitySim {
   /// rebels, or an independent colony's (§4.1) — receives nothing, so a
   /// seizure takes the supply away the moment it happens rather than when the
   /// tank runs dry; a colony-fuelled run counts only while the colony could
-  /// fuel it; and a port booked past what its pads can turn round
-  /// ([craftTotalSec] each) counts the share that fits.
+  /// fuel it; a load bigger than the store it lands in counts only what the
+  /// store holds, since the rest spills on the apron; and a port booked past
+  /// what its pads can turn round ([craftTotalSec] each) counts what the
+  /// dispatcher actually flies — the pads go to the runs in list order, its
+  /// priority, and every run that gets one still waits a turn-round for it,
+  /// since a busy pad is never cleared for the run that is due.
   Map<String, double> bookedLifeImports() {
     final rates = <String, double>{};
-    if (loyalty.portClosedToPlayer) return rates;
+    for (final (s, perSec) in _bookedLifeRuns()) {
+      rates[s.resource] = (rates[s.resource] ?? 0) + perSec;
+    }
+    return rates;
+  }
+
+  /// Every booked life-support run [bookedLifeImports] counts, with the rate
+  /// it counts it at.
+  List<(DeliverySchedule, double)> _bookedLifeRuns() {
+    final out = <(DeliverySchedule, double)>[];
+    if (loyalty.portClosedToPlayer) return out;
     deliveries.forEach((site, list) {
       if (siteSpec(site)?.type != 'spaceport' || !siteConnected(site)) return;
-      var runsPerSec = 0.0;
-      final booked = <String, double>{};
-      for (final s in list) {
-        if (!s.recurring || s.intervalSec <= 0) continue;
-        runsPerSec += 1 / s.intervalSec;
-        if (s.resource != Commodity.food &&
-            s.resource != Commodity.water &&
-            s.resource != Commodity.oxygen) {
+      // The runs that fly at all — a grounded one holds no pad — in the
+      // dispatcher's order.
+      final flying = [
+        for (final s in list)
+          if (s.recurring && s.intervalSec > 0 && _canFly(s)) s,
+      ];
+      final turnRound = padCountOf(site) / craftTotalSec;
+      final asked = flying.fold(0.0, (a, s) => a + 1 / s.intervalSec);
+      final wait = asked > turnRound ? craftTotalSec : 0.0;
+      var taken = 0.0;
+      for (final s in flying) {
+        final perRun = 1 / s.intervalSec;
+        final share = ((turnRound - taken) / perRun).clamp(0.0, 1.0);
+        taken += perRun * share;
+        if (share <= 0 ||
+            (s.resource != Commodity.food &&
+                s.resource != Commodity.water &&
+                s.resource != Commodity.oxygen)) {
           continue;
         }
-        if (!s.spareFuel) {
-          final half = returnFuelFor(s.amount) / 2;
-          if (stockOf(Commodity.fuel) < half ||
-              stockOf(Commodity.oxidizer) < half) {
-            continue;
-          }
-        }
-        booked[s.resource] =
-            (booked[s.resource] ?? 0) + landedPayloadOf(s) / s.intervalSec;
+        final kept = math.min(landedPayloadOf(s), stockCap);
+        out.add((s, kept * share / (s.intervalSec + wait)));
       }
-      final turnRound = padCountOf(site) / craftTotalSec;
-      final fits =
-          runsPerSec <= turnRound ? 1.0 : turnRound / runsPerSec;
-      booked.forEach((c, r) => rates[c] = (rates[c] ?? 0) + r * fits);
     });
-    return rates;
+    return out;
+  }
+
+  /// A booked run's craft on its way down, its cargo not yet the colony's.
+  static bool _inbound(LandedCraft c) =>
+      !c.isRelief && !c.granted && c.resource != null;
+
+  /// Whether [s] would lift off if it were due now: a self-fuelling run
+  /// always does, a colony-fuelled one only on the colony's propellant
+  /// ([dispatchDelivery]).
+  bool _canFly(DeliverySchedule s) {
+    if (s.spareFuel) return true;
+    final half = returnFuelFor(s.amount) / 2;
+    return stockOf(Commodity.fuel) >= half &&
+        stockOf(Commodity.oxidizer) >= half;
+  }
+
+  /// The stock of each booked life-support commodity that is the colony's
+  /// to spend, past what the town must breathe, drink or eat before its
+  /// freight next comes down ([bookedLifeImports]): what is in the store,
+  /// with any cargo already on its way down (no more than the store holds),
+  /// less each run's counted rate over the time to its next landing. Negative
+  /// when the tank will not last that long. Only the booked commodities.
+  ///
+  /// Freight lands a day's supply at once, and counted as stock a lump just
+  /// landed read as a surplus: the town grew on it, emptied the tank before
+  /// the next run, and breathed out of nothing until it came. Counting this
+  /// instead, a town supplied exactly by its runs holds the same spare at
+  /// every moment of the day — the lump and the wait for the next one cancel
+  /// — and one the runs underfeed watches its spare fall before its tank does.
+  Map<String, double> freightSpare() {
+    final owed = <String, double>{};
+    for (final (s, perSec) in _bookedLifeRuns()) {
+      owed[s.resource] = (owed[s.resource] ?? 0) +
+          perSec * (math.max(0.0, s.timer) + craftLandPhase * craftTotalSec);
+    }
+    final inbound = <String, double>{};
+    for (final c in craft.where(_inbound)) {
+      final r = c.resource!;
+      if (owed.containsKey(r)) inbound[r] = (inbound[r] ?? 0) + c.payload;
+    }
+    return {
+      for (final e in owed.entries)
+        e.key: math.min(stockCap, stockOf(e.key) + (inbound[e.key] ?? 0)) -
+            e.value,
+    };
   }
 
   /// Resources that can be flown in on a scheduled delivery. 'people' is a

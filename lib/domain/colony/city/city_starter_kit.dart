@@ -159,9 +159,16 @@ class CityStarterKit {
   /// to debug is why nobody is arriving.
   static const double padOffsetM = 60;
 
-  /// How far past the design town's need the kit's standing orders run
+  /// How far past the design town's need the kit's air run flies
   /// ([shortfall]). A quarter over: a freighter turned away by a busy pad, or
   /// a day the town ran a little large, should not open on a suffocation.
+  ///
+  /// The air's alone. A margin is only one while the town does not grow into
+  /// it, and it grows to whatever it is supplied with: shipped a quarter over
+  /// on all three, Titan's town settled a fifth past its size, its larder
+  /// empty part of every day and its air run with nothing to spare. Food and
+  /// water fly at the design need, so the larder sets the town's size as the
+  /// farm and the pump do on the Moon, and the air's quarter stays spare.
   static const double supplyHeadroom = 1.25;
 
   /// The kit's standing orders fly once a colony day — the reference day the
@@ -320,11 +327,11 @@ class CityStarterKit {
   }
 
   /// What the kit's own buildings cannot make at [sim]'s site for its
-  /// [designPopulation], per second, by commodity, with [supplyHeadroom] —
-  /// the standing orders [found] books. Empty where the world provides
-  /// (Earth): the rule asks what the WORLD withholds, never whether the
-  /// odds are kind, so a harsh desert town on Earth is still the player's to
-  /// water with pumps, as it always was.
+  /// [designPopulation], per second, by commodity, the air with
+  /// [supplyHeadroom] — the standing orders [found] books. Empty where the
+  /// world provides (Earth): the rule asks what the WORLD withholds, never
+  /// whether the odds are kind, so a harsh desert town on Earth is still the
+  /// player's to water with pumps, as it always was.
   ///
   /// - **Oxygen**, wherever life support manages it (off a breathable world,
   ///   at COMPLEXITY 0.3 up — [CitySim.o2NeedPerSec]): the kit brings no
@@ -341,15 +348,17 @@ class CityStarterKit {
     final full = _kitLifeNet(sim, 1.0);
     final here = _kitLifeNet(sim, _kitLifePower(sim));
     final gaps = <String, double>{};
-    void gap(String c, double perSec) {
-      final booked = perSec * supplyHeadroom;
+    void gap(String c, double perSec, [double headroom = 1]) {
+      final booked = perSec * headroom;
       if (booked > minShortfallPerSec) gaps[c] = booked;
     }
 
     if (sim.systemOn(0.3) && !sim.breathable) {
-      gap(Commodity.oxygen,
+      gap(
+          Commodity.oxygen,
           pop * CitySim.waterPerPersonPerSec * (1 - sim.airO2) -
-              (here[Commodity.oxygen] ?? 0));
+              (here[Commodity.oxygen] ?? 0),
+          supplyHeadroom);
     }
     for (final (c, perPerson) in const [
       (Commodity.water, CitySim.waterPerPersonPerSec),
