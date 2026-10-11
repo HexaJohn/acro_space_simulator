@@ -1811,6 +1811,11 @@ extension _SimulationViewCombat on _SimulationViewState {
               'seenOverGround': seenBare,
               'walls': nav.footprints.length,
               'eye': [eye.$1.round(), eye.$2.round(), eye.$3.toStringAsFixed(1)],
+              'anchor': () {
+                final st = _combatState;
+                final d = _freecamRelLocal - st.frameO;
+                return [d.dot(st.frameE).round(), d.dot(st.frameN).round(), _walkMode, _freecam, _cityCamera];
+              }(),
               if (near != null) 'nearest': [near.e.round(), near.n.round(), near.objectiveId, nd.round()],
               'squadAt': [
                 for (final u in l.units)

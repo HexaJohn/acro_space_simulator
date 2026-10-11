@@ -50,6 +50,17 @@ const double kUnitHeightM = 1.8;
 const double kDeathCameraS = 5;
 const int kLiveMaxPerSide = 24;
 
+/// The calibration knobs (§7I): how well the live AI's attackers and
+/// defenders shoot against the resolver's account of the same fight. Set
+/// from the harness's sweep; mutable only so the sweep can try values.
+abstract final class LiveTuning {
+  /// Swept 2026-10-11 over attacker × defender in {0.5, 0.7, 1.0} × {1.0,
+  /// 1.5, 2.2} on the three reference scenarios: 0.5 × 1.0 put every row
+  /// within 4% (calibration_test.dart).
+  static double attackerAccuracy = 0.5;
+  static double defenderAccuracy = 1.0;
+}
+
 /// A soldier's pace across the battle, m/s (§7H).
 const double kLiveWalkMps = 2.5;
 
@@ -438,7 +449,7 @@ class LiveBattle {
       if (!atPlayer && other == null) continue;
       u.shots++;
       final hit = combatUnit(seed, key, 2000 + u.shots) <
-          kDefenderAccuracy * u.quality * math.min(1.0, 30 / math.max(d, 1));
+          kDefenderAccuracy * LiveTuning.defenderAccuracy * u.quality * math.min(1.0, 30 / math.max(d, 1));
       final miss = hit ? 0.0 : 1.5 + 2 * combatUnit(seed, key, 3000 + u.shots);
       if (atPlayer) {
         tracers.add(Tracer(u.e, u.n, 1.4, eye.$1 + miss, eye.$2 - miss * 0.5, eye.$3 - 0.3, CombatSide.defender));
@@ -480,7 +491,7 @@ class LiveBattle {
       // A defender at its slot is behind its objective's works.
       final dug = (target.e - target.te).abs() + (target.n - target.tn).abs() < 1 ? target.cover : 1.0;
       final hit = combatUnit(seed, key, 5000 + u.shots) <
-          kDefenderAccuracy * u.quality * math.min(1.0, 30 / math.max(d, 1)) / dug;
+          kDefenderAccuracy * LiveTuning.attackerAccuracy * u.quality * math.min(1.0, 30 / math.max(d, 1)) / dug;
       tracers.add(Tracer(u.e, u.n, 1.4, target.e, target.n, hit ? 1.2 : 2.6, CombatSide.attacker));
       if (hit) _wound(target, kDefenderDamage);
     }

@@ -686,6 +686,23 @@ progress for 30 s.
 **Cut *(default)*:** cover and suppression, grenades, the defender's live AI beyond re-slotting, formations of
 other squads following orders live, crouch.
 
+## 7I. Phase 4c: Calibrated
+
+Specified and built 2026-10-11.
+
+**The harness** (`live/calibration.dart`, `bin/combat_calibrate.dart [--gate] [--seeds=N]`, mirrored by
+`test/combat/calibration_test.dart`): each reference scenario fought by the resolver alone and live — AI against AI,
+every attacking squad owned by a playerless bubble, sent objective by objective along the path as the resolver's AI
+sends them — over 8 seeds, compared on win rate and attacker loss share. **Gate:** both within ±10%.
+
+**Scenarios:** A an open town (30 troopers); B 10 regulars and a gun at the port; C 20 regulars, two guns, 45
+troopers. *(default)* The base and outpost variants wait for a live base (the bubble does not draw modules yet).
+
+**Tuning found:** the live squads dealt the player's 40 damage where everyone else deals 20; defenders had none of
+the resolver's `F_def` cover; broken squads fought on. With those fixed, a sweep of the AI's accuracy (attackers ×
+defenders over {0.5, 0.7, 1} × {1, 1.5, 2.2}) put **0.5 × 1.0** within 4% everywhere. **Result:** A 100/100% wins,
+19/24% losses; B 0/0%, 63/63%; C 0/0%, 60/66%. The player's own rifle is not scaled: attending is the edge.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.
