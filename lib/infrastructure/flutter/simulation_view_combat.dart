@@ -19,6 +19,19 @@ class _CombatViewState {
   /// terrain query is ~16 ms in a graded town), never per frame.
   final Map<int, double> groundR = {};
 
+  /// The real ground under each objective, `<op>:<objective>`: a port on a
+  /// graded pad stands tens of metres off the colony centre's height, and
+  /// smoke drawn at the centre's sat inside the hill. One sample a frame at
+  /// most, each kept.
+  final Map<String, double> objectiveGround = {};
+  bool sampledThisFrame = false;
+
+  /// The terrain edit count the samples were taken under: the colony's own
+  /// grading cuts its platforms tens or hundreds of metres into the ground
+  /// after it is founded, and a height sampled before that hung the battle
+  /// in the air (combat.md §7B, found live: 310 m on the Moon fixture).
+  int sampledUnderEdits = -1;
+
   /// Operations the player has dismissed from the map (resolved ones fade
   /// on their own).
   final Set<int> hidden = {};
@@ -216,6 +229,17 @@ extension _SimulationViewCombat on _SimulationViewState {
     return null;
   }
 
+  /// Drops every height sample once the ground under the colonies moved.
+  void _checkGroundEdits(CitySim city) {
+    final body = _universe.current().body(city.body.id);
+    final n = body == null ? 0 : (_terrainEdits.forBody(body.id)?.length ?? 0);
+    if (n == _combatState.sampledUnderEdits) return;
+    _combatState
+      ..sampledUnderEdits = n
+      ..groundR.clear()
+      ..objectiveGround.clear();
+  }
+
   double _battleGround(Operation op, CitySim city) => _combatState.groundR[op.id] ??= () {
         final body = _universe.current().body(city.body.id);
         if (body == null) return 0.0;
@@ -227,9 +251,27 @@ extension _SimulationViewCombat on _SimulationViewState {
         return field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
       }();
 
+  /// The ground radius under [op]'s objective [o], sampled once (at most one
+  /// a frame; the colony's own until then).
+  double _objectiveGround(Operation op, CitySim city, Objective o) {
+    final key = '${op.id}:${o.id}';
+    final have = _combatState.objectiveGround[key];
+    if (have != null) return have;
+    final fallback = _battleGround(op, city);
+    if (_combatState.sampledThisFrame) return fallback;
+    _combatState.sampledThisFrame = true;
+    final body = _universe.current().body(city.body.id);
+    if (body == null) return fallback;
+    final dir = city.localToBodyFixed(Vec2(o.e, o.n), bodyRadiusM: body.radius).normalized;
+    final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
+    return _combatState.objectiveGround[key] =
+        field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? fallback;
+  }
+
   /// The battle overlay over [snap], or null with no battle in view. Also
   /// tells the scene where to put the smoke ([CombatFxState]).
   Widget? _battleOverlay(WorldSnapshot? snap) {
+    _combatState.sampledThisFrame = false;
     if (snap == null) {
       CombatFxState.sites = const [];
       return null;
@@ -239,24 +281,43 @@ extension _SimulationViewCombat on _SimulationViewState {
       CombatFxState.sites = const [];
       return null;
     }
+    _checkGroundEdits(hit.city);
     final frame = CombatFrame.of(hit.op);
-    final groundR = _battleGround(hit.op, hit.city);
+    final grounds = [
+      for (final o in hit.op.graph.objectives) (o.e, o.n, _objectiveGround(hit.op, hit.city, o)),
+    ];
+    // Any point stands on its nearest objective's ground: close enough for a
+    // pip or an arrow, exact for a ring or the smoke.
+    double groundAt(double e, double n) {
+      var best = grounds.isEmpty ? _battleGround(hit.op, hit.city) : grounds.first.$3;
+      var bestD = double.infinity;
+      for (final g in grounds) {
+        final d = (g.$1 - e) * (g.$1 - e) + (g.$2 - n) * (g.$2 - n);
+        if (d < bestD) {
+          bestD = d;
+          best = g.$3;
+        }
+      }
+      return best;
+    }
+
     CombatFxState.sites = [
       for (final o in frame.objectives)
         if (o.contested)
           CombatFxSite('${hit.op.id}:${o.id}', hit.city.body.id.value,
-              hit.city.localToBodyFixed(Vec2(o.e, o.n), bodyRadiusM: groundR), o.heat),
+              hit.city.localToBodyFixed(Vec2(o.e, o.n), bodyRadiusM: groundAt(o.e, o.n)), o.heat),
     ];
     final body = snap.bodies[hit.city.body.id.value];
     final focus = _focusWorldForPick(snap);
     if (body == null || focus == null) return null;
     final bodyWorld = Vector3(body.px, body.py, body.pz);
     final q = Quaternion(body.qw, body.qx, body.qy, body.qz);
-    // A few metres up, so a ring on a slope is not under the slope.
-    final r = _battleGround(hit.op, hit.city) + 3;
     final cam = _camera;
+    // A few metres up, so a ring on a slope is not under the slope.
     Vector3 rel(double e, double n) =>
-        bodyWorld + q.rotate(hit.city.localToBodyFixed(Vec2(e, n), bodyRadiusM: r)) - focus;
+        bodyWorld +
+        q.rotate(hit.city.localToBodyFixed(Vec2(e, n), bodyRadiusM: groundAt(e, n) + 3)) -
+        focus;
     Offset? project(double e, double n) {
       final p = cam.projectPx(rel(e, n));
       if (p == null) return null;
@@ -280,25 +341,42 @@ extension _SimulationViewCombat on _SimulationViewState {
   }
 
   /// Frames the camera on [op]'s battle: the city rig's freecam anchor,
-  /// parked over the battle's centre, backed off to take all of it in.
-  void _watchBattle(Operation op) {
+  /// parked over the battle's centre, backed off to take all of it in — or,
+  /// given an [objective], close over that one.
+  void _watchBattle(Operation op, {String? objective}) {
     CitySim? city;
     for (final c in _cities.all()) {
       if (c.id == op.targetColonyId) city = c;
     }
     if (city == null) return;
-    final b = CombatFrame.of(op).bounds;
+    final o = objective == null ? null : op.graph.byId(objective);
+    final b = o != null ? (e: o.e, n: o.n, radius: 80.0) : CombatFrame.of(op).bounds;
     _combatState.hidden.remove(op.id);
+    _checkGroundEdits(city);
+    // On the ground of the objective nearest the centre: the colony centre's
+    // height is not the battle's (its graded platforms are cut deep).
+    var near = o ?? (op.graph.objectives.isEmpty ? null : op.graph.objectives.first);
+    var nearD = double.infinity;
+    if (o == null) {
+      for (final x in op.graph.objectives) {
+        final d = (x.e - b.e) * (x.e - b.e) + (x.n - b.n) * (x.n - b.n);
+        if (d < nearD) {
+          nearD = d;
+          near = x;
+        }
+      }
+    }
+    _combatState.sampledThisFrame = false;
+    final ground = near == null ? _battleGround(op, city) : _objectiveGround(op, city, near);
     rebuild(() {
       _freecamRef = city!.body.id;
-      _freecamRelLocal = city.localToBodyFixed(Vec2(b.e, b.n),
-          bodyRadiusM: _battleGround(op, city));
+      _freecamRelLocal = city.localToBodyFixed(Vec2(b.e, b.n), bodyRadiusM: ground);
       _freecam = true;
       _craftCam = false;
       _walkMode = false;
       _upMode = CameraUpMode.gravity;
       _view = _view.copyWith(elevation: 0.9, roll: 0);
-      _range = (b.radius * 3.2).clamp(700.0, 8000.0);
+      _range = o != null ? 260.0 : (b.radius * 3.2).clamp(700.0, 8000.0);
     });
   }
 
@@ -477,7 +555,8 @@ extension _SimulationViewCombat on _SimulationViewState {
   ///   launch=1[&garrison=N][&kit=D][&roe=standard]
   ///                               launch every ready trooper at the open colony
   ///   panel=independence|occupation  open the colony's panel
-  ///   watch=ID                    frame the camera on an operation's battle
+  ///   watch=ID[&at=OBJ]           frame the camera on an operation's battle
+  ///                               (or close over one of its objectives)
   ///   order=auto|hold|fallBack|attack:OBJ   the running operation's order
   ///   reinforce=1                 send every ready trooper as reinforcements
   ///   charter=ready               an occupied colony has held the line 11 days
@@ -530,7 +609,7 @@ extension _SimulationViewCombat on _SimulationViewState {
     final watch = int.tryParse(p['watch'] ?? '');
     if (watch != null) {
       final op = _operations.byId(watch);
-      if (op != null) _watchBattle(op);
+      if (op != null) _watchBattle(op, objective: p['at']);
     }
     final ordered = p['order'];
     if (ordered != null) {
@@ -566,6 +645,13 @@ extension _SimulationViewCombat on _SimulationViewState {
     return {
       if (did.isNotEmpty) 'did': did,
       'refusal': _operations.lastRefusal,
+      'fx': CombatFxNodes.debugLine,
+      // Each sampled objective's ground against its operation's colony centre, m.
+      'groundOffsets': {
+        for (final e in _combatState.objectiveGround.entries)
+          e.key: (e.value - (_combatState.groundR[int.tryParse(e.key.split(':').first) ?? -1] ?? e.value))
+              .roundToDouble(),
+      },
       'operations': [
         for (final op in _operations.operations)
           {

@@ -466,6 +466,11 @@ fresh squads from the same planner rules, landing at the LZ a mustering and a cr
 through the real tick on the Moon fixture — touchdown, transit gated on them, a lost lander's dead, the warp clamp
 (1,000× asked, 1× while descending), save and resume mid-descent.
 
+**Built** 2026-10-11: a6fe58d (positions, orders, reinforcements), 6ab6b47 (landers, each down within 30 m of its
+point), c89415e (frame, overlay, drawer orders, Watch), 7030dfc (smoke and flashes). Verified live on the Moon: two
+landers down, warp held at 1×, the march and the fight drawn, a decisive victory, the landers recovered. Not built:
+petition answers as commands (still widget calls), and a depth-tested 3D marker layer (the overlay is 2D).
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

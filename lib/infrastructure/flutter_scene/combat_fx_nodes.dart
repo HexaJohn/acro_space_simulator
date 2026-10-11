@@ -100,6 +100,10 @@ class CombatFxNodes {
 
   double _lastEpoch = double.nan;
 
+  /// What the last update did, for a driver's status: sites asked for, live
+  /// emitters, live particles, whether the sprite is ready.
+  static String debugLine = '';
+
   void update(WorldSnapshot snap, FloatingOrigin origin) {
     _ensureSprite();
     final frozen = snap.epoch == _lastEpoch;
@@ -116,8 +120,8 @@ class CombatFxNodes {
           _order.add(s.key);
         }
         fx.lastHotEpoch = snap.epoch;
-        fx.smoke.system.spawner.rate = 2 + 7 * s.heat;
-        fx.flash.system.spawner.rate = 6 + 30 * s.heat;
+        fx.smoke.system.spawner.rate = 3 + 10 * s.heat;
+        fx.flash.system.spawner.rate = 10 + 40 * s.heat;
       }
     }
     final gone = <String>[];
@@ -148,30 +152,37 @@ class CombatFxNodes {
       _live.remove(key);
       _order.remove(key);
     }
+    var alive = 0;
+    for (final fx in _live.values) {
+      alive += fx.smoke.system.storage.aliveCount + fx.flash.system.storage.aliveCount;
+    }
+    debugLine = 'sites ${CombatFxState.sites.length} live ${_live.length} '
+        'particles $alive sprite ${_sprite != null} frozen $frozen';
   }
 
   _Fx _make(CombatFxSite s) {
     final up = s.bf.normalized;
     final smoke = ParticleSystem(
-      maxParticles: 160,
-      shape: SphereShape(radius: lengthToScene(22), hemisphere: true),
+      maxParticles: 200,
+      shape: SphereShape(radius: lengthToScene(20), hemisphere: true),
       spawner: Spawner(rate: 0),
       looping: true,
       duration: 1.0,
       lifetime: UniformFloat(6, 11),
       startSpeed: UniformFloat(lengthToScene(0.6), lengthToScene(2.2)),
-      startSize: UniformFloat(lengthToScene(6), lengthToScene(12)),
-      startColor: ConstantColor(vm.Vector4(0.32, 0.30, 0.28, 1.0)),
+      // Dark and dense: grey smoke over grey regolith reads as nothing.
+      startSize: UniformFloat(lengthToScene(16), lengthToScene(28)),
+      startColor: ConstantColor(vm.Vector4(0.20, 0.19, 0.18, 1.0)),
       // Smoke climbs a little and spreads: a column, not a carpet.
       gravity: vm.Vector3(0, lengthToScene(0.25), 0),
       modules: [
         LinearDragModule(0.6),
-        SizeOverLifeModule(CurveFloat(ParticleCurve.linear(from: 1.0, to: 3.2))),
+        SizeOverLifeModule(CurveFloat(ParticleCurve.linear(from: 1.0, to: 3.5))),
         ColorOverLifeModule(GradientColor(ColorGradient([
-          ColorStop(0.0, vm.Vector4(0.35, 0.33, 0.30, 0.0)),
-          ColorStop(0.12, vm.Vector4(0.33, 0.31, 0.29, 0.55)),
-          ColorStop(0.7, vm.Vector4(0.30, 0.29, 0.28, 0.35)),
-          ColorStop(1.0, vm.Vector4(0.28, 0.27, 0.26, 0.0)),
+          ColorStop(0.0, vm.Vector4(0.22, 0.20, 0.18, 0.0)),
+          ColorStop(0.1, vm.Vector4(0.20, 0.19, 0.17, 0.78)),
+          ColorStop(0.7, vm.Vector4(0.18, 0.17, 0.16, 0.5)),
+          ColorStop(1.0, vm.Vector4(0.16, 0.15, 0.15, 0.0)),
         ]))),
       ],
       seed: s.key.hashCode,
@@ -184,7 +195,7 @@ class CombatFxNodes {
       duration: 1.0,
       lifetime: UniformFloat(0.06, 0.2),
       startSpeed: UniformFloat(0, lengthToScene(0.5)),
-      startSize: UniformFloat(lengthToScene(1.2), lengthToScene(4.5)),
+      startSize: UniformFloat(lengthToScene(2.5), lengthToScene(7)),
       startColor: ConstantColor(vm.Vector4(1.0, 0.85, 0.5, 1.0)),
       gravity: vm.Vector3.zero(),
       modules: [
