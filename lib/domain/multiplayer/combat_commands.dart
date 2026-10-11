@@ -62,6 +62,9 @@ sealed class CombatCommand extends SimCommand {
       case 'power':
         return CommanderPowerCommand(by, tick, (j['op'] as num).toInt(), j['power'] as String,
             target: j['target'] as String?);
+      case 'live':
+        return LiveCasualtiesCommand(by, tick, (j['op'] as num).toInt(),
+            [for (final v in (j['f'] as List? ?? const [])) (v as num).toInt()]);
       case 'assignOrbital':
         return AssignOrbitalSupportCommand(
             by, tick, (j['op'] as num).toInt(), j['vessel'] as String, assign: j['on'] != false);
@@ -293,6 +296,27 @@ class BaseOrderCommand extends CombatCommand {
 
 /// A commander power (combat.md §7D): `supplyDrop`, or `medevac` from
 /// objective [target].
+/// What the live bubble did to the battle (docs/plans/combat.md §7G): one
+/// member off each listed formation — a defender the player shot, or the
+/// player's own squad when the player fell.
+class LiveCasualtiesCommand extends CombatCommand {
+  const LiveCasualtiesCommand(super.issuedBy, super.tick, this.operationId, this.formationIds);
+  final int operationId;
+  final List<int> formationIds;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'live',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'f': List<int>.of(formationIds),
+      };
+}
+
 /// Assigns one of the player's vessels to an operation as orbital support,
 /// or releases it (docs/plans/combat.md §7E).
 class AssignOrbitalSupportCommand extends CombatCommand {

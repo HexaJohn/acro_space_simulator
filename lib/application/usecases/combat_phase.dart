@@ -133,6 +133,11 @@ class CombatPhase {
         registry.lastRefusal = c.power == 'orbitalStrike'
             ? (c.target == null ? 'Strike where?' : op?.strike(c.target!))
             : op?.power(c.power, objectiveId: c.target);
+      case LiveCasualtiesCommand():
+        final op = registry.byId(c.operationId);
+        for (final id in c.formationIds) {
+          op?.liveCasualty(id);
+        }
       case AssignOrbitalSupportCommand():
         registry.lastRefusal = _assign(c, cities);
       case ArmVesselCommand():

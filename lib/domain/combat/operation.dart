@@ -432,6 +432,18 @@ class Operation {
     orbital.notices.add('Strike on ${obj.id}: $what (${cep.round()} m scatter).');
   }
 
+  /// A member of [formationId] fell in the live bubble (§7G): off its
+  /// formation, killed or wounded half and half, and its squad shaken as by
+  /// any loss.
+  void liveCasualty(int formationId) {
+    if (resolved) return;
+    final f = formationById(formationId);
+    if (f == null || !f.alive) return;
+    f.removeMembers(1);
+    final base = f.engagedMembers > 0 ? f.engagedMembers : (f.count + 1);
+    f.morale = (f.morale - tuning.moraleLossPerShare / base).clamp(0.0, 1.0);
+  }
+
   Formation? formationById(int id) {
     for (final f in formations) {
       if (f.id == id) return f;
