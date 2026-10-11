@@ -580,7 +580,7 @@ class _CityStudioScreenState extends State<CityStudioScreen>
   /// [CityTerrainShaper.voxelM]. 0 derives it from each brush's radius (the
   /// pre-floor behaviour: level 15-17 under every street). Applied at the
   /// next generate, since the brushes are cut then.
-  double _cityVoxelM = 15;
+  double _cityVoxelM = CityTerrainShaper.colonyVoxelM;
 
   /// Perf panel collapsed to its FRAME line, so the scene behind it can be
   /// inspected. Toggled by tapping that line.
@@ -3428,12 +3428,12 @@ class _CityStudioScreenState extends State<CityStudioScreen>
                   'refinement, and far fewer chunks.',
               (v) => setState(() => TerrainNodes.editVoxelsAcross = v),
               divisions: 10),
-          _slider('City voxel floor', _cityVoxelM, 0, 30,
+          _slider('City voxel floor', _cityVoxelM, 0, 60,
               'Coarsest voxel the colony\'s pads and road cuts are meshed at. '
                   '0 derives it from each brush (1 m under a street: level '
                   '17). Takes effect at the next GENERATE.',
               (v) => setState(() => _cityVoxelM = v),
-              unit: 'm', divisions: 30),
+              unit: 'm', divisions: 60),
           const SizedBox(height: 8),
           _slider('Lot bucket', CityNodes.archetypeBucketM, 4, 40,
               'Lot-size quantisation. Coarser buckets reuse more meshes.',

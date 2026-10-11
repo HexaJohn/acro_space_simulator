@@ -86,8 +86,10 @@ class TerrainNodes {
 
   /// Split a chunk once it projects wider than this many pixels. Fed to
   /// [TerrainLodTree], which pairs it with a merge threshold 2.2x lower so
-  /// chunks on the boundary cannot thrash.
-  static double splitPx = 220;
+  /// chunks on the boundary cannot thrash. 440 (was 220, 2026-10-11): half
+  /// the voxels across the screen, a quarter of the terrain's triangles and
+  /// of its chunks — the detail the shading carries anyway.
+  static double splitPx = 440;
 
   /// View culling (see [ViewCone]): a chunk outside the lens's view cone has
   /// its apparent size multiplied by this before selection, so the quadtree
@@ -251,8 +253,9 @@ class TerrainNodes {
 
   /// Voxels across an edit's diameter once refined. Below ~6 a crater reads as
   /// a dent; much above it the chunk count climbs for detail the material
-  /// shading already carries.
-  static double editVoxelsAcross = 8;
+  /// shading already carries. 4 (was 8, 2026-10-11): edits meshed at half
+  /// the density with the rest of the terrain — a small crater is a dent.
+  static double editVoxelsAcross = 4;
 
   /// Max per-chunk lateral resolution multiplier for chunks overlapping an
   /// edit (power of two). Instead of forcing the quadtree log2(this) levels

@@ -95,7 +95,8 @@ class CityTerrainShaper {
   /// chunks against ~590 for the same ground unbuilt. At 15 m the whole
   /// colony sits at level 13 (boosted). The trade is edge sharpness: pad
   /// rims and road shoulders are smoothed at this scale, which the ground
-  /// patches cover inside the colony. First-test value; tune from the studio.
+  /// patches cover inside the colony. 30 m since 2026-10-11 (was 15): half
+  /// the terrain's density everywhere; tune from the studio.
   ///
   /// Not for a road that cuts or fills: see [corridorReliefTolM].
   final double voxelM;
@@ -103,7 +104,7 @@ class CityTerrainShaper {
   /// [voxelM] as the world tick grades with it. The renderer keys its edit
   /// boost on it (`editResolutionFor`'s `datumTestFromVoxelM`): a brush this
   /// coarse is a colony's own, and is boosted as it always was.
-  static const double colonyVoxelM = 15;
+  static const double colonyVoxelM = 30;
 
   /// How far (m) the ground around a graded road may stand off the grade it
   /// is cut to before the road asks for a finer mesh than [voxelM].
@@ -823,7 +824,6 @@ class CityTerrainShaper {
     if (voxelM <= 0) return const {}; // derived from each brush's radius
     if (_fineVoxelM(road.halfWidth) >= voxelM) return const {};
     final halfW = road.halfWidth;
-    final lat = halfW + voxelM;
     bool carried(int i) {
       final a = pts[i - 1], b = pts[i];
       final da = groundUnder(a), db = groundUnder(b);
@@ -836,9 +836,18 @@ class CityTerrainShaper {
       if (len < 1e-6) return true;
       final side = Vec2(-run.n / len, run.e / len);
       final m = a + run * 0.5;
-      final gl = groundUnder(m + side * lat), gr = groundUnder(m - side * lat);
-      return ((gl + gr) / 2 - (da + db) / 2).abs() <= corridorReliefTolM &&
-          (gl - gr).abs() / (2 * lat) * halfW <= corridorCrossFallTolM;
+      // Half a voxel and a voxel past each edge: the coarse mesh smooths
+      // over all of it, and at a 30 m voxel the one sample a voxel out
+      // stepped past the levelled lot a road was cut beside.
+      for (final out in [voxelM / 2, voxelM]) {
+        final lat = halfW + out;
+        final gl = groundUnder(m + side * lat), gr = groundUnder(m - side * lat);
+        if (((gl + gr) / 2 - (da + db) / 2).abs() > corridorReliefTolM ||
+            (gl - gr).abs() / (2 * lat) * halfW > corridorCrossFallTolM) {
+          return false;
+        }
+      }
+      return true;
     }
 
     final hit = <int>{

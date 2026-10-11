@@ -355,7 +355,7 @@ void main() {
       }
     }
 
-    // Its corridor asked for it: finer than the colony's 15 m where it cuts.
+    // Its corridor asked for it: finer than the colony's voxel where it cuts.
     final fine = [
       for (final k in city.fineCorridors)
         if (k.startsWith('road:$relaid:')) k,
@@ -598,7 +598,7 @@ void main() {
     shape(loaded, fresh);
     final corridors = [
       for (final b in roadCorridors(fresh.forBody(earth.id)!.all))
-        if (b.minVoxelM < 15) b,
+        if (b.minVoxelM < CityTerrainShaper.colonyVoxelM) b,
     ];
     expect(corridors.length, saved.length,
         reason: 'every segment the road was cut fine through is cut fine '
@@ -615,7 +615,7 @@ void main() {
     shape(forgot, again);
     expect(
         roadCorridors(again.forBody(earth.id)!.all)
-            .where((b) => b.minVoxelM < 15),
+            .where((b) => b.minVoxelM < CityTerrainShaper.colonyVoxelM),
         isEmpty,
         reason: 'the case is gone: a load sees the relief without being told');
   }, timeout: const Timeout(Duration(minutes: 5)));
@@ -638,7 +638,7 @@ void main() {
       final body = system.body(city.body.id)!;
       final corridors = roadCorridors(e.forBody(body.id)!.all);
       expect(corridors, isNotEmpty, reason: name);
-      expect(corridors.where((b) => b.minVoxelM != 15), isEmpty,
+      expect(corridors.where((b) => b.minVoxelM != CityTerrainShaper.colonyVoxelM), isEmpty,
           reason: '$name: a road cut fine');
       expect(city.fineCorridors, isEmpty, reason: name);
 
