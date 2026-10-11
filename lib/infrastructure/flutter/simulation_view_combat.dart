@@ -44,6 +44,35 @@ class _CombatViewState {
   /// Spike S item 5's frame timings while a measurement runs (§7F), ms.
   final List<double> spikeFrames = [];
   TimingsCallback? spikeTimings;
+
+  // ---- the soldier (§7G) ----
+
+  /// Each running operation's frozen ground, baking or baked.
+  final Map<int, BattleRaster> rasters = {};
+  final Map<int, List<int>> bakeOrders = {};
+  final Map<int, int> bakeNext = {};
+  final Map<int, TerrainField> bakeFields = {};
+  int bakesInFlight = 0;
+  GroundSamplePool? pool;
+
+  /// The battle the player has joined, if any.
+  LiveBattle? live;
+
+  /// The primary button is down on the world (the rifle's trigger).
+  bool trigger = false;
+
+  /// The smoothed (drawn − raster) offset under the walker (Spike S item 3).
+  double drawnOffset = 0;
+
+  /// Each live unit's ground as drawn, sampled once: units never move.
+  final Map<String, double> unitGround = {};
+
+  /// The colony's flat local frame for the bubble: origin, east, north.
+  int frameOp = -1;
+  Vector3 frameO = Vector3.zero, frameE = Vector3.unitX, frameN = Vector3.unitY;
+
+  /// Dev only: aim at the nearest defender and hold the trigger.
+  bool devAutofire = false;
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -650,6 +679,332 @@ extension _SimulationViewCombat on _SimulationViewState {
     };
   }
 
+  // ---- the soldier (§7G) --------------------------------------------------------
+
+  CitySim? _cityById(String id) {
+    for (final c in _cities.all()) {
+      if (c.id == id) return c;
+    }
+    return null;
+  }
+
+  /// Bakes every running operation's battle raster on the ground-sample pool,
+  /// objectives first, three jobs of 500 cells in flight at most. Called each
+  /// frame; costs the main thread only the directions it packs.
+  void _pumpRasterBake() {
+    final st = _combatState;
+    for (final op in _operations.operations) {
+      if (op.resolved) continue;
+      final city = _cityById(op.targetColonyId);
+      if (city == null) continue;
+      var r = st.rasters[op.id];
+      if (r == null) {
+        final lz = op.graph.byId(op.lzId), goal = op.graph.byId(op.goalId);
+        if (lz == null || goal == null) continue;
+        final (ce, cn) = BattleRaster.centreFor(lz.e, lz.n, goal.e, goal.n);
+        r = st.rasters[op.id] = BattleRaster(ce, cn);
+        st.bakeOrders[op.id] = r.bakeOrder([for (final o in op.graph.objectives) (o.e, o.n)]);
+        st.bakeNext[op.id] = 0;
+      }
+      final body = _universe.current().body(city.body.id);
+      if (body == null) continue;
+      final order = st.bakeOrders[op.id]!;
+      final raster = r;
+      if (st.bakeFields[op.id] == null) {
+        final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
+        if (field == null) {
+          // A body with no relief: the ground is its sphere.
+          for (var k = 0; k < raster.radii.length; k++) {
+            raster.put(k, body.radius);
+          }
+          st.bakeNext[op.id] = order.length;
+          continue;
+        }
+        st.bakeFields[op.id] = field;
+      }
+      while (st.bakesInFlight < 3 && st.bakeNext[op.id]! < order.length) {
+        final field = st.bakeFields[op.id]!;
+        final from = st.bakeNext[op.id]!;
+        final batch = order.sublist(from, math.min(from + 500, order.length));
+        st.bakeNext[op.id] = from + batch.length;
+        final dirs = Float64List(batch.length * 3);
+        for (var i = 0; i < batch.length; i++) {
+          final (e, n) = raster.cellCentre(batch[i]);
+          final bf = city.localToBodyFixed(Vec2(e, n), bodyRadiusM: body.radius);
+          dirs[3 * i] = bf.x;
+          dirs[3 * i + 1] = bf.y;
+          dirs[3 * i + 2] = bf.z;
+        }
+        st.bakesInFlight++;
+        (st.pool ??= GroundSamplePool.platform()).sample(field, dirs).then((radii) {
+          for (var i = 0; i < batch.length; i++) {
+            raster.put(batch[i], radii[i]);
+          }
+        }).whenComplete(() => st.bakesInFlight--);
+      }
+    }
+  }
+
+  BattleRaster? _rasterFor(Operation op) {
+    final r = _combatState.rasters[op.id];
+    return r != null && r.complete ? r : null;
+  }
+
+  /// Why the player cannot join [op] now, or null.
+  String? _whyNotJoin(Operation op) {
+    if (op.resolved || op.phase != OperationPhase.engaged) return 'Not until the squads are down.';
+    final r = _combatState.rasters[op.id];
+    if (r == null || !r.complete) return 'Mapping the ground: ${((r?.progress ?? 0) * 100).round()}%';
+    if (_squadAtLz(op) == null) return 'No squad of yours is at the landing zone.';
+    return null;
+  }
+
+  Formation? _squadAtLz(Operation op, {int? prefer}) {
+    final t = op.clock.steps;
+    Formation? best;
+    for (final f in op.formations) {
+      if (f.side != CombatSide.attacker || f.kind == FormationKind.emplacement) continue;
+      if (!f.presentAt(op.lzId, t)) continue;
+      if (f.id == prefer) return f;
+      best ??= f;
+    }
+    return best;
+  }
+
+  void _localFrame(Operation op, CitySim city, double radius) {
+    final st = _combatState;
+    if (st.frameOp == op.id) return;
+    st.frameOp = op.id;
+    st.frameO = city.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: radius);
+    st.frameE = (city.localToBodyFixed(const Vec2(100, 0), bodyRadiusM: radius) - st.frameO).normalized;
+    st.frameN = (city.localToBodyFixed(const Vec2(0, 100), bodyRadiusM: radius) - st.frameO).normalized;
+  }
+
+  /// Body-fixed point [e], [n], [h] metres above the battle's ground.
+  Vector3 _liveBF(CitySim city, BattleRaster r, double radius, double e, double n, double h) =>
+      city.localToBodyFixed(Vec2(e, n), bodyRadiusM: (r.radiusAt(e, n) ?? radius) + h);
+
+  /// Puts the walker at the LZ, on the battle's ground.
+  void _standAtLz(Operation op, CitySim city, BattleRaster r, double radius) {
+    final lz = op.graph.byId(op.lzId)!;
+    final e = lz.e - 12, n = lz.n - 6;
+    final dir = city.localToBodyFixed(Vec2(e, n), bodyRadiusM: radius).normalized;
+    _freecamRelLocal = dir * ((r.radiusAt(e, n) ?? radius) + walkEyeHeight);
+    _walkVertVel = 0;
+    _walkGrounded = true;
+  }
+
+  /// Joins [op] as a trooper of its first squad at the LZ (§7G).
+  void _joinFight(Operation op) {
+    final city = _cityById(op.targetColonyId);
+    final r = _rasterFor(op);
+    final squad = _squadAtLz(op);
+    final body = city == null ? null : _universe.current().body(city.body.id);
+    if (city == null || r == null || squad == null || body == null) return;
+    final st = _combatState
+      ..live = LiveBattle(opId: op.id, seed: op.seed ^ 0x5eed, playerFormationId: squad.id)
+      ..unitGround.clear()
+      ..drawnOffset = 0
+      ..trigger = false;
+    st.frameOp = -1;
+    rebuild(() {
+      _freecamRef = city.body.id;
+      _freecam = true;
+      _craftCam = false;
+      _standAtLz(op, city, r, body.radius);
+    });
+    if (!_walkMode) _toggleWalk();
+    _thirdPerson = false;
+    _standAtLz(op, city, r, body.radius);
+  }
+
+  void _leaveFight() {
+    final st = _combatState;
+    if (st.live == null) return;
+    final left = st.live!.casualties;
+    if (left.isNotEmpty) {
+      _operations.inbox.enqueue(LiveCasualtiesCommand(const PlayerId('player'), 0, st.live!.opId, [...left]));
+    }
+    st
+      ..live = null
+      ..trigger = false
+      ..devAutofire = false;
+    CombatUnitState.clear();
+    if (_walkMode) _toggleWalk();
+  }
+
+  bool get _liveJoined => _combatState.live != null;
+  bool get _liveDead => _combatState.live?.dead ?? false;
+
+  /// The walker's ground while joined: the raster plus the smoothed drawn
+  /// offset (Spike S item 3) — never a field sample. Null when not joined or
+  /// off the raster.
+  double? _liveGround(Vector3 posBF) {
+    final live = _combatState.live;
+    if (live == null) return null;
+    final op = _operations.byId(live.opId);
+    final city = op == null ? null : _cityById(op.targetColonyId);
+    final r = op == null ? null : _rasterFor(op);
+    if (city == null || r == null) return null;
+    final st = _combatState;
+    final d = posBF - st.frameO;
+    final g = r.radiusAt(d.dot(st.frameE), d.dot(st.frameN));
+    return g == null ? null : g + st.drawnOffset;
+  }
+
+  /// One frame of the joined battle: the bubble mirrors the operation, the
+  /// rifle and the defence fire, casualties go to the battle as a command, a
+  /// fallen player redeploys, and the units and tracers go to the scene.
+  void _stepLive(double frameDt) {
+    _pumpRasterBake();
+    final st = _combatState;
+    final live = st.live;
+    if (live == null) return;
+    final op = _operations.byId(live.opId);
+    final city = op == null ? null : _cityById(op.targetColonyId);
+    final body = city == null ? null : _universe.current().body(city.body.id);
+    final r = op == null ? null : _rasterFor(op);
+    if (op == null || op.resolved || city == null || body == null || r == null || !_walkMode) {
+      _leaveFight();
+      return;
+    }
+    _localFrame(op, city, body.radius);
+    final p = _freecamRelLocal;
+    final d = p - st.frameO;
+    final e = d.dot(st.frameE), n = d.dot(st.frameN);
+    final ground = r.radiusAt(e, n);
+    // The drawn mesh under the walker, eased toward (Spike S item 3).
+    final drawn = SceneSync.drawnGround?.call(p.normalized);
+    if (drawn != null && ground != null) {
+      final k = (frameDt * 4).clamp(0.0, 1.0);
+      st.drawnOffset += ((drawn - ground).clamp(-2.0, 2.0) - st.drawnOffset) * k;
+    }
+    final h = p.length - (ground ?? p.length - walkEyeHeight) - st.drawnOffset;
+    final up = p.normalized;
+    final f = _refBodyQuat().conjugate.rotate(_camera.forward);
+    var aim = (f.dot(st.frameE), f.dot(st.frameN), f.dot(up));
+    var trigger = st.trigger && _pointerLock.captured;
+    live.sync(op, r, e, n);
+    if (st.devAutofire) {
+      LiveUnit? best;
+      var bd = double.infinity;
+      for (final u in live.units) {
+        if (u.side != CombatSide.defender) continue;
+        final dd = (u.e - e) * (u.e - e) + (u.n - n) * (u.n - n);
+        if (dd < bd) {
+          bd = dd;
+          best = u;
+        }
+      }
+      if (best != null) {
+        final de = best.e - e, dn = best.n - n, dh = 1.0 - h;
+        final l = math.sqrt(de * de + dn * dn + dh * dh);
+        aim = (de / l, dn / l, dh / l);
+        trigger = true;
+      }
+    }
+    live.step(frameDt.clamp(0.0, 0.1),
+        eye: (e, n, h), aim: aim, trigger: trigger, reload: _keysDown.contains(LogicalKeyboardKey.keyR));
+    if (live.casualties.isNotEmpty) {
+      _operations.inbox.enqueue(LiveCasualtiesCommand(const PlayerId('player'), 0, op.id, [...live.casualties]));
+      live.casualties.clear();
+    }
+    if (live.redeployReady) {
+      final next = _squadAtLz(op, prefer: live.playerFormationId);
+      if (next == null) {
+        _leaveFight();
+        return;
+      }
+      live.redeploy(next.id);
+      _standAtLz(op, city, r, body.radius);
+    }
+    final bodyId = city.body.id.value;
+    CombatUnitState.units = [
+      for (final u in live.units)
+        CombatUnitMark(
+          '${u.formationId}:${u.member}',
+          bodyId,
+          city.localToBodyFixed(Vec2(u.e, u.n),
+              bodyRadiusM: st.unitGround['${u.formationId}:${u.member}'] ??= () {
+                final dir = city.localToBodyFixed(Vec2(u.e, u.n), bodyRadiusM: body.radius).normalized;
+                return SceneSync.drawnGround?.call(dir) ?? r.radiusAt(u.e, u.n) ?? body.radius;
+              }()),
+          attacker: u.side == CombatSide.attacker,
+          emplacement: u.kind == FormationKind.emplacement,
+        ),
+    ];
+    CombatUnitState.tracers = [
+      for (final t in live.tracers)
+        CombatTracerMark(bodyId, _liveBF(city, r, body.radius, t.fromE, t.fromN, t.fromH + st.drawnOffset),
+            _liveBF(city, r, body.radius, t.toE, t.toN, t.toH + st.drawnOffset),
+            attacker: t.side == CombatSide.attacker),
+    ];
+  }
+
+  /// The soldier's HUD: crosshair, health, ammo, and the death screen.
+  Widget? _liveHud() {
+    final live = _combatState.live;
+    if (live == null) return null;
+    final op = _operations.byId(live.opId);
+    final squad = op?.formationById(live.playerFormationId);
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Stack(children: [
+          if (!live.dead)
+            const Center(
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.fromBorderSide(BorderSide(color: Colors.white70, width: 1.5)),
+                  ),
+                ),
+              ),
+            ),
+          Positioned(
+            left: 16,
+            bottom: 96,
+            child: Container(
+              key: const Key('live-hud'),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: AppTheme.panel.withValues(alpha: 0.85), borderRadius: BorderRadius.circular(6)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                Text('Health ${live.hp.clamp(0, 100).round()}', style: AppTheme.body),
+                const SizedBox(height: 4),
+                SizedBox(
+                  width: 160,
+                  child: LinearProgressIndicator(
+                    value: (live.hp / 100).clamp(0.0, 1.0),
+                    minHeight: 6,
+                    color: live.hp > 40 ? AppTheme.accent2 : AppTheme.warn,
+                    backgroundColor: AppTheme.panelLight,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(live.reloadS > 0 ? 'Reloading…' : 'Rifle ${live.magazine} / $kRifleMagazine',
+                    style: AppTheme.mono),
+                Text('${live.kills} down · ${squad == null ? '' : '${squad.count} in your squad'}',
+                    style: AppTheme.dim),
+                Text('LMB fire · R reload · L leave', style: AppTheme.dim),
+              ]),
+            ),
+          ),
+          if (live.dead)
+            Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                color: Colors.black54,
+                child: Text('You are down · redeploying at the LZ in ${live.deadS.ceil()} s',
+                    style: AppTheme.heading.copyWith(color: AppTheme.warn)),
+              ),
+            ),
+        ]),
+      ),
+    );
+  }
+
   /// The drawer's Orbital support section (§7E): who is up there, when they
   /// next pass, the strike buttons, and arming a vessel standing on a pad.
   List<Widget> _orbitalRows(Operation op, BuildContext ctx, String Function(String) place,
@@ -955,6 +1310,26 @@ extension _SimulationViewCombat on _SimulationViewState {
                   ..._abilityRows(op, ctx, place),
                 ],
                 const SizedBox(height: 12),
+                if (!op.resolved && op.phase != OperationPhase.mustering)
+                  Builder(builder: (_) {
+                    final why = _whyNotJoin(op);
+                    return Align(
+                      alignment: Alignment.centerLeft,
+                      child: Tooltip(
+                        message: why ?? 'On foot at the LZ as one of your troopers. LMB fires, R reloads, L leaves.',
+                        child: TextButton(
+                          key: const Key('combat-join'),
+                          onPressed: why == null
+                              ? () {
+                                  Navigator.of(ctx).maybePop();
+                                  _joinFight(op);
+                                }
+                              : null,
+                          child: Text(why == null ? 'Join the fight' : 'Join the fight · $why'),
+                        ),
+                      ),
+                    );
+                  }),
                 Row(children: [
                   if (!op.resolved && op.phase != OperationPhase.mustering)
                     TextButton(
@@ -1163,6 +1538,40 @@ extension _SimulationViewCombat on _SimulationViewState {
         'max': f.isEmpty ? 0 : f.last,
       };
     }
+    // The soldier (§7G): join=1 steps out at the LZ of the running battle,
+    // autofire=1|0 aims at the nearest defender and holds the trigger,
+    // walkTo=OBJ stands 30 m short of an objective, leave=1 leaves.
+    if (p['join'] != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      if (running != null) {
+        final why = _whyNotJoin(running);
+        if (why == null) _joinFight(running);
+        did['join'] = why ?? 'joined';
+      }
+    }
+    if (p['autofire'] != null) _combatState.devAutofire = p['autofire'] == '1';
+    final walkTo = p['walkTo'];
+    final liveNow = _combatState.live;
+    if (walkTo != null && liveNow != null) {
+      final op = _operations.byId(liveNow.opId);
+      final o = op?.graph.byId(walkTo);
+      final city = op == null ? null : _cityById(op.targetColonyId);
+      final r = op == null ? null : _rasterFor(op);
+      final body = city == null ? null : _universe.current().body(city.body.id);
+      if (o != null && city != null && r != null && body != null) {
+        final lz = op!.graph.byId(op.lzId)!;
+        final dx = lz.e - o.e, dy = lz.n - o.n;
+        final l = math.max(1.0, math.sqrt(dx * dx + dy * dy));
+        final e = o.e + dx / l * 30, n = o.n + dy / l * 30;
+        final dir = city.localToBodyFixed(Vec2(e, n), bodyRadiusM: body.radius).normalized;
+        _freecamRelLocal = dir * ((r.radiusAt(e, n) ?? body.radius) + walkEyeHeight);
+        did['walkTo'] = walkTo;
+      }
+    }
+    if (p['leave'] != null) {
+      _leaveFight();
+      did['leave'] = true;
+    }
     final power = p['power'];
     if (power != null && target != null) {
       final running = _operations.runningAgainst(target.id);
@@ -1201,6 +1610,23 @@ extension _SimulationViewCombat on _SimulationViewState {
               .roundToDouble(),
       },
       'warp': _clock.warpFactor,
+      if (_combatState.live case final l?)
+        'live': {
+          'hp': l.hp,
+          'dead': l.dead,
+          'kills': l.kills,
+          'magazine': l.magazine,
+          'units': l.units.length,
+          'defenders': l.units.where((u) => u.side == CombatSide.defender).length,
+          'tracers': l.tracers.length,
+          'squad': l.playerFormationId,
+          'unitsMs': CombatUnitState.lastUpdateMs,
+          'drawnOffset': _combatState.drawnOffset,
+        },
+      'rasters': {
+        for (final op in _operations.operations)
+          if (_combatState.rasters[op.id] case final r?) '${op.id}': (r.progress * 100).round(),
+      },
       'operations': [
         for (final op in _operations.operations)
           {

@@ -6,6 +6,7 @@
 import 'dart:async' show StreamSubscription, unawaited;
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui show Image;
 
@@ -38,6 +39,7 @@ import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/city/traffic/vehicle_inspection.dart';
 import '../../adapters/presenters/surface_picker.dart';
+import '../flutter_scene/combat_unit_nodes.dart';
 import '../flutter_scene/city/city_nodes.dart';
 import '../flutter_scene/combat_fx_nodes.dart';
 import '../flutter_scene/city/road_overlay_state.dart';
@@ -66,6 +68,10 @@ import '../../domain/combat/lander.dart';
 import '../../domain/combat/objective.dart';
 import '../../domain/combat/operation.dart';
 import '../../domain/combat/operation_registry.dart';
+import '../../domain/combat/live/battle_raster.dart';
+import '../../domain/terrain/terrain_field.dart';
+import '../../domain/terrain/ground_sample_pool.dart';
+import '../../domain/combat/live/live_battle.dart';
 import '../../domain/combat/powers/orbital.dart';
 import '../../domain/combat/powers/strike_window.dart';
 import '../../domain/multiplayer/player.dart';
@@ -815,6 +821,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// every frame, so the ground under a standing walker kept moving and they
   /// fell forever, landing and un-landing a couple of metres at a time.
   double _walkGroundRadius(CelestialBody body, Vector3 posBF) {
+    // Joined to a battle, the ground is its frozen raster (combat.md §7G):
+    // a field sample is ~0.4 ms in a graded town, and the frame has no room.
+    final live = _liveGround(posBF);
+    if (live != null) return live;
     final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
     if (field == null) return body.radius;
     return field.groundRadiusAt(posBF.x, posBF.y, posBF.z);
@@ -1257,6 +1267,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.keyZ,
     // The Traffic tool's Lane speed view over a colony.
     LogicalKeyboardKey.keyV,
+    // The joined soldier's reload and leave (combat.md §7G).
+    LogicalKeyboardKey.keyR,
+    LogicalKeyboardKey.keyL,
     LogicalKeyboardKey.escape,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
@@ -1318,6 +1331,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // window — and the walk goes on. A click on the world takes it back.
       if (e.logicalKey == LogicalKeyboardKey.escape && _pointerLock.captured) {
         setState(_releaseMouseLook);
+        return KeyEventResult.handled;
+      }
+      // L leaves a battle the player joined.
+      if (e.logicalKey == LogicalKeyboardKey.keyL && _liveJoined) {
+        _leaveFight();
+        return KeyEventResult.handled;
+      }
+      // G gets out and walks (and back in again) — but not out of a battle.
+      if (e.logicalKey == LogicalKeyboardKey.keyG && _liveJoined) {
         return KeyEventResult.handled;
       }
       // G gets out and walks (and back in again).
@@ -1921,6 +1943,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       }
     }
 
+    // The battle the player has joined (combat.md §7G), and every battle's
+    // ground baking off the main thread.
+    _stepLive(frameDt);
+
     // Freecam flight: WASD in the camera frame, Q/E down/up, Shift boosts.
     // Speed scales with zoom range so it feels right from surface to map.
     if (_freecam) {
@@ -1944,7 +1970,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         if (_evaPack) {
           _stepEva(fwd, strafe, frameDt);
         } else {
-          _stepWalk(fwd, strafe, frameDt);
+          // Down in a battle, the body lies where it fell.
+          _stepWalk(_liveDead ? 0 : fwd, _liveDead ? 0 : strafe, frameDt);
         }
         _stepDrill(frameDt);
         _syncWalkerBody();
@@ -2004,7 +2031,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // a troop lander on its descent is on rails above 4×, its guidance dead.
     // The tick clamps the clock for every host; here the ladder follows, so
     // the warp readout says 1× and the next step-up starts from there.
-    if (_clock.warpFactor > 1 && ForceLanderFlight.aloft(_session.operations)) {
+    if (_clock.warpFactor > 1 && (ForceLanderFlight.aloft(_session.operations) || _liveJoined)) {
       _clock.warpFactor = _warpLevels[_warp1x];
       _warpIndex = _warp1x;
       _warpTarget = null;
@@ -3233,6 +3260,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   // The battle over the colony (combat.md §7B): a command
                   // overlay projected from the operation's ground.
                   if (_battleOverlay(_sceneWorld) case final battle?) battle,
+                  if (_liveHud() case final hud?) hud,
                   // Reflection-capture debug overlay (bottom-left, above the
                   // build stamp) — the equirect the craft's IBL reflects.
                   if (PlanetEnvironmentBaker.showDebug)
@@ -3340,8 +3368,13 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             !_pointerLock.captured &&
                             e.buttons == kPrimaryButton) {
                           setState(_captureMouseLook);
+                        } else if (_liveJoined && e.buttons == kPrimaryButton) {
+                          // The rifle's trigger (combat.md §7G).
+                          _combatState.trigger = true;
                         }
                       },
+                      onPointerUp: (_) => _combatState.trigger = false,
+                      onPointerCancel: (_) => _combatState.trigger = false,
                       child: const SizedBox.expand(),
                     ),
                   ),
