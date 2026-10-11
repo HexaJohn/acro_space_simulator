@@ -2175,6 +2175,47 @@ extension _SimulationViewCombat on _SimulationViewState {
       if (drive.contains('D')) _keysDown.add(LogicalKeyboardKey.keyD);
       did['drive'] = drive;
     }
+    // Air and missiles (§7M), dev shortcuts past building an Airfield and a
+    // Silo at home: gates=airfield,silo grants the base those sources;
+    // kit=1 stocks it for a pass; missiles=N stocks the lead source;
+    // rebelSilos=N arms the target.
+    final gates = p['gates'];
+    if (gates != null && target != null) {
+      final b = _operations.runningAgainst(target.id)?.base;
+      if (b != null) {
+        for (final g in gates.split(',')) {
+          if (!b.gates.contains(g)) b.gates.add(g);
+        }
+        did['gates'] = [...b.gates];
+      }
+    }
+    if (p['kit'] == '1' && target != null) {
+      final b = _operations.runningAgainst(target.id)?.base;
+      if (b != null) {
+        b.stockC[kBaseStock.indexOf('ammo')] = 20000;
+        b.stockC[kBaseStock.indexOf('fuel')] = 20000;
+        did['kit'] = true;
+      }
+    }
+    final missiles = double.tryParse(p['missiles'] ?? '');
+    if (missiles != null && target != null) {
+      final b = _operations.runningAgainst(target.id)?.base;
+      final home = b == null ? null : _cityById(b.homeColonyId);
+      if (home != null) {
+        home.stock[Commodity.missiles] = missiles;
+        did['missiles'] = missiles;
+      }
+    }
+    final silos = int.tryParse(p['rebelSilos'] ?? '');
+    if (silos != null && target != null) {
+      final op = _operations.runningAgainst(target.id);
+      if (op != null) {
+        op.air
+          ..rebelSilos = silos
+          ..rebelNextStep = op.clock.steps + 5;
+        did['rebelSilos'] = silos;
+      }
+    }
     if (p['apc'] != null && target != null) {
       final running = _operations.runningAgainst(target.id);
       if (running != null) {
@@ -2393,6 +2434,13 @@ extension _SimulationViewCombat on _SimulationViewState {
               'notices': op.orbital.notices.length > 3
                   ? op.orbital.notices.sublist(op.orbital.notices.length - 3)
                   : op.orbital.notices,
+            },
+            'air': {
+              'passes': [for (final p in op.air.passes) [p.$1, p.$3 - op.clock.steps]],
+              'gunshipIn': op.air.gunshipReadyStep - op.clock.steps,
+              'pendingSilo': op.air.pendingSilo,
+              'rebelSeq': op.air.rebelSeq,
+              'notices': op.air.notices.length > 4 ? op.air.notices.sublist(op.air.notices.length - 4) : op.air.notices,
             },
             'cooldowns': {
               'charge': op.chargeReadyStep - op.clock.steps,
