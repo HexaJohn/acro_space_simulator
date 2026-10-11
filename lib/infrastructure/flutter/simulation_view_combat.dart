@@ -419,7 +419,7 @@ extension _SimulationViewCombat on _SimulationViewState {
           for (final d in Doctrine.values)
             ChoiceChip(
               key: Key('base-doctrine-${d.name}'),
-              label: Text(_doctrineLabel(d)),
+              label: Text(doctrineLabel(d)),
               selected: b.doctrine == d,
               onSelected: (_) {
                 _baseOrder(op, 'doctrine', value: d.name);
@@ -502,11 +502,12 @@ extension _SimulationViewCombat on _SimulationViewState {
     return rows;
   }
 
-  static String _doctrineLabel(Doctrine d) => switch (d) {
-        Doctrine.balanced => 'Balanced',
-        Doctrine.hold => 'Hold',
-        Doctrine.push => 'Push',
-        Doctrine.manual => 'Manual',
+  /// What a squad line calls [f]: a turret's crew are not an emplacement.
+  static String _kindLabel(Formation f) => switch (f.kind) {
+        FormationKind.infantry => 'troopers',
+        FormationKind.regular => 'regulars',
+        FormationKind.militia => 'militia',
+        FormationKind.emplacement => f.side == CombatSide.attacker ? 'turret crew' : 'gun emplacement',
       };
 
   Widget _socketRow(Operation op, ForwardBase b, SocketKind ring, int i, BuildContext ctx,
@@ -536,6 +537,7 @@ extension _SimulationViewCombat on _SimulationViewState {
     if (s.lines.any((j) => j != null && j.kind != null && j.socket == i && moduleSpec(j.kind!).socket == ring)) {
       return Text('  $label: building', style: AppTheme.dim);
     }
+    if (s.blocked(ring, i)) return Text('  $label: no room (a building stands there)', style: AppTheme.dim);
     final options = [
       for (final s in kBaseModules)
         if (s.socket == ring) s,
@@ -563,6 +565,58 @@ extension _SimulationViewCombat on _SimulationViewState {
 
   void _order(Operation op, String order, {String? target}) => _operations.inbox.enqueue(
       OrderOperationCommand(const PlayerId('player'), 0, op.id, order, target: target));
+
+  void _power(Operation op, String power, {String? target}) => _operations.inbox.enqueue(
+      CommanderPowerCommand(const PlayerId('player'), 0, op.id, power, target: target));
+
+  /// The charge and the commander powers (§7D), each with its cooldown.
+  List<Widget> _abilityRows(Operation op, BuildContext ctx, String Function(String) place) {
+    final t = op.clock.steps;
+    String wait(int ready) => ready > t ? ' · ${ready - t} s' : '';
+    final b = op.base;
+    final here = [
+      for (final o in op.graph.objectives)
+        if (op.formations.any((f) => f.side == CombatSide.attacker && f.presentAt(o.id, t))) o.id
+    ];
+    final wounded = [
+      for (final id in here)
+        if (op.formations.any((f) => f.side == CombatSide.attacker && f.presentAt(id, t) && f.wounded > 0))
+          id
+    ];
+    Widget button(String key, String label, VoidCallback? onPressed) => TextButton(
+        key: Key(key), onPressed: onPressed, child: Text(label, style: AppTheme.body));
+    return [
+      const SizedBox(height: 6),
+      Wrap(spacing: 4, runSpacing: 2, children: [
+        for (final id in here)
+          button('combat-charge-$id', 'Charge at ${place(id)}${wait(op.chargeReadyStep)}',
+              t < op.chargeReadyStep
+                  ? null
+                  : () {
+                      _order(op, 'charge', target: id);
+                      Navigator.of(ctx).maybePop();
+                    }),
+        if (b != null && b.standing) ...[
+          button('combat-supply-drop', 'Emergency supply drop${wait(op.supplyDropReadyStep)}',
+              t < op.supplyDropReadyStep
+                  ? null
+                  : () {
+                      _power(op, 'supplyDrop');
+                      Navigator.of(ctx).maybePop();
+                    }),
+          if (b.hospitalOnline)
+            for (final id in wounded)
+              button('combat-medevac-$id', 'Medevac from ${place(id)}${wait(op.medevacReadyStep)}',
+                  t < op.medevacReadyStep
+                      ? null
+                      : () {
+                          _power(op, 'medevac', target: id);
+                          Navigator.of(ctx).maybePop();
+                        }),
+        ],
+      ]),
+    ];
+  }
 
   /// Every ready trooper the other colonies can send, as reinforcements.
   List<({String colonyId, String siteId, int count})> _readyDraws(String targetId) {
@@ -634,13 +688,13 @@ extension _SimulationViewCombat on _SimulationViewState {
                 Text('Your squads', style: AppTheme.dim),
                 for (final f in attackers)
                   if (f.alive || f.wounded > 0)
-                    line('  ${f.count} ${f.kind.name} · ${where(f)}',
+                    line('  ${f.count} ${_kindLabel(f)} · ${where(f)}',
                         'morale ${(f.morale * 100).round()}% · ${f.kitDays.toStringAsFixed(1)} d kit'),
                 const SizedBox(height: 6),
                 Text(_assault(op) ? 'Its defenders' : 'Rebel squads', style: AppTheme.dim),
                 for (final f in defenders)
                   if (f.alive)
-                    line('  ${f.count} ${f.kind.name} · ${where(f)}',
+                    line('  ${f.count} ${_kindLabel(f)} · ${where(f)}',
                         'morale ${(f.morale * 100).round()}%'),
                 if (op.base case final b?) ..._baseRows(op, b, ctx, line),
                 if (!op.resolved && op.phase == OperationPhase.engaged) ...[
@@ -674,6 +728,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                           },
                         ),
                   ]),
+                  ..._abilityRows(op, ctx, place),
                 ],
                 const SizedBox(height: 12),
                 Row(children: [
@@ -775,6 +830,10 @@ extension _SimulationViewCombat on _SimulationViewState {
           roe: p['roe'] ?? 'restrained',
           baseMateriel: int.tryParse((p['base'] ?? '').split(',').first) ?? 0,
           baseSupport: int.tryParse((p['base'] ?? '').split(',').last) ?? 0,
+          baseDoctrine: p['doctrine'],
+          baseSpareCore: p['spare'] != null,
+          baseSteel: int.tryParse(p['steel'] ?? ''),
+          baseElectronics: int.tryParse(p['electronics'] ?? ''),
           garrison: int.tryParse(p['garrison'] ?? '') ?? 2));
       did['launch'] = {'troopers': draws.fold<int>(0, (a, d) => a + d.count)};
     }
@@ -806,6 +865,15 @@ extension _SimulationViewCombat on _SimulationViewState {
           _order(running, ordered.substring(0, i), target: ordered.substring(i + 1));
         }
         did['order'] = ordered;
+      }
+    }
+    final power = p['power'];
+    if (power != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      if (running != null) {
+        final i = power.indexOf(':');
+        _power(running, i < 0 ? power : power.substring(0, i), target: i < 0 ? null : power.substring(i + 1));
+        did['power'] = power;
       }
     }
     if (p['reinforce'] != null && target != null) {
@@ -861,7 +929,17 @@ extension _SimulationViewCombat on _SimulationViewState {
                 'pallets': b.palletsC ~/ 100,
                 'reserve': b.reserve,
                 'runs': b.runs.length,
+                'power': '${b.powerDemand.round()}/${b.powerSupply.round()}',
+                'blocked': [for (final s in b.sites) s.blockedModules.length + s.blockedTurrets.length],
+                'recovered': b.recoveredTotal,
+                'stock': {for (final k in kBaseStock) k: b.stockOf(k) ~/ 100},
               },
+            'lz': [for (final o in op.graph.objectives) if (o.id == op.lzId) [o.e.round(), o.n.round()]],
+            'cooldowns': {
+              'charge': op.chargeReadyStep - op.clock.steps,
+              'drop': op.supplyDropReadyStep - op.clock.steps,
+              'medevac': op.medevacReadyStep - op.clock.steps,
+            },
             'order': op.order.name,
             'landers': [for (final l in op.landers) l.state.name],
             'objectives': {
@@ -877,6 +955,7 @@ extension _SimulationViewCombat on _SimulationViewState {
           'stage': target.loyalty.stage.name,
           'allegiance': target.loyalty.allegiance.name,
           'garrison': target.war.garrison?.count,
+          'postTurrets': target.war.garrison?.turrets,
           'occupation': target.war.garrison?.occupation ?? false,
           'level': target.loyalty.level,
           'charterReady': target.loyalty.charterReady,

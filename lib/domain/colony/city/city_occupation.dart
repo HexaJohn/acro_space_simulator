@@ -37,11 +37,18 @@ extension CityOccupation on CitySim {
     return g != null && g.occupation ? g.count : 0;
   }
 
+  /// The troopers the occupation sits on the colony with: its garrison, and
+  /// the base turrets it kept as its post (combat.md §7D).
+  int get occupationSuppressing {
+    final g = war.garrison;
+    return g != null && g.occupation ? g.suppressing : 0;
+  }
+
   /// 0..[suppressionCap]: how hard the garrison sits on the colony. Zero for
   /// a colony not occupied.
   double get suppression {
     if (!loyalty.occupied) return 0;
-    final n = occupationTroopers;
+    final n = occupationSuppressing;
     if (n <= 0) return 0;
     final pop = population;
     if (pop <= 1e-9) return suppressionCap;

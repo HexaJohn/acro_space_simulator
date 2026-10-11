@@ -43,6 +43,12 @@ sealed class CombatCommand extends SimCommand {
           roe: j['roe'] as String? ?? 'restrained',
           baseMateriel: (j['baseM'] as num?)?.toInt() ?? 0,
           baseSupport: (j['baseS'] as num?)?.toInt() ?? 0,
+          baseFuel: (j['baseFuel'] as num?)?.toInt(),
+          baseMedicine: (j['baseMed'] as num?)?.toInt(),
+          baseSteel: (j['baseSteel'] as num?)?.toInt(),
+          baseElectronics: (j['baseElec'] as num?)?.toInt(),
+          baseSpareCore: j['baseSpare'] == true,
+          baseDoctrine: j['baseDoctrine'] as String?,
         );
       case 'withdraw':
         return WithdrawOperationCommand(by, tick, (j['op'] as num).toInt());
@@ -98,6 +104,12 @@ class LaunchOperationCommand extends CombatCommand {
     this.roe = 'restrained',
     this.baseMateriel = 0,
     this.baseSupport = 0,
+    this.baseFuel,
+    this.baseMedicine,
+    this.baseSteel,
+    this.baseElectronics,
+    this.baseSpareCore = false,
+    this.baseDoctrine,
   });
 
   final String targetColonyId;
@@ -117,6 +129,12 @@ class LaunchOperationCommand extends CombatCommand {
 
   bool get withBase => baseMateriel > 0 || baseSupport > 0;
 
+  /// The rest of the manifest (§7D): goods shipped as far as the lead source
+  /// has them, a spare core, the doctrine by name; null takes the default.
+  final int? baseFuel, baseMedicine, baseSteel, baseElectronics;
+  final bool baseSpareCore;
+  final String? baseDoctrine;
+
   @override
   String get targetAssetId => targetColonyId;
 
@@ -134,6 +152,12 @@ class LaunchOperationCommand extends CombatCommand {
         if (roe != 'restrained') 'roe': roe,
         if (baseMateriel != 0) 'baseM': baseMateriel,
         if (baseSupport != 0) 'baseS': baseSupport,
+        if (baseFuel != null) 'baseFuel': baseFuel,
+        if (baseMedicine != null) 'baseMed': baseMedicine,
+        if (baseSteel != null) 'baseSteel': baseSteel,
+        if (baseElectronics != null) 'baseElec': baseElectronics,
+        if (baseSpareCore) 'baseSpare': true,
+        if (baseDoctrine != null) 'baseDoctrine': baseDoctrine,
       };
 }
 

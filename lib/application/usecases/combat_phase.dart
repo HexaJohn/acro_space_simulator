@@ -225,8 +225,19 @@ class CombatPhase {
     }
     final draws = [for (final d in c.draws) TrooperDraw(d.colonyId, d.siteId, d.count)];
     final snap = target.launchSnapshot();
-    final manifest =
-        c.withBase ? BaseManifest(materiel: c.baseMateriel, support: c.baseSupport) : null;
+    const d = BaseManifest();
+    final manifest = c.withBase
+        ? BaseManifest(
+            materiel: c.baseMateriel,
+            support: c.baseSupport,
+            fuel: c.baseFuel ?? d.fuel,
+            medicine: c.baseMedicine ?? d.medicine,
+            steel: c.baseSteel ?? d.steel,
+            electronics: c.baseElectronics ?? d.electronics,
+            spareCore: c.baseSpareCore,
+            doctrine: Doctrine.values.where((v) => v.name == c.baseDoctrine).firstOrNull ?? d.doctrine,
+          )
+        : null;
     final planned = snap.independent
         ? planColonyAssault(
             operationId: registry.nextOperationId,
@@ -372,6 +383,8 @@ class CombatPhase {
     final homes = op.attackerByHome(exceptSite: op.base == null ? null : kSupportSite);
     var garrisonFrom = '';
     var garrisonN = 0;
+    // Support staff who stay on as the post's turret crews (§7D).
+    var postCrew = 0;
     if (op.outcome == OperationOutcome.won && target != null) {
       // The garrison comes from the home with the most survivors, so it has
       // one home to be paid from and to go back to.
@@ -402,13 +415,37 @@ class CombatPhase {
           for (final k in kWarCommodities)
             if (k != 'guns' && (op.garrisonKit[k] ?? 0) > 0) k: op.garrisonKit[k]!,
         };
+        final stock = {
+          for (final k in kWarCommodities) if (upkeep[k] != null) k: upkeep[k]! * garrisonN * kitLeft
+        };
+        // The post (§7D): a base still standing leaves the garrison its kit,
+        // and a won assault keeps its crewed turrets, crews and all, when the
+        // base and the garrison share a home.
+        final b = op.base;
+        var postTurrets = 0;
+        if (b != null && b.standing && !b.overrun) {
+          for (var i = 0; i < kBaseGoods.length && i < b.stockC.length; i++) {
+            final k = kBaseGoods[i];
+            if (stock[k] == null || b.stockC[i] <= 0) continue;
+            stock[k] = stock[k]! + b.stockC[i] / 100;
+            b.stockC[i] = 0;
+          }
+          if (op.kind == OperationKind.colonyAssault && b.homeColonyId == garrisonFrom) {
+            for (final f in b.turretCrews(op)) {
+              if (f.count < kTurretCrew) continue;
+              postTurrets++;
+              postCrew += f.count;
+            }
+          }
+        }
         g = PortGarrison(
           opId: op.id,
           homeColonyId: garrisonFrom,
-          count: garrisonN,
+          count: garrisonN + postCrew,
           perTrooperDay: upkeep,
-          stock: {for (final k in kWarCommodities) if (upkeep[k] != null) k: upkeep[k]! * garrisonN * kitLeft},
+          stock: stock,
           occupation: op.kind == OperationKind.colonyAssault,
+          turrets: postTurrets,
         );
         // The first run leaves now: the garrison holds with whatever kit the
         // fight left it, often well under a day, and a first run three days
@@ -417,7 +454,7 @@ class CombatPhase {
           targetColonyId: target.id,
           homeColonyId: garrisonFrom,
           opId: op.id,
-          count: garrisonN,
+          count: garrisonN + postCrew,
           perTrooperDay: Map.of(upkeep),
           nextRunUs: registry.clockUs,
         ));
@@ -445,7 +482,7 @@ class CombatPhase {
       _find(cities, h.home)?.war.inbox.add(TroopersHomeWrite(op.id, null,
           alive: math.max(0, h.alive - keep), wounded: h.wounded, dead: h.dead));
     }
-    _reportBase(op, target, cities);
+    _reportBase(op, target, cities, postCrew: postCrew);
     final dead = op.attackerDead;
     if (dead > 0) {
       for (final c in cities) {
@@ -456,13 +493,13 @@ class CombatPhase {
 
   /// The base at the end (§7C): its support staff home; what is left struck
   /// and shipped home — or, overrun or abandoned, half the target's.
-  void _reportBase(Operation op, CitySim? target, List<CitySim> cities) {
+  void _reportBase(Operation op, CitySim? target, List<CitySim> cities, {int postCrew = 0}) {
     final b = op.base;
     if (b == null) return;
     final home = _find(cities, b.homeColonyId);
     final fighting = op.fromSite(kSupportSite);
     home?.war.inbox.add(TroopersHomeWrite(op.id, kSupportSite,
-        alive: b.supportAlive + fighting.alive,
+        alive: b.supportAlive + fighting.alive - postCrew,
         wounded: b.supportWounded + fighting.wounded,
         dead: b.supportDead + fighting.dead));
     // What is still the base's: stock, Materiel unpacked and not, and runs

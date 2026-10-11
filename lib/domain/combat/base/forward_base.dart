@@ -1290,6 +1290,14 @@ class ForwardBase {
     return n;
   }
 
+  /// The formations crewing the turrets still standing, in site and socket
+  /// order.
+  List<Formation> turretCrews(Operation op) => [
+        for (final (_, m) in allModules)
+          if (m.kind == ModuleKind.turret && m.formationId != null)
+            if (op.formationById(m.formationId!) case final f? when f.alive) f
+      ];
+
   /// Turrets standing: each counts toward an occupation's suppression.
   int get turretsStanding {
     var n = 0;

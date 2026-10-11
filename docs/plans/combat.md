@@ -560,8 +560,9 @@ sockets, at least 400 m from every pad.
 +0.3 there until it is taken). **Powers** (`CommanderPowerCommand`): emergency supply drop (a run landing in half a
 day, every 2 days), Medevac (the wounded at one objective to the hospital now, every day; needs one).
 
-**The post:** a won port retake with a standing base leaves the base's kit to the garrison, which holds longer; a won
-assault's turrets each count two troopers toward suppression while their crews stay *(default)*.
+**The post:** a won operation with a standing base leaves the base's kit to the garrison, which holds longer; a won
+assault's crewed turrets stay with their crews (who join the garrison) and each counts two troopers more toward
+suppression while two of the garrison can crew it *(default)*.
 
 **Out of scope:** the vehicle bay and airpad (phases 6–7), AT/AA turrets, orbital and silo powers (3b, 7), fog (with
 the battle view), the depth-tested 3D base (4a's renderer).

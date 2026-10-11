@@ -65,6 +65,7 @@ class PortGarrison {
     required this.stock,
     this.unpaidS = 0,
     this.occupation = false,
+    this.turrets = 0,
   });
   final int opId;
   final String homeColonyId;
@@ -80,6 +81,14 @@ class PortGarrison {
   /// It holds the whole colony (combat.md §7A), not just a retaken port.
   final bool occupation;
 
+  /// A won assault's base turrets left standing as the garrison's post
+  /// (§7D): each counts [kTurretTroopers] more toward suppression while two
+  /// of the garrison still crew it.
+  final int turrets;
+
+  /// The troopers it sits on the colony with.
+  int get suppressing => count + kTurretTroopers * math.min(turrets, count ~/ kTurretCrew);
+
   Map<String, dynamic> toJson() => {
         'op': opId,
         'home': homeColonyId,
@@ -88,6 +97,7 @@ class PortGarrison {
         'stock': {for (final k in kWarCommodities) if (stock[k] != null) k: stock[k]},
         if (unpaidS != 0) 'unpaid': unpaidS,
         if (occupation) 'occ': true,
+        if (turrets != 0) 'turrets': turrets,
       };
 
   static PortGarrison? fromJson(Object? j) {
@@ -107,9 +117,14 @@ class PortGarrison {
       stock: m(j['stock']),
       unpaidS: (j['unpaid'] as num?)?.toDouble() ?? 0,
       occupation: j['occ'] == true,
+      turrets: (j['turrets'] as num?)?.toInt() ?? 0,
     );
   }
 }
+
+/// What a post's turret counts for, and the crew it needs.
+const int kTurretTroopers = 2;
+const int kTurretCrew = 2;
 
 /// Resolve a beaten-off assault adds, and for how many loyalty days.
 const double kResolveBoost = 0.2;

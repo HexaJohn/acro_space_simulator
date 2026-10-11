@@ -337,6 +337,58 @@ void main() {
     expect(w.ops.garrisons, isEmpty);
   });
 
+  test('a won assault keeps its base as the post: turrets crewed, kit left to the garrison', () {
+    final src = source(3), tgt = rebels();
+    src.stock[Commodity.ore] = 900;
+    final w = world([src, tgt]);
+    w.tick.execute(w.clock);
+    final sources = src.trooperSources();
+    w.ops.inbox.enqueue(LaunchOperationCommand(player, 0,
+        targetColonyId: 'tgt',
+        draws: [
+          for (final s in sources)
+            if (s.ready) (colonyId: src.id, siteId: s.siteId, count: s.available)
+        ],
+        kitDays: 6,
+        garrison: 4,
+        baseMateriel: 400,
+        baseSupport: 8));
+    w.tick.execute(w.clock);
+    expect(w.ops.operations, hasLength(1), reason: w.ops.lastRefusal);
+    final op = w.ops.operations.single;
+    final b = op.base!;
+    var crews = 0, rations = 0.0;
+    for (var i = 0; i < 40000 && !w.ops.reported.contains(op.id); i++) {
+      w.tick.execute(w.clock);
+      if (!op.resolved) {
+        crews = [for (final f in b.turretCrews(op)) if (f.count >= kTurretCrew) f.count]
+            .fold(0, (a, v) => a + v);
+        rations = b.stockC[kBaseGoods.indexOf(Commodity.rations)] / 100;
+      }
+    }
+    w.tick.execute(w.clock);
+    // ignore: avoid_print
+    print('post: ${op.outcome}, base standing ${b.standing}, crews $crews, rations $rations');
+    if (op.outcome != OperationOutcome.won || !b.standing) return;
+    final g = tgt.war.garrison!;
+    expect(g.count, 4 + crews, reason: 'the crews stay with the post');
+    expect(g.turrets, greaterThan(0));
+    expect(g.suppressing, g.count + kTurretTroopers * g.turrets);
+    expect(src.troopersAway, g.count);
+    expect(w.ops.garrisons.single.count, g.count);
+    expect(src.war.deployed.fold<int>(0, (a, d) => a + d.count), g.count);
+  });
+
+  test('a post\'s turrets count while two of the garrison crew each', () {
+    final g = PortGarrison(
+        opId: 1, homeColonyId: 'a', count: 5, perTrooperDay: const {}, stock: {}, turrets: 3);
+    expect(g.suppressing, 5 + 2 * 2, reason: 'five crew two turrets');
+    final back = PortGarrison.fromJson(jsonDecode(jsonEncode(g.toJson())))!;
+    expect(back.turrets, 3);
+    g.count = 1;
+    expect(g.suppressing, 1);
+  });
+
   test('an assault ends Rejoined when the colony comes back on its own', () {
     final src = source(2), tgt = rebels();
     final w = world([src, tgt]);

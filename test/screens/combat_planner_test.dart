@@ -166,6 +166,35 @@ void main() {
     expect(launched.single.withBase, isFalse);
   });
 
+  testWidgets('the base manifest: a doctrine, a spare core and the goods it carries', (t) async {
+    t.view.physicalSize = const Size(1200, 2600);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final launched = <LaunchOperationCommand>[];
+    final src = source()
+      ..stock[Commodity.ore] = 600
+      ..stock[Commodity.steel] = 40;
+    await pump(t, [src], launched: launched);
+    expect(find.text('Steel'), findsOneWidget, reason: 'the source has some');
+    expect(find.text('Electronics'), findsNothing, reason: 'and none of these');
+    await t.ensureVisible(find.byKey(const Key('planner-doctrine-hold')));
+    await t.tap(find.byKey(const Key('planner-doctrine-hold')));
+    await t.pump();
+    await t.ensureVisible(find.byKey(const Key('planner-spare-core')));
+    await t.tap(find.byKey(const Key('planner-spare-core')));
+    await t.pump();
+    await t.ensureVisible(find.byKey(const Key('planner-launch')));
+    await t.tap(find.byKey(const Key('planner-launch')));
+    await t.pump();
+    final cmd = launched.single;
+    expect(cmd.baseDoctrine, 'hold');
+    expect(cmd.baseSpareCore, isTrue);
+    expect(cmd.baseSteel, 0);
+    final back = CombatCommand.fromJson(cmd.toJson())! as LaunchOperationCommand;
+    expect(back.baseDoctrine, 'hold');
+    expect(back.baseSpareCore, isTrue);
+  });
+
   test('sources are every other colony that takes orders', () {
     final a = moon('a'), b = moon('b'), t0 = moon('t');
     b.loyalty.allegiance = Allegiance.independent;

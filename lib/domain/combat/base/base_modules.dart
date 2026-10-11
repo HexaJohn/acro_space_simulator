@@ -264,6 +264,13 @@ const List<String> kBaseStock = [
 /// A doctrine's build list (§7D). Append-only: saved by name.
 enum Doctrine { balanced, hold, push, manual }
 
+String doctrineLabel(Doctrine d) => switch (d) {
+      Doctrine.balanced => 'Balanced',
+      Doctrine.hold => 'Hold',
+      Doctrine.push => 'Push',
+      Doctrine.manual => 'Manual',
+    };
+
 /// One item of a doctrine's list: a module, a tier upgrade, or an outpost.
 enum DoctrineStep {
   pad,

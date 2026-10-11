@@ -20,6 +20,7 @@ import 'package:flutter/material.dart';
 import '../../../../domain/colony/city/city_loyalty.dart';
 import '../../../../domain/colony/city/city_sim.dart';
 import '../../../../domain/colony/city/city_war.dart';
+import '../../../../domain/combat/base/base_modules.dart';
 import '../../../../domain/combat/launch/plan_operation.dart';
 import '../../../../domain/combat/launch/snapshots.dart';
 import '../../../../domain/combat/operation.dart';
@@ -83,9 +84,31 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
   bool _base = true;
   int _baseMateriel = 300;
   int _baseSupport = 10;
+  int _baseFuel = 24, _baseMedicine = 10, _baseSteel = 0, _baseElectronics = 0;
+  bool _spareCore = false;
+  Doctrine _doctrine = Doctrine.balanced;
 
-  BaseManifest? get _manifest =>
-      _base ? BaseManifest(materiel: _baseMateriel, support: _baseSupport) : null;
+  BaseManifest? get _manifest => _base
+      ? BaseManifest(
+          materiel: _baseMateriel,
+          support: _baseSupport,
+          fuel: _baseFuel,
+          medicine: _baseMedicine,
+          steel: _baseSteel,
+          electronics: _baseElectronics,
+          spareCore: _spareCore,
+          doctrine: _doctrine,
+        )
+      : null;
+
+  /// The most of [good] any source has, whole units.
+  int _richest(String good) {
+    var v = 0.0;
+    for (final s in _sources) {
+      v = math.max(v, s.stock[good] ?? 0);
+    }
+    return v.floor();
+  }
 
   /// An independent colony: taken and occupied, not a port retaken.
   bool get _assault => _target.independent;
@@ -117,6 +140,8 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
     _baseMateriel = math.min(300, (ore ~/ 50) * 50);
     _baseSupport = math.min(10, support);
     _base = _baseMateriel >= 50 && _baseSupport >= 2;
+    _baseFuel = math.min(24, _richest('fuel'));
+    _baseMedicine = math.min(10, _richest('medicine'));
     _replan();
   }
 
@@ -197,6 +222,12 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
       roe: _roe.name,
       baseMateriel: _base ? _baseMateriel : 0,
       baseSupport: _base ? _baseSupport : 0,
+      baseFuel: _base ? _baseFuel : null,
+      baseMedicine: _base ? _baseMedicine : null,
+      baseSteel: _base ? _baseSteel : null,
+      baseElectronics: _base ? _baseElectronics : null,
+      baseSpareCore: _base && _spareCore,
+      baseDoctrine: _base ? _doctrine.name : null,
     ));
     Navigator.of(context).maybePop();
   }
@@ -319,6 +350,55 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
             _replan();
           });
         }),
+        for (final (label, good, max, get, set) in <(String, String, int, int, void Function(int))>[
+          ('Fuel', 'fuel', 60, _baseFuel, (v) => _baseFuel = v),
+          ('Medicine', 'medicine', 40, _baseMedicine, (v) => _baseMedicine = v),
+          ('Steel', 'steel', 80, _baseSteel, (v) => _baseSteel = v),
+          ('Electronics', 'electronics', 30, _baseElectronics, (v) => _baseElectronics = v),
+        ])
+          if (math.min(max, _richest(good)) > 0)
+            _sliderRow(label, '$get', get.toDouble(), 0, math.min(max, _richest(good)).toDouble(),
+                math.min(max, _richest(good)), (v) {
+              setState(() {
+                set(v.round());
+                _replan();
+              });
+            }),
+        Row(children: [
+          const SizedBox(width: 170, child: Text('Spare core', style: AppTheme.body)),
+          Switch(
+            key: const Key('planner-spare-core'),
+            value: _spareCore,
+            onChanged: (v) => setState(() {
+              _spareCore = v;
+              _replan();
+            }),
+          ),
+          Expanded(
+            child: Text('$kSpareCoreMateriel ore more: a second core to land if the first is lost.',
+                style: AppTheme.dim),
+          ),
+        ]),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(children: [
+            const SizedBox(width: 170, child: Text('Builds', style: AppTheme.body)),
+            Expanded(
+              child: Wrap(spacing: 6, children: [
+                for (final d in Doctrine.values)
+                  ChoiceChip(
+                    key: Key('planner-doctrine-${d.name}'),
+                    label: Text(doctrineLabel(d)),
+                    selected: _doctrine == d,
+                    onSelected: (_) => setState(() {
+                      _doctrine = d;
+                      _replan();
+                    }),
+                  ),
+              ]),
+            ),
+          ]),
+        ),
       ],
     ]);
   }
