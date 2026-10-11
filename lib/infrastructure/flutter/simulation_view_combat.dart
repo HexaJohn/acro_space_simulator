@@ -1029,13 +1029,12 @@ extension _SimulationViewCombat on _SimulationViewState {
         CombatUnitMark(
           '${u.formationId}:${u.member}',
           bodyId,
-          city.localToBodyFixed(Vec2(u.e, u.n),
-              bodyRadiusM: st.unitGround['${u.formationId}:${u.member}'] ??= () {
-                final dir = city.localToBodyFixed(Vec2(u.e, u.n), bodyRadiusM: body.radius).normalized;
-                return SceneSync.drawnGround?.call(dir) ?? r.radiusAt(u.e, u.n) ?? body.radius;
-              }()),
+          // On the battle's ground (a far unit's drawn mesh is a coarser
+          // chunk than the one the offset was measured on).
+          _liveBF(city, r, body.radius, u.e, u.n, 0),
           attacker: u.side == CombatSide.attacker,
           emplacement: u.kind == FormationKind.emplacement,
+          moving: (u.te - u.e).abs() + (u.tn - u.n).abs() > 0.3,
         ),
     ];
     CombatUnitState.tracers = [
@@ -1780,6 +1779,24 @@ extension _SimulationViewCombat on _SimulationViewState {
           'attack': l.attackTarget,
           'squadUnits': l.units.where((u) => u.squad).length,
           'fieldsBuilt': l.nav?.built,
+          // Why nobody fires: defenders in range of the player, those with
+          // sight, and those with sight over the ground alone (no walls).
+          'sight': () {
+            final nav = l.nav;
+            if (nav == null) return null;
+            final bare = NavGrid(nav.raster, const []);
+            final eye = _combatState.lastEye;
+            var inRange = 0, seen = 0, seenBare = 0;
+            for (final u in l.units) {
+              if (u.side != CombatSide.defender) continue;
+              final d = math.sqrt((u.e - eye.$1) * (u.e - eye.$1) + (u.n - eye.$2) * (u.n - eye.$2));
+              if (d > kDefenderRangeM) continue;
+              inRange++;
+              if (nav.lineOfSight((u.e, u.n, 1.4), eye)) seen++;
+              if (bare.lineOfSight((u.e, u.n, 1.4), eye)) seenBare++;
+            }
+            return {'inRange': inRange, 'seen': seen, 'seenOverGround': seenBare, 'walls': nav.footprints.length};
+          }(),
           'drawnOffset': _combatState.drawnOffset,
         },
       'rasters': {
