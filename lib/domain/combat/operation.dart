@@ -18,6 +18,8 @@ import 'dart:math' as math;
 
 import 'combat_rng.dart';
 import 'formation.dart';
+import 'base/base_modules.dart';
+import 'base/forward_base.dart';
 import 'lander.dart';
 import 'objective.dart';
 import 'operation_clock.dart';
@@ -133,6 +135,7 @@ class Operation {
     this.order = OrderKind.auto,
     this.orderTarget,
     List<LanderRecord>? landers,
+    this.base,
     Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
@@ -218,6 +221,24 @@ class Operation {
   /// building's inputs, recorded at launch so reporting reads no colony.
   final Map<String, double> garrisonKit;
 
+  /// The forward base at the LZ (§7C), or null for a light operation.
+  final ForwardBase? base;
+
+  Formation? formationById(int id) {
+    for (final f in formations) {
+      if (f.id == id) return f;
+    }
+    return null;
+  }
+
+  /// Adds an attacking formation raised in the field (a turret's crew, a
+  /// squad formed at the base): the next id, counted among those raised.
+  void addAttacker(Formation f) {
+    formations.add(f);
+    if (f.id >= nextFormationId) nextFormationId = f.id + 1;
+    attackerRaised += f.count;
+  }
+
   /// Troop landers flying the squads down (§7B); empty where landing is
   /// abstract. The transit waits on them.
   final List<LanderRecord> landers;
@@ -239,6 +260,11 @@ class Operation {
     if (l == null || l.settled) return;
     l.state = LanderState.landed;
     final t = clock.steps;
+    // The core rides the first lander (§7C).
+    final b = base;
+    if (b != null && identical(l, landers.first) && b.deployAtStep < 0) {
+      b.deployAtStep = t + kDeployS;
+    }
     for (final f in formations) {
       if (l.formationIds.contains(f.id) && f.at == FormationAt.transit) {
         f.at = lzId;
@@ -253,6 +279,7 @@ class Operation {
     final l = _lander(vesselId);
     if (l == null || l.settled) return;
     l.state = LanderState.lost;
+    if (identical(l, landers.first)) base?.loseCore();
     for (final f in formations) {
       if (!l.formationIds.contains(f.id) || f.at != FormationAt.transit) continue;
       f.dead += f.count;
@@ -375,6 +402,7 @@ class Operation {
             f.arriveStep = t;
           }
         }
+        base?.step(this, t);
         if ((t - engagedAtStep) % tuning.aiEveryS == 0) {
           _defenderAi(t);
           _attackerAi(t);
@@ -402,6 +430,8 @@ class Operation {
     }
     phase = OperationPhase.engaged;
     engagedAtStep = t;
+    final b = base;
+    if (b != null && b.deployAtStep < 0 && landers.isEmpty) b.deployAtStep = t + kDeployS;
   }
 
   void _fight(Objective o, int t, List<bool> inContact) {
@@ -447,7 +477,7 @@ class Operation {
       defC: [for (final i in def) formations[i].counterClass],
       width: o.width,
       fDef: o.fDef,
-      fAtt: o.fAtt,
+      fAtt: o.fAtt + (base?.fAttBonus(o.id, lzId) ?? 0),
       fuzz: fuzz,
       dt: dt,
       tuning: tuning,
@@ -493,6 +523,10 @@ class Operation {
       if (!f.alive) continue;
       var m = f.morale;
       if (!inContact[i]) m += tuning.recoverOutOfContact * dt;
+      // A barracks pod at the LZ rallies broken squads twice as fast.
+      if (f.broken && f.side == CombatSide.attacker && (base?.podOnline ?? false)) {
+        m += tuning.recoverOutOfContact * dt;
+      }
       final o = graph.byId(f.at);
       if (o != null && !f.broken && t >= f.arriveStep) {
         final holds = f.side == CombatSide.attacker
@@ -522,11 +556,18 @@ class Operation {
   /// with none threatened. With phase 1's graph that is the Port or nothing.
   Objective? _threatened() {
     Objective? best;
+    var bestValue = 0.0;
+    final raidable = base?.standing ?? false;
     for (final o in graph.objectives) {
-      if (o.kind == ObjectiveKind.lz) continue;
+      // The LZ is worth raiding only once a base stands on it (§7C).
+      if (o.kind == ObjectiveKind.lz && !raidable) continue;
+      final value = o.kind == ObjectiveKind.lz ? base!.lzValue() : o.value;
       final hit = formations.any((f) =>
           f.side == CombatSide.attacker && f.alive && !f.broken && f.at == o.id);
-      if (hit && (best == null || o.value > best.value)) best = o;
+      if (hit && (best == null || value > bestValue)) {
+        best = o;
+        bestValue = value;
+      }
     }
     return best;
   }
@@ -633,6 +674,7 @@ class Operation {
       case OrderKind.fallBack:
         for (final f in formations) {
           if (f.side != CombatSide.attacker || !f.alive || f.broken) continue;
+          if (f.kind == FormationKind.emplacement) continue;
           if (f.at == lzId || graph.byId(f.at) == null) continue;
           f.marchTo(lzId, t, graph.marchS(f.at, lzId));
         }
@@ -649,6 +691,7 @@ class Operation {
         }
         for (final f in formations) {
           if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
+          if (f.kind == FormationKind.emplacement) continue;
           if (f.at == target.id || graph.byId(f.at) == null || !f.presentAt(f.at, t)) {
             continue;
           }
@@ -671,6 +714,8 @@ class Operation {
     final movers = <Formation>[];
     for (final f in formations) {
       if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
+      // A turret stands where it was built.
+      if (f.kind == FormationKind.emplacement) continue;
       var there = false;
       for (final id in behind) {
         if (f.presentAt(id, t)) there = true;
@@ -730,6 +775,9 @@ class Operation {
     var anyAlive = false, anyFit = false, anyKit = false;
     for (final f in formations) {
       if (f.side != CombatSide.attacker || !f.alive) continue;
+      // A base's turrets hold the LZ; they take nothing, so they keep no
+      // operation alive on their own.
+      if (f.kind == FormationKind.emplacement) continue;
       anyAlive = true;
       if (!f.broken) anyFit = true;
       if (f.kitDays > 0) anyKit = true;
@@ -838,12 +886,15 @@ class Operation {
       : 0;
 
   /// Attacker dead and wounded by home colony, in colony id order: what each
-  /// home is charged when the operation reports back.
-  List<({String home, int dead, int wounded, int alive})> attackerByHome() {
+  /// home is charged when the operation reports back. [exceptSite] leaves out
+  /// formations drawn from that site (a base's support staff, reported with
+  /// the base).
+  List<({String home, int dead, int wounded, int alive})> attackerByHome({String? exceptSite}) {
     final homes = <String>[];
     for (final f in formations) {
       final h = f.homeColonyId;
       if (f.side == CombatSide.attacker && h != null && !homes.contains(h)) {
+        if (exceptSite != null && f.homeSiteId == exceptSite) continue;
         homes.add(h);
       }
     }
@@ -852,19 +903,34 @@ class Operation {
       for (final h in homes)
         (
           home: h,
-          dead: _homeSum(h, (f) => f.dead),
-          wounded: _homeSum(h, (f) => f.wounded),
-          alive: _homeSum(h, (f) => f.count),
+          dead: _homeSum(h, (f) => f.dead, exceptSite),
+          wounded: _homeSum(h, (f) => f.wounded, exceptSite),
+          alive: _homeSum(h, (f) => f.count, exceptSite),
         )
     ];
   }
 
-  int _homeSum(String home, int Function(Formation) of) {
+  int _homeSum(String home, int Function(Formation) of, String? exceptSite) {
     var n = 0;
     for (final f in formations) {
-      if (f.side == CombatSide.attacker && f.homeColonyId == home) n += of(f);
+      if (f.side != CombatSide.attacker || f.homeColonyId != home) continue;
+      if (exceptSite != null && f.homeSiteId == exceptSite) continue;
+      n += of(f);
     }
     return n;
+  }
+
+  /// The members of formations drawn from [site] (a base's support staff in
+  /// turrets and formed squads): alive, wounded, dead.
+  ({int alive, int wounded, int dead}) fromSite(String site) {
+    var a = 0, w = 0, d = 0;
+    for (final f in formations) {
+      if (f.side != CombatSide.attacker || f.homeSiteId != site) continue;
+      a += f.count;
+      w += f.wounded;
+      d += f.dead;
+    }
+    return (alive: a, wounded: w, dead: d);
   }
 
   // ---- persistence ----------------------------------------------------------
@@ -898,6 +964,7 @@ class Operation {
         if (garrison != 0) 'garrison': garrison,
         if (order != OrderKind.auto) 'order': order.name,
         if (landers.isNotEmpty) 'landers': [for (final l in landers) l.toJson()],
+        if (base != null) 'base': base!.toJson(),
         if (orderTarget != null) 'orderTarget': orderTarget,
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
@@ -952,6 +1019,9 @@ class Operation {
           for (final l in (j['landers'] as List? ?? const []))
             LanderRecord.fromJson((l as Map).cast<String, dynamic>())
         ],
+        base: j['base'] == null
+            ? null
+            : ForwardBase.fromJson((j['base'] as Map).cast<String, dynamic>()),
         garrisonKit: {
           for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
             if ((j['garrisonKit'] as Map?)?[k] is num)

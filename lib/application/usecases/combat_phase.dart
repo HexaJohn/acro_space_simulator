@@ -22,6 +22,7 @@ import 'dart:math' as math;
 import '../../domain/colony/city/city_loyalty.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/city_war.dart';
+import '../../domain/combat/base/base_modules.dart';
 import '../../domain/combat/formation.dart';
 import '../../domain/combat/lander.dart';
 import '../../domain/combat/launch/plan_operation.dart';
@@ -76,6 +77,7 @@ class CombatPhase {
     for (final op in registry.operations) {
       if (!op.resolved) op.advance(opDt);
     }
+    _postBaseRuns(cities);
     for (final op in registry.operations) {
       if (op.resolved && !registry.reported.contains(op.id)) _report(op, cities);
     }
@@ -107,6 +109,22 @@ class CombatPhase {
         if (kind != null) registry.byId(c.operationId)?.setOrder(kind, target: c.target);
       case ReinforceOperationCommand():
         _reinforce(c, cities);
+      case BaseOrderCommand():
+        final op = registry.byId(c.operationId);
+        final b = op?.base;
+        if (op == null || b == null || op.resolved) break;
+        final kind = ModuleKind.values.where((k) => k.name == c.module).firstOrNull;
+        final ring = SocketKind.values.where((r) => r.name == c.ring).firstOrNull;
+        switch (c.action) {
+          case 'build':
+            if (kind != null) b.orderBuild(kind, c.socket ?? b.firstFree(moduleSpec(kind).socket) ?? -1);
+          case 'cancel':
+            b.cancelJob();
+          case 'demolish':
+            if (ring != null && c.socket != null) b.demolish(op, ring, c.socket!);
+          case 'formSquad':
+            b.formSquad(op);
+        }
     }
   }
 
@@ -186,6 +204,8 @@ class CombatPhase {
     }
     final draws = [for (final d in c.draws) TrooperDraw(d.colonyId, d.siteId, d.count)];
     final snap = target.launchSnapshot();
+    final manifest =
+        c.withBase ? BaseManifest(materiel: c.baseMateriel, support: c.baseSupport) : null;
     final planned = snap.independent
         ? planColonyAssault(
             operationId: registry.nextOperationId,
@@ -195,6 +215,7 @@ class CombatPhase {
             kitDays: c.kitDays,
             garrison: c.garrison,
             roe: Roe.values.where((r) => r.name == c.roe).firstOrNull ?? Roe.restrained,
+            base: manifest,
             tuning: tuning,
           )
         : planPortRetake(
@@ -204,6 +225,7 @@ class CombatPhase {
             draws: draws,
             kitDays: c.kitDays,
             garrison: c.garrison,
+            base: manifest,
             tuning: tuning,
           );
     final op = planned.operation;
@@ -266,11 +288,38 @@ class CombatPhase {
         }
         registry.garrisons.removeWhere(
             (g) => g.targetColonyId == city.id && (g.count <= 0 || e.expelled));
+      case BaseRunShippedEvent():
+        final op = registry.byId(e.opId);
+        final b = op?.base;
+        if (op != null && b != null && !op.resolved) {
+          final transit = (op.sameBody ? tuning.transitDaysSameBody : tuning.transitDaysOtherBody) *
+              tuning.daySec;
+          b.runShipped(e.runId, (e.materiel * 100).round(),
+              [for (final v in e.stock) (v * 100).round()], op.clock.steps + transit.round());
+        } else if (e.materiel > 0 || e.stock.any((v) => v > 0)) {
+          // Shipped to an operation already over: the goods go back.
+          city.war.inbox.add(BaseGoodsWrite(e.materiel, e.stock));
+        }
       case GarrisonSuppliedEvent():
         if (e.amounts.isNotEmpty) {
           registry.runs.add(SupplyRun(
               e.targetColonyId, e.amounts, registry.clockUs + supplyTransitS * 1000000));
         }
+    }
+  }
+
+  /// A forward base's supply runs, asked for this tick, go to its lead
+  /// source as debits; the source answers with what it shipped (§7C).
+  void _postBaseRuns(List<CitySim> cities) {
+    for (final op in registry.operations) {
+      final b = op.base;
+      if (b == null || op.resolved) continue;
+      for (final r in b.runs) {
+        if (r.posted) continue;
+        r.posted = true;
+        _find(cities, b.homeColonyId)?.war.inbox.add(BaseRunDebitWrite(
+            op.id, r.id, r.materielC / 100, [for (final v in r.stockC) v / 100]));
+      }
     }
   }
 
@@ -296,7 +345,10 @@ class CombatPhase {
   void _report(Operation op, List<CitySim> cities) {
     registry.reported.add(op.id);
     final target = _find(cities, op.targetColonyId);
-    final homes = op.attackerByHome();
+    // A base's support staff — the reserve, crews, and those fighting as
+    // turrets or a formed squad — are reported with the base, under their
+    // own deployed entry.
+    final homes = op.attackerByHome(exceptSite: op.base == null ? null : kSupportSite);
     var garrisonFrom = '';
     var garrisonN = 0;
     if (op.outcome == OperationOutcome.won && target != null) {
@@ -372,11 +424,47 @@ class CombatPhase {
       _find(cities, h.home)?.war.inbox.add(TroopersHomeWrite(op.id, null,
           alive: math.max(0, h.alive - keep), wounded: h.wounded, dead: h.dead));
     }
+    _reportBase(op, target, cities);
     final dead = op.attackerDead;
     if (dead > 0) {
       for (final c in cities) {
         c.war.inbox.add(WarWearinessWrite(dead * wearinessPerDead));
       }
+    }
+  }
+
+  /// The base at the end (§7C): its support staff home; what is left struck
+  /// and shipped home — or, overrun or abandoned, half the target's.
+  void _reportBase(Operation op, CitySim? target, List<CitySim> cities) {
+    final b = op.base;
+    if (b == null) return;
+    final home = _find(cities, b.homeColonyId);
+    final fighting = op.fromSite(kSupportSite);
+    home?.war.inbox.add(TroopersHomeWrite(op.id, kSupportSite,
+        alive: b.supportAlive + fighting.alive,
+        wounded: b.supportWounded + fighting.wounded,
+        dead: b.supportDead + fighting.dead));
+    // What is still the base's: stock, Materiel unpacked and not, and runs
+    // shipped but not yet landed.
+    var m = b.materielC + b.palletsC;
+    final stock = List<int>.of(b.stockC);
+    for (final r in b.runs) {
+      if (r.arriveStep < 0) continue;
+      m += r.materielC;
+      for (var i = 0; i < stock.length; i++) {
+        stock[i] += r.stockC[i];
+      }
+    }
+    List<double> d(List<int> c) => [for (final v in c) v / 100];
+    if (b.overrun) {
+      if (b.capturedMaterielC > 0 || b.capturedStockC.any((v) => v > 0)) {
+        target?.war.inbox.add(BaseGoodsWrite(b.capturedMaterielC / 100, d(b.capturedStockC)));
+      }
+    } else if (op.outcome == OperationOutcome.lost && b.standing) {
+      // Abandoned: the target takes half; the rest is lost.
+      target?.war.inbox.add(BaseGoodsWrite(m / 200, [for (final v in stock) v / 200]));
+    } else {
+      home?.war.inbox.add(BaseGoodsWrite(m / 100, d(stock)));
     }
   }
 

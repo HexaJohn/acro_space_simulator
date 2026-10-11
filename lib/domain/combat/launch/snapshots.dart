@@ -57,16 +57,26 @@ class SourceSnapshot {
     required this.bodyId,
     required this.sources,
     required this.stock,
+    this.supportAvailable = 0,
+    this.buildings = const [],
   });
 
   final String colonyId;
   final String name;
   final String bodyId;
 
+  /// Colonists it can spare as a base's support staff.
+  final int supportAvailable;
+
+  /// The building types it has, sorted: what a base module's home gate reads
+  /// (spaceport, gunfactory, barracks, base, hospital).
+  final List<String> buildings;
+
   /// In site id order.
   final List<TrooperSource> sources;
 
-  /// Rations, ammo, guns, fuel on hand: what kit is drawn from.
+  /// Rations, ammo, guns, fuel and ore on hand: what kit — and a base's
+  /// Materiel — is drawn from.
   final Map<String, double> stock;
 
   int get available {

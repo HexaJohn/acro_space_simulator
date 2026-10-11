@@ -471,6 +471,57 @@ point), c89415e (frame, overlay, drawer orders, Watch), 7030dfc (smoke and flash
 landers down, warp held at 1×, the march and the fight drawn, a decisive victory, the landers recovered. Not built:
 petition answers as commands (still widget calls), and a depth-tested 3D marker layer (the overlay is 2D).
 
+## 7C. Phase 1b-i spec: The base core
+
+Specified 2026-10-11 after "All of them need to get done, keep going until I return": built after phases 2 and 3,
+so it rides on their objectives, landers and overlay. *(default)* as before.
+
+**Ships:** an operation can land a forward base at its LZ. Its core deploys, a landing turret comes online, and
+the base builds a supply pad, a barracks pod and a second turret from shipped Materiel — by itself (the Balanced
+doctrine) or by the player's orders from the drawer. It changes the fight with no units on screen, and an
+unwatched operation builds the same base.
+
+**State** (`lib/domain/combat/base/`, on the `Operation`, saved with it; never a CitySim building):
+- `kBaseModules`: the **supply pad** (30 Materiel, 25 s, 1 crew, 2 kW, unpacks +1/s, runs come 1.5× as often,
+  needs a source Spaceport), **turret** (60, 30 s, 2 crew, 6 kW, an attacker emplacement formation of its crew at
+  strength 3, +0.25 `F_att` at the LZ, 0.5 ammo/s engaged, needs a source Arms Factory) and **barracks pod** (50,
+  40 s, 2 crew, 6 kW, broken squads at the LZ rally twice as fast, lets support staff be formed into a squad,
+  needs a source Barracks). Catalog-isolated: never in `kUtilCatalog`.
+- The **core**: 20 kW, one build line, unpacks 0.5 Materiel/s, +0.3 `F_att` at the LZ, and the landing turret
+  (online at deploy, crew 2). Firebase tier: 3 module and 2 turret sockets, indices only *(positions are 1b-ii's)*.
+- **Materiel** is ore, mustered from the lead source (default 300); 25% lands unpacked, the rest as pallets.
+  **Support staff** (default 10) are colonists of the lead source, away like troopers, crewing modules; the
+  unassigned are the LZ reserve. Kit for them is shipped as for troopers. Stocks in centi-units.
+- Builds pay up front from unpacked Materiel; cancelling refunds half, demolishing half. Timers in whole steps.
+
+**Deploy:** 30 s after the transit ends (abstract), or after the first lander touches down (it carries the core).
+Lost with that lander, the operation fights base-less.
+
+**The step** (every operation step once deployed): unpack; power balance (modules run at
+min(1, supply ÷ demand)); build lines; turret ammo; resupply — formations at the LZ or one link from it refill kit
+toward 3 days at a day per 30 s from the base's stock; supply runs every 3 days ÷ (1 + 0.5 × pads), each a debit
+posted to the lead source and landing half a day after it ships what it had *(the preview assumes full runs)*.
+
+**Fire:** the base raises the LZ's `F_att`; turrets fight as emplacements; a base makes the LZ worth raiding — the
+defender sends waves there when nothing else is threatened *(the defender's LZ counterattack, omitted until now,
+arrives with the base and only with it, so the phase 1–3 pins hold)*. **Overrun:** the defender holding the LZ at
+control ≤ −0.9 for 60 s loses every module; crews and reserve take half dead, half wounded; half the stock is
+captured by the target, half lost.
+
+**Doctrine** (Balanced, 1b-i's only one): supply pad, barracks pod, turret, a second pad — each when its home gate,
+a socket, crew and power allow; waiting for Materiel. Player orders go first. **Light operation**: no base.
+
+**End:** on a win, withdrawal or ceasefire the base is struck and what is left goes home to the lead source; on a
+loss it is abandoned (half to the target, half lost). Support staff go home like troopers.
+
+**Commands:** the launch's base manifest; `BaseOrderCommand` (build, cancel, demolish, formSquad).
+
+**UI:** the planner's Forward base section (on/off, Materiel, support staff); the drawer's Base section (stocks,
+power, personnel, sockets with build buttons, the line, Form squad); the overlay draws the modules round the LZ.
+
+**Out of scope (1b-ii):** Station and Fortress, Stores, hospital, generator, workshop, the other doctrines, layout
+positions and the LZ picker, the spare core, outposts, counters, abilities, powers, the garrison post.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

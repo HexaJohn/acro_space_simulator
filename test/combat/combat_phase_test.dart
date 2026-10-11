@@ -384,6 +384,50 @@ void main() {
     expect(src.troopersAway, op.outcome == OperationOutcome.won ? 2 : 0);
   });
 
+  test('a forward base: shipped from the lead source, supplied through the tick, '
+      'struck and sent home at the end', () {
+    final src = source(3), tgt = target();
+    src.stock[Commodity.ore] = 700;
+    final w = world([src, tgt]);
+    w.tick.execute(w.clock);
+    final ore = src.stockOf(Commodity.ore);
+    final sources = src.trooperSources();
+    w.ops.inbox.enqueue(LaunchOperationCommand(player, 0,
+        targetColonyId: 'tgt',
+        draws: [
+          for (final s in sources)
+            if (s.ready) (colonyId: src.id, siteId: s.siteId, count: s.available)
+        ],
+        garrison: 2,
+        baseMateriel: 200,
+        baseSupport: 4));
+    w.tick.execute(w.clock);
+    expect(w.ops.operations, hasLength(1), reason: w.ops.lastRefusal);
+    final op = w.ops.operations.single;
+    final b = op.base!;
+    expect(b.homeColonyId, src.id);
+    expect(src.stockOf(Commodity.ore), closeTo(ore - 200, 1e-6));
+    expect(src.war.deployed.where((d) => d.siteId == kSupportSite).single.count, 4);
+    // Fight it out; a supply run is asked for, shipped and landed on the way.
+    var asked = false, landed = false;
+    for (var i = 0; i < 12000 && !w.ops.reported.contains(op.id); i++) {
+      w.tick.execute(w.clock);
+      if (b.runs.any((r) => r.posted)) asked = true;
+      if (asked && b.runs.isEmpty) landed = true;
+    }
+    w.tick.execute(w.clock);
+    // ignore: avoid_print
+    print('base: deployed ${b.deployed}, modules ${[for (final m in b.modules) m.kind.name]}, '
+        'runs asked $asked landed $landed, outcome ${op.outcome}');
+    expect(b.deployed, isTrue);
+    expect(op.resolved, isTrue);
+    expect(src.war.deployed.where((d) => d.siteId == kSupportSite), isEmpty,
+        reason: 'support staff home');
+    if (op.outcome == OperationOutcome.won) {
+      expect(src.stockOf(Commodity.ore), greaterThan(ore - 200), reason: 'what was left came home');
+    }
+  });
+
   test('a v2 save loads with no operations, and the registry forgets the session', () {
     final ops = OperationRegistry()..nextOperationId = 9;
     const GameStateCodec().decode(

@@ -64,11 +64,13 @@ class OperationPreview {
   bool advance(int stepBudget) {
     var budget = stepBudget;
     while (budget > 0 && !done) {
-      final op = _current ??= Operation.fromJson(_source,
+      final op = _current ??= (Operation.fromJson(_source,
           tuning: _tuning,
           counters: _counters,
           seedOverride:
-              combatMix32(_seed ^ mul32(0x9E3779B9, results.length + 1)));
+              combatMix32(_seed ^ mul32(0x9E3779B9, results.length + 1)))
+        // No colony answers a preview's supply runs: they land as asked.
+        ..base?.autoShip = true);
       final cap = _maxSteps;
       while (budget > 0 && !op.resolved && op.clock.steps < cap) {
         op.advance(1.0);

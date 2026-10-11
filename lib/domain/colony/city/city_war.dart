@@ -115,6 +115,16 @@ class PortGarrison {
 const double kResolveBoost = 0.2;
 const double kResolveBoostDays = 10;
 
+/// The deployed entry for a forward base's support staff: away from the
+/// colony, but drawn from no building.
+const String kSupportSite = 'support';
+
+/// The share of its people a colony can spare as a base's support staff.
+const double kSupportShare = 0.05;
+
+/// The goods a base keeps, in its order (ammo, guns, rations).
+const List<String> kBaseGoods = [Commodity.ammo, Commodity.guns, Commodity.rations];
+
 /// What a war is fought with, in a fixed order.
 const List<String> kWarCommodities = [
   Commodity.ammo,
@@ -201,6 +211,27 @@ class GarrisonSupplyDebitWrite extends CombatWrite {
   final Map<String, double> amounts;
 }
 
+/// A forward base's supply run (combat.md §7C): ship what you have of it.
+class BaseRunDebitWrite extends CombatWrite {
+  const BaseRunDebitWrite(this.opId, this.runId, this.materiel, this.stock);
+  final int opId;
+  final int runId;
+  final double materiel;
+
+  /// Ammo, guns, rations.
+  final List<double> stock;
+}
+
+/// What a forward base had left, struck and shipped home — or, to a target,
+/// what it captured.
+class BaseGoodsWrite extends CombatWrite {
+  const BaseGoodsWrite(this.materiel, this.stock);
+  final double materiel;
+
+  /// Ammo, guns, rations.
+  final List<double> stock;
+}
+
 /// War weariness: the player's dead cost every colony's loyalty
 /// (combat.md §7.6). Only a colony that takes the player's orders feels it.
 class WarWearinessWrite extends CombatWrite {
@@ -219,6 +250,15 @@ class StageChangedEvent extends CombatEvent {
   const StageChangedEvent(this.allegiance, this.stage);
   final Allegiance allegiance;
   final LoyaltyStage stage;
+}
+
+/// A base's supply run left: what the colony actually had to send.
+class BaseRunShippedEvent extends CombatEvent {
+  const BaseRunShippedEvent(this.opId, this.runId, this.materiel, this.stock);
+  final int opId;
+  final int runId;
+  final double materiel;
+  final List<double> stock;
 }
 
 /// A building troopers were drawn from is gone.
@@ -421,13 +461,30 @@ extension CityWar on CitySim {
   }
 
   /// This colony as a source of troopers.
-  SourceSnapshot sourceSnapshot() => SourceSnapshot(
-        colonyId: id,
-        name: name,
-        bodyId: body.id.value,
-        sources: trooperSources(),
-        stock: {for (final k in kWarCommodities) k: stockOf(k)},
-      );
+  SourceSnapshot sourceSnapshot() {
+    var supportAway = 0;
+    for (final d in war.deployed) {
+      if (d.siteId == kSupportSite) supportAway += d.count;
+    }
+    const gated = ['barracks', 'base', 'gunfactory', 'hospital', 'spaceport'];
+    final have = <String>[];
+    for (final (_, s) in buildingParcels()) {
+      if (gated.contains(s.type) && !have.contains(s.type)) have.add(s.type);
+    }
+    have.sort();
+    return SourceSnapshot(
+      colonyId: id,
+      name: name,
+      bodyId: body.id.value,
+      sources: trooperSources(),
+      stock: {
+        for (final k in kWarCommodities) k: stockOf(k),
+        Commodity.ore: stockOf(Commodity.ore),
+      },
+      supportAvailable: math.max(0, (population * kSupportShare).floor() - supportAway),
+      buildings: have,
+    );
+  }
 
   /// This colony as the target, as it stands now.
   LaunchSnapshot launchSnapshot() {
@@ -563,9 +620,28 @@ extension CityWar on CitySim {
     switch (w) {
       case DeployWrite():
         war.deployed.add(DeployedTroopers(w.opId, w.siteId, w.troopers, w.jobs));
-        for (final k in kWarCommodities) {
+        // Kit, and a forward base's Materiel (ore).
+        for (final k in const [...kWarCommodities, Commodity.ore]) {
           final v = w.kit[k];
           if (v != null && v > 0) stock[k] = math.max(0.0, stockOf(k) - v);
+        }
+      case BaseRunDebitWrite():
+        double ship(String k, double want) {
+          if (want <= 0) return 0;
+          final n = math.min(want, stockOf(k));
+          if (n <= 0) return 0;
+          stock[k] = stockOf(k) - n;
+          return n;
+        }
+        final m = ship(Commodity.ore, w.materiel);
+        final sent = [
+          for (var i = 0; i < kBaseGoods.length; i++) ship(kBaseGoods[i], w.stock[i])
+        ];
+        war.outbox.add(BaseRunShippedEvent(w.opId, w.runId, m, sent));
+      case BaseGoodsWrite():
+        if (w.materiel > 0) stock[Commodity.ore] = stockOf(Commodity.ore) + w.materiel;
+        for (var i = 0; i < kBaseGoods.length; i++) {
+          if (w.stock[i] > 0) stock[kBaseGoods[i]] = stockOf(kBaseGoods[i]) + w.stock[i];
         }
       case TroopersHomeWrite():
         // By count, not by operation: a garrison stays away after the rest
@@ -741,11 +817,13 @@ extension CityWar on CitySim {
     w._seenAllegiance = a;
     w._seenStage = s;
     if (w.deployed.isNotEmpty) {
+      // Support staff come from no building, so none can be lost under them.
+      bool lost(DeployedTroopers d) => d.siteId != kSupportSite && specAtSite(d.siteId) == null;
       for (final d in w.deployed) {
-        if (specAtSite(d.siteId) == null) w.outbox.add(SiteLostEvent(d.siteId));
+        if (lost(d)) w.outbox.add(SiteLostEvent(d.siteId));
       }
       // A lost site's troopers stay in the fight but no longer belong to it.
-      w.deployed.removeWhere((d) => specAtSite(d.siteId) == null);
+      w.deployed.removeWhere(lost);
     }
   }
 }

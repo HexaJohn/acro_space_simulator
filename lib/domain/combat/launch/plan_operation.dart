@@ -12,6 +12,8 @@ library;
 
 import 'dart:math' as math;
 
+import '../base/base_modules.dart';
+import '../base/forward_base.dart';
 import '../defender_sizing.dart';
 import '../formation.dart';
 import '../objective.dart';
@@ -155,6 +157,113 @@ _Draws _drawAttackers(List<TrooperDraw> draws, List<SourceSnapshot> sources,
   return (formations: drawn.formations, debits: drawn.debits, refusal: null);
 }
 
+/// What an operation ships to build a forward base (§7C).
+class BaseManifest {
+  const BaseManifest({this.materiel = 300, this.support = 10});
+
+  /// Ore, whole units.
+  final int materiel;
+
+  /// Support staff.
+  final int support;
+}
+
+/// Days of kit the support staff carry.
+const double kSupportKitDays = 3;
+
+/// Ammo the landing turret carries in, beyond the support staff's kit.
+const int kLandingTurretAmmo = 60;
+
+/// The forward base for [manifest], debited from the lead source — the one
+/// most troopers come from (ties by id) — or why it cannot go.
+({ForwardBase? base, SourceDebit? debit, String? refusal}) _planBase(
+    BaseManifest manifest, List<SourceDebit> debits, List<SourceSnapshot> sources) {
+  final ids = <String>[];
+  final count = <int>[];
+  for (final d in debits) {
+    final i = ids.indexOf(d.colonyId);
+    if (i < 0) {
+      ids.add(d.colonyId);
+      count.add(d.troopers);
+    } else {
+      count[i] += d.troopers;
+    }
+  }
+  if (ids.isEmpty) return (base: null, debit: null, refusal: 'Choose some troopers.');
+  var lead = 0;
+  for (var i = 1; i < ids.length; i++) {
+    if (count[i] > count[lead] || (count[i] == count[lead] && ids[i].compareTo(ids[lead]) < 0)) {
+      lead = i;
+    }
+  }
+  SourceSnapshot? src;
+  for (final s in sources) {
+    if (s.colonyId == ids[lead]) src = s;
+  }
+  if (src == null) return (base: null, debit: null, refusal: 'Unknown colony ${ids[lead]}.');
+  final ore = src.stock['ore'] ?? 0;
+  if (ore + 1e-9 < manifest.materiel) {
+    return (
+      base: null,
+      debit: null,
+      refusal: '${src.name} has only ${ore.floor()} ore for the base.'
+    );
+  }
+  if (manifest.support > src.supportAvailable) {
+    return (
+      base: null,
+      debit: null,
+      refusal: '${src.name} can spare only ${src.supportAvailable} support staff.'
+    );
+  }
+  final rations = kRationsPerDay * manifest.support * kSupportKitDays;
+  final ammo = kAmmoPerDay * manifest.support * kSupportKitDays + kLandingTurretAmmo;
+  final guns = manifest.support.toDouble();
+  // What this source already gives its troopers, plus the base's share.
+  double already(String k) {
+    var v = 0.0;
+    for (final d in debits) {
+      if (d.colonyId == src!.colonyId) v += d.kit[k] ?? 0;
+    }
+    return v;
+  }
+
+  for (final (k, need) in [('rations', rations), ('ammo', ammo), ('guns', guns)]) {
+    if ((src.stock[k] ?? 0) + 1e-9 < already(k) + need) {
+      return (base: null, debit: null, refusal: '${src.name} is short of $k for the base.');
+    }
+  }
+  final gates = <String>[];
+  for (final id in ids) {
+    for (final s in sources) {
+      if (s.colonyId != id) continue;
+      for (final b in s.buildings) {
+        if (!gates.contains(b)) gates.add(b);
+      }
+    }
+  }
+  gates.sort();
+  final total = manifest.materiel * 100;
+  final unpacked = total ~/ 4; // a quarter lands ready to build with
+  return (
+    base: ForwardBase(
+      homeColonyId: src.colonyId,
+      materielC: unpacked,
+      palletsC: total - unpacked,
+      support: manifest.support,
+      stockC: [(ammo * 100).round(), (guns * 100).round(), (rations * 100).round()],
+      gates: gates,
+    ),
+    debit: SourceDebit(src.colonyId, 'support', manifest.support, 0, {
+      'ore': manifest.materiel.toDouble(),
+      'rations': rations,
+      'ammo': ammo,
+      'guns': guns,
+    }),
+    refusal: null,
+  );
+}
+
 /// [n] people as squads of at most 8, as even as they split: 9 is 5 and 4,
 /// not 8 and a lone trooper who breaks the moment anyone shoots at him.
 List<int> evenSquads(int n) {
@@ -171,6 +280,7 @@ PlannedOperation planPortRetake({
   required List<TrooperDraw> draws,
   double kitDays = 3,
   int garrison = 0,
+  BaseManifest? base,
   ResolverTuning tuning = const ResolverTuning(),
 }) {
   if (!target.portSeized) {
@@ -183,6 +293,8 @@ PlannedOperation planPortRetake({
   }
   final formations = drawn.formations;
   var nextId = drawn.nextId;
+  final planned = base == null ? null : _planBase(base, drawn.debits, sources);
+  if (planned?.refusal case final why?) return PlannedOperation(null, const [], why);
 
   final r = colonyResolve(
       severity: target.severity, mood: target.mood, wish: target.wish, hunger: target.hunger);
@@ -237,9 +349,10 @@ PlannedOperation planPortRetake({
     sameBody: drawn.sameBody,
     garrison: garrison,
     garrisonKit: drawn.garrisonKit,
+    base: planned?.base,
     tuning: tuning,
   );
-  return PlannedOperation(op, drawn.debits, null);
+  return PlannedOperation(op, [...drawn.debits, ?planned?.debit], null);
 }
 
 /// The LZ for an anchor at ([e], [n]): [kLzDistanceM] out from it, away from
@@ -282,6 +395,7 @@ PlannedOperation planColonyAssault({
   double kitDays = 3,
   int garrison = 2,
   Roe roe = Roe.restrained,
+  BaseManifest? base,
   ResolverTuning tuning = const ResolverTuning(),
 }) {
   if (!target.independent) {
@@ -305,6 +419,8 @@ PlannedOperation planColonyAssault({
   }
   final formations = drawn.formations;
   var nextId = drawn.nextId;
+  final planned = base == null ? null : _planBase(base, drawn.debits, sources);
+  if (planned?.refusal case final why?) return PlannedOperation(null, const [], why);
 
   // ---- the ground --------------------------------------------------------
   final ids = <String>[];
@@ -447,7 +563,8 @@ PlannedOperation planColonyAssault({
     sameBody: drawn.sameBody,
     garrison: garrison,
     garrisonKit: drawn.garrisonKit,
+    base: planned?.base,
     tuning: tuning,
   );
-  return PlannedOperation(op, drawn.debits, null);
+  return PlannedOperation(op, [...drawn.debits, ?planned?.debit], null);
 }

@@ -41,6 +41,8 @@ sealed class CombatCommand extends SimCommand {
           kitDays: (j['kit'] as num?)?.toDouble() ?? 3,
           garrison: (j['garrison'] as num?)?.toInt() ?? 0,
           roe: j['roe'] as String? ?? 'restrained',
+          baseMateriel: (j['baseM'] as num?)?.toInt() ?? 0,
+          baseSupport: (j['baseS'] as num?)?.toInt() ?? 0,
         );
       case 'withdraw':
         return WithdrawOperationCommand(by, tick, (j['op'] as num).toInt());
@@ -51,6 +53,11 @@ sealed class CombatCommand extends SimCommand {
       case 'order':
         return OrderOperationCommand(by, tick, (j['op'] as num).toInt(), j['order'] as String,
             target: j['target'] as String?);
+      case 'base':
+        return BaseOrderCommand(by, tick, (j['op'] as num).toInt(), j['action'] as String,
+            module: j['module'] as String?,
+            ring: j['ring'] as String?,
+            socket: (j['socket'] as num?)?.toInt());
       case 'reinforce':
         return ReinforceOperationCommand(
           by,
@@ -84,6 +91,8 @@ class LaunchOperationCommand extends CombatCommand {
     this.kitDays = 3,
     this.garrison = 0,
     this.roe = 'restrained',
+    this.baseMateriel = 0,
+    this.baseSupport = 0,
   });
 
   final String targetColonyId;
@@ -95,6 +104,13 @@ class LaunchOperationCommand extends CombatCommand {
 
   /// Rules of engagement, by name: `restrained` or `standard`.
   final String roe;
+
+  /// A forward base's Materiel (ore) and support staff (combat.md §7C); both
+  /// 0 for a light operation, with no base.
+  final int baseMateriel;
+  final int baseSupport;
+
+  bool get withBase => baseMateriel > 0 || baseSupport > 0;
 
   @override
   String get targetAssetId => targetColonyId;
@@ -111,6 +127,8 @@ class LaunchOperationCommand extends CombatCommand {
         'kit': kitDays,
         'garrison': garrison,
         if (roe != 'restrained') 'roe': roe,
+        if (baseMateriel != 0) 'baseM': baseMateriel,
+        if (baseSupport != 0) 'baseS': baseSupport,
       };
 }
 
@@ -201,5 +219,33 @@ class ReinforceOperationCommand extends CombatCommand {
           for (final d in draws) {'colony': d.colonyId, 'site': d.siteId, 'n': d.count}
         ],
         'kit': kitDays,
+      };
+}
+
+/// An order to an operation's forward base (combat.md §7C): `build` a
+/// [module] in [ring] socket [socket], `cancel` the build under way,
+/// `demolish` what stands in a socket, or `formSquad` from the reserve.
+class BaseOrderCommand extends CombatCommand {
+  const BaseOrderCommand(super.issuedBy, super.tick, this.operationId, this.action,
+      {this.module, this.ring, this.socket});
+  final int operationId;
+  final String action;
+  final String? module;
+  final String? ring;
+  final int? socket;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'base',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'action': action,
+        if (module != null) 'module': module,
+        if (ring != null) 'ring': ring,
+        if (socket != null) 'socket': socket,
       };
 }
