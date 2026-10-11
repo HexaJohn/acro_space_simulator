@@ -77,6 +77,7 @@ class ClientSimulation {
       case SetAttitudeCommand():
       case PlaceBuildingCommand():
       case ReportTerrainHeightCommand():
+      case CombatCommand():
         break; // not predicted in this slice
     }
   }

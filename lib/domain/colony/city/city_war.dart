@@ -160,6 +160,26 @@ class GarrisonResupplyWrite extends CombatWrite {
   final Map<String, double> amounts;
 }
 
+/// The player brings the garrison home.
+class GarrisonWithdrawWrite extends CombatWrite {
+  const GarrisonWithdrawWrite();
+}
+
+/// Ship [amounts] to the garrison holding [targetColonyId]'s port: the
+/// colony sends what it has and says what that was.
+class GarrisonSupplyDebitWrite extends CombatWrite {
+  const GarrisonSupplyDebitWrite(this.targetColonyId, this.amounts);
+  final String targetColonyId;
+  final Map<String, double> amounts;
+}
+
+/// War weariness: the player's dead cost every colony's loyalty
+/// (combat.md §7.6). Only a colony that takes the player's orders feels it.
+class WarWearinessWrite extends CombatWrite {
+  const WarWearinessWrite(this.loyaltyCost);
+  final double loyaltyCost;
+}
+
 // ---- the outbox: what a colony tells the war ---------------------------------
 
 sealed class CombatEvent {
@@ -177,6 +197,13 @@ class StageChangedEvent extends CombatEvent {
 class SiteLostEvent extends CombatEvent {
   const SiteLostEvent(this.siteId);
   final String siteId;
+}
+
+/// A garrison supply run left: what the colony actually had to send.
+class GarrisonSuppliedEvent extends CombatEvent {
+  const GarrisonSuppliedEvent(this.targetColonyId, this.amounts);
+  final String targetColonyId;
+  final Map<String, double> amounts;
 }
 
 /// Garrison troopers went home (unpaid, or expelled), alive.
@@ -415,7 +442,17 @@ extension CityWar on CitySim {
           if (v != null && v > 0) stock[k] = math.max(0.0, stockOf(k) - v);
         }
       case TroopersHomeWrite():
-        war.deployed.removeWhere((d) => d.opId == w.opId && (w.siteId == null || d.siteId == w.siteId));
+        // By count, not by operation: a garrison stays away after the rest
+        // come home, and its members return later, a few at a time.
+        var back = w.alive + w.wounded + w.dead;
+        for (final d in war.deployed) {
+          if (back <= 0) break;
+          if (d.opId != w.opId || (w.siteId != null && d.siteId != w.siteId)) continue;
+          final n = math.min(back, d.count);
+          d.count -= n;
+          back -= n;
+        }
+        war.deployed.removeWhere((d) => d.count <= 0);
         if (w.wounded > 0) {
           war.wounded.add(WoundedTroopers(w.wounded, colonyTimeS + 2 * loyalty.tuning.daySec));
         }
@@ -430,6 +467,28 @@ extension CityWar on CitySim {
         loyalty.onForceRepulsed();
       case WarDeadWrite():
         recordWarDead(w.dead, corpses: true);
+      case GarrisonWithdrawWrite():
+        final g = war.garrison;
+        if (g != null) {
+          war.outbox.add(GarrisonHomeEvent(g.opId, g.homeColonyId, g.count));
+          war.garrison = null;
+          loyalty.garrisonHoldsPort = false;
+        }
+      case GarrisonSupplyDebitWrite():
+        final sent = <String, double>{};
+        for (final k in kWarCommodities) {
+          final want = w.amounts[k] ?? 0;
+          if (want <= 0) continue;
+          final n = math.min(want, stockOf(k));
+          if (n <= 0) continue;
+          stock[k] = stockOf(k) - n;
+          sent[k] = n;
+        }
+        war.outbox.add(GarrisonSuppliedEvent(w.targetColonyId, sent));
+      case WarWearinessWrite():
+        if (loyalty.allegiance == Allegiance.colonial) {
+          loyalty.level = (loyalty.level - w.loyaltyCost).clamp(0.0, 1.0);
+        }
       case GarrisonResupplyWrite():
         final g = war.garrison;
         if (g != null) {

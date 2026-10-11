@@ -5,6 +5,7 @@
 
 import '../../domain/autonomy/flight_plan.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../domain/combat/operation_registry.dart';
 import '../../domain/dynamics/state_vector.dart';
 import '../../domain/lifesupport/crew.dart';
 import '../../domain/mining/mining_operation.dart';
@@ -38,7 +39,7 @@ import '../ports/world_repositories.dart';
 /// definition built, and the saved inventories are republished onto it. A
 /// version-1 save has no block and gets reference air.
 class GameStateCodec {
-  static const int schemaVersion = 2;
+  static const int schemaVersion = 3;
   const GameStateCodec();
 
   // ---------------- encode ----------------
@@ -50,7 +51,12 @@ class GameStateCodec {
     required SimulationClock clock,
     CityRepository? cities,
     AtmosphereRepository? atmospheres,
+    OperationRegistry? operations,
   }) {
+    // v3: combat operations, garrisons, supply runs and queued combat
+    // commands (docs/plans/combat.md §7.8). Additive and omitted when there
+    // are none, so a v2 save loads with no operations.
+    final ops = operations?.toJson();
     return {
       'version': schemaVersion,
       'clock': {
@@ -66,6 +72,7 @@ class GameStateCodec {
         'cities': [for (final c in cities.all()) c.toJson()],
       if (atmospheres != null)
         'atmospheres': [for (final a in atmospheres.all()) a.toJson()],
+      'operations': ?ops,
     };
   }
 
@@ -227,7 +234,12 @@ class GameStateCodec {
     List<CelestialBody> bodies = const [],
     AtmosphereRepository? atmospheres,
     UniverseRepository? universe,
+    OperationRegistry? operations,
   }) {
+    // Operations first or last makes no difference to them — they read no
+    // colony — but a v2 save has none, and the registry must not keep the
+    // session's.
+    operations?.restore(json['operations']);
     // City-builder colonies. Replaced wholesale rather than mutated in place:
     // a CitySim is one aggregate, and half-merging a save into a live one is
     // how a city ends up with the old roads and the new buildings.

@@ -437,5 +437,9 @@ class FlatBufferCodec {
               height: x.height,
             ),
           ),
+        // Combat is local-only until it goes on the wire (combat.md §7.7): a
+        // combat command reaching the codec is a bug, said loudly.
+        CombatCommand() =>
+          throw UnsupportedError('combat commands are local-only'),
       };
 }

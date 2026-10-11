@@ -224,6 +224,7 @@ class _MultiplayerScreenState extends State<MultiplayerScreen> {
         SetAttitudeCommand() => 'Set attitude',
         PlaceBuildingCommand() => 'Place building',
         ReportTerrainHeightCommand() => 'Report terrain',
+        CombatCommand() => 'Combat order',
       };
 
   Widget _dropdownPlayer() => Row(children: [

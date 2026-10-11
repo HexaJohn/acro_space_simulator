@@ -6,6 +6,8 @@
 import '../simulation/epoch.dart';
 import 'player.dart';
 
+part 'combat_commands.dart';
+
 /// A player-issued intent to change the simulation — the ONLY way the outside
 /// world mutates authoritative state in multiplayer. Commands are validated
 /// (ownership, legality), ordered by [tick], then applied deterministically so

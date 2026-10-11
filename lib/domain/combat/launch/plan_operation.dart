@@ -76,6 +76,7 @@ PlannedOperation planPortRetake({
   final debits = <SourceDebit>[];
   var nextId = 0;
   var total = 0;
+  Map<String, double>? garrisonKit;
   var sameBody = true;
   for (final d in draws) {
     if (d.count <= 0) continue;
@@ -114,6 +115,7 @@ PlannedOperation planPortRetake({
       }
     }
     if (src.bodyId != target.bodyId) sameBody = false;
+    garrisonKit ??= site.kitPerTrooperDay;
     debits.add(SourceDebit(src.colonyId, site.siteId, d.count, site.jobs, kit));
     var left = d.count;
     while (left > 0) {
@@ -190,6 +192,7 @@ PlannedOperation planPortRetake({
     defenderFaction: defender,
     sameBody: sameBody,
     garrison: garrison,
+    garrisonKit: garrisonKit,
     tuning: tuning,
   );
   return PlannedOperation(op, debits, null);

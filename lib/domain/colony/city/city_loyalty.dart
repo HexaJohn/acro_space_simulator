@@ -511,9 +511,15 @@ class CityLoyalty {
     final windowStart = colonyTimeS - t.revoltWindowS;
     revolts.removeWhere((at) => at < windowStart);
 
-    // Self-sufficiency, eased (§3.4).
+    // Self-sufficiency, eased (§3.4). Only while anyone lives there: an empty
+    // colony has no need and so no shortfall, and measures 1.0 — eased in, that
+    // reading outlived the emptiness, and a colony whose rebels had held the
+    // port long enough to keep every settler out seceded the moment the port
+    // reopened and the first ones landed (combat.md, slice 3).
     final target = i.sufficiency.clamp(0.0, 1.0);
-    if (!sufficiencyMeasured) {
+    if (!i.populated) {
+      // Nothing to measure: keep the last reading, or none.
+    } else if (!sufficiencyMeasured) {
       selfSufficiency = target;
       sufficiencyMeasured = true;
     } else {

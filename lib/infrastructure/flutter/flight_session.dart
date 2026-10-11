@@ -17,6 +17,7 @@
 /// and it can be constructed headlessly in a test without pumping a widget.
 library;
 
+import '../../domain/combat/operation_registry.dart';
 import '../../adapters/events/in_memory_event_bus.dart';
 import '../../adapters/repositories/in_memory_atmosphere_repository.dart';
 import '../../adapters/repositories/in_memory_repositories.dart';
@@ -109,6 +110,11 @@ class FlightSession {
   /// running whether or not its screen is mounted.
   final InMemoryCityRepository cities = InMemoryCityRepository();
 
+  /// Every combat operation in this world and the combat commands queued for
+  /// them: world state, kept here so a cheat toggle's [rebuildTick] keeps it
+  /// (docs/plans/combat.md §7.4).
+  final OperationRegistry operations = OperationRegistry();
+
   /// Crater/excavation state. Persists across tick rebuilds — the cheat
   /// toggles rebuild the tick, and dropping this would erase every crater
   /// already dug.
@@ -153,6 +159,7 @@ class FlightSession {
       research: research,
       terrainEdits: terrainEdits,
       atmosphere: atmospheres,
+      operations: operations,
       megastructures: megastructures,
       disableOverheat: _cheats.disableOverheat,
       disableAeroStress: _cheats.disableAeroStress,

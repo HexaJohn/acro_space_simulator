@@ -65,6 +65,9 @@ import '../ports/compute_port.dart';
 import '../ports/event_bus.dart';
 import '../ports/repositories.dart';
 import '../ports/world_repositories.dart';
+import 'combat_phase.dart';
+import '../../domain/colony/city/city_war.dart';
+import '../../domain/combat/operation_registry.dart';
 
 /// THE core simulation loop, as a use case.
 ///
@@ -101,6 +104,15 @@ class AdvanceSimulationTick {
   /// Integrates the colonies' gas flows into [atmosphere]; carries the
   /// tunable terraforming rate.
   final PlanetAtmosphereService planetAtmosphere;
+
+  /// Every combat operation and the commands queued for them
+  /// (docs/plans/combat.md §7.4). World state the host keeps across tick
+  /// rebuilds; null runs no combat at all.
+  final OperationRegistry? operations;
+
+  /// The combat phase over [operations], built once.
+  late final CombatPhase? _combat =
+      operations == null ? null : CombatPhase(operations!);
 
   /// Moves goods between a craft standing on a pad and the colony under it.
   final ShuttleCargoService shuttleCargo;
@@ -191,6 +203,7 @@ class AdvanceSimulationTick {
     this.cityShaper = const CityTerrainShaper(),
     this.atmosphere = const NullAtmosphereRepository(),
     this.planetAtmosphere = const PlanetAtmosphereService(),
+    this.operations,
     this.shuttleCargo = const ShuttleCargoService(),
     this.cargo = const NullCargoScheduleRepository(),
     this.converter = const StateVectorOrbitConverter(),
@@ -387,6 +400,10 @@ class AdvanceSimulationTick {
     // which no colony can see from inside its own tick: measured here, over
     // every colony, and handed to each before any of them moves.
     CityReclaimSim.handOutReputation(cities.all());
+    // Combat, before the colonies: commands, colony events, every operation's
+    // step and its reports, all written into colony inboxes that each colony
+    // drains at the start of its own phase below (combat.md §7.4).
+    _combat?.run(dt, cities.all());
     for (final city in cities.all()) {
       final agents = city.agents;
       if (agents.frameBudgeted) agents.replayTick = _replayCity;
@@ -517,6 +534,9 @@ class AdvanceSimulationTick {
     // read the new one.
     final host = system.body(city.body.id);
     if (host != null && !identical(host, city.body)) city.body = host;
+    // What the war wrote into this colony, before it advances: a death
+    // reaches the population ledger before the agents take it.
+    city.drainCombatInbox();
     city.advance(dt);
     _shapeCityTerrain(city, system, clock);
     _recordAtmosphereFlows(city, dt);

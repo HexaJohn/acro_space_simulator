@@ -64,6 +64,11 @@ class ApplyCommands {
 
         case ReportTerrainHeightCommand():
           break; // handled above, ownership-exempt
+
+        case CombatCommand():
+          // Local-only for now: the live game queues these in the world's
+          // CommandInbox, drained by its combat phase (combat.md §7.7).
+          break;
       }
     }
   }

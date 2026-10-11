@@ -1766,6 +1766,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         case PlaceBuildingCommand():
         case ReportTerrainHeightCommand():
           break; // colony/terrain intent not served on this path
+        case CombatCommand():
+          // The wire cannot carry these yet (the codec refuses to encode
+          // one), so none can arrive here; combat is local-only.
+          break;
       }
     }
   }
@@ -2705,7 +2709,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         deposits: _deposits,
         clock: _clock,
         cities: _cities,
-        atmospheres: _session.atmospheres));
+        atmospheres: _session.atmospheres,
+        operations: _session.operations));
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('Saved at tick ${_clock.tick}'), duration: const Duration(seconds: 1)));
@@ -2737,6 +2742,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           _universe.current().all.where((b) => !b.isStar).toList(),
       atmospheres: _session.atmospheres,
       universe: _universe,
+      operations: _session.operations,
     );
     // The restored colonies are this view's to replay, as its own was.
     for (final c in _cities.all()) {

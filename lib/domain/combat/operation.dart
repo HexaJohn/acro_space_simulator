@@ -89,9 +89,11 @@ class Operation {
     this.defenderRaised = 0,
     this.defenderSurrendered = 0,
     this.garrison = 0,
+    Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
-  })  : seed = seed ?? combatSeed(targetColonyId, id),
+  })  : garrisonKit = garrisonKit ?? const {},
+        seed = seed ?? combatSeed(targetColonyId, id),
         clock = clock ?? OperationClock(),
         formations = [...formations]..sort((a, b) => a.id.compareTo(b.id)) {
     var top = nextFormationId;
@@ -159,6 +161,10 @@ class Operation {
   /// Troopers the player chose to leave holding the port after a win, so the
   /// rebels cannot take it straight back (docs/plans/combat.md §7.6).
   final int garrison;
+
+  /// What one garrison trooper eats and fires per operation day: their home
+  /// building's inputs, recorded at launch so reporting reads no colony.
+  final Map<String, double> garrisonKit;
 
   final ResolverTuning tuning;
   final CounterTuning counters;
@@ -602,6 +608,11 @@ class Operation {
         'defRaised': defenderRaised,
         if (defenderSurrendered != 0) 'surrendered': defenderSurrendered,
         if (garrison != 0) 'garrison': garrison,
+        if (garrisonKit.isNotEmpty)
+          'garrisonKit': {
+            for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
+              if (garrisonKit[k] != null) k: garrisonKit[k],
+          },
       };
 
   factory Operation.fromJson(Map<String, dynamic> j,
@@ -639,6 +650,11 @@ class Operation {
         defenderRaised: (j['defRaised'] as num).toInt(),
         defenderSurrendered: (j['surrendered'] as num?)?.toInt() ?? 0,
         garrison: (j['garrison'] as num?)?.toInt() ?? 0,
+        garrisonKit: {
+          for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
+            if ((j['garrisonKit'] as Map?)?[k] is num)
+              k: ((j['garrisonKit'] as Map)[k] as num).toDouble(),
+        },
         tuning: tuning,
         counters: counters,
       );

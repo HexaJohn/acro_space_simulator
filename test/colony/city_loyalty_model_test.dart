@@ -193,6 +193,17 @@ void main() {
           reason: "its port is its own now, and shut to the player's craft");
     });
 
+    test("an empty colony's reading does not outlive the emptiness", () {
+      // Rebels held the port long enough that nobody could land: empty, the
+      // colony measures 1.0 (no need, no shortfall). The first settlers in
+      // must be measured as they are — dependent — not inherit that 1.0.
+      final l = CityLoyalty();
+      run(l, 5, sufficiency: 1, populated: false);
+      expect(l.sufficiencyMeasured, isFalse);
+      run(l, 0.1, sufficiency: 0, populated: true);
+      expect(l.selfSufficiency, lessThan(0.05));
+    });
+
     test('an empty colony does not secede', () {
       // Suffocated to its last settler: no need, so no shortfall, so it
       // measures self-sufficient — and nobody is left to declare anything.

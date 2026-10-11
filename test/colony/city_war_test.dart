@@ -202,7 +202,7 @@ void main() {
     final s = source(people: 200);
     final c = s.city;
     c.applyCombatWrite(DeployWrite(7, s.site, 10, 30, const {}));
-    c.applyCombatWrite(TroopersHomeWrite(7, s.site, alive: 0, wounded: 2, dead: 0));
+    c.applyCombatWrite(TroopersHomeWrite(7, s.site, alive: 8, wounded: 2, dead: 0));
     c.applyCombatWrite(DeployWrite(8, s.site, 6, 30, const {}));
     c.loyalty.forceUsed = true;
     final back = CitySim.fromJson(c.toJson(), bodies: fixtureBodies);
