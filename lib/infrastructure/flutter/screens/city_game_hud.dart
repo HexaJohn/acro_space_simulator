@@ -774,6 +774,7 @@ class _CityGameHudState extends State<CityGameHud> {
   Widget _noticeCard(LoyaltyNotice n) {
     final good = n.kind == LoyaltyNoticeKind.recovered ||
         n.kind == LoyaltyNoticeKind.portReleased ||
+        n.kind == LoyaltyNoticeKind.portRetaken ||
         n.kind == LoyaltyNoticeKind.petition ||
         n.kind == LoyaltyNoticeKind.rejoined ||
         n.kind == LoyaltyNoticeKind.termsExpired;

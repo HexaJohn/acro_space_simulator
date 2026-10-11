@@ -266,6 +266,12 @@ enum LoyaltyNoticeKind {
 
   /// The terms it rejoined under have run out (§6.1).
   termsExpired,
+
+  /// The player's troopers took the seized port back (combat.md §7.6).
+  portRetaken,
+
+  /// The player's troopers failed to take it.
+  portAttackRepulsed,
 }
 
 /// One announcement for the HUD to raise — a queue a host drains, as it
@@ -618,8 +624,13 @@ class CityLoyalty {
     // next — a fresh "next delivery is impounded" each time, so every other
     // tick let a craft in. The release here is for a port held outside a
     // standoff at all, which only an inconsistent save can produce.
+    // A garrison of the player's troopers on the port stops it being taken
+    // again: without one, a port retaken by force is re-seized on the very
+    // next step, because nothing about the standoff has changed
+    // (combat.md §5, the first trap).
     if (stage == LoyaltyStage.standoff &&
         !portSeized &&
+        !garrisonHoldsPort &&
         i.hasSpaceport &&
         desperation > t.seizeDesperation) {
       portSeized = true;
@@ -632,6 +643,39 @@ class CityLoyalty {
         level > t.defiantAbove) {
       _release();
     }
+  }
+
+  /// Whether the player's troopers hold the port (set each tick from the
+  /// colony's war state, `city_war.dart`; not saved here).
+  bool garrisonHoldsPort = false;
+
+  /// Force was used on this colony. Kept for the grievance it states if it
+  /// later breaks away (combat.md §7.6).
+  bool forceUsed = false;
+
+  /// Troopers took the port back. Like [_release] it reopens the port, but
+  /// it tells the player the true story, costs loyalty instead of winning
+  /// any, stamps no attention and — deliberately — adds no desperation: a
+  /// bump here would lower the independence bar of a colony still in
+  /// standoff, and the win itself could make it secede (combat.md §7.6).
+  void releaseByForce() {
+    forceUsed = true;
+    level = (level - 0.05).clamp(0.0, 1.0);
+    if (!portSeized) return;
+    portSeized = false;
+    impoundPending = false;
+    _notice(LoyaltyNoticeKind.portRetaken,
+        'Your troopers have retaken the spaceport.');
+  }
+
+  /// Troopers tried and failed: the port stays seized, loyalty falls and
+  /// desperation rises.
+  void onForceRepulsed() {
+    forceUsed = true;
+    level = (level - 0.1).clamp(0.0, 1.0);
+    desperation = (desperation + 0.05).clamp(0.0, 1.0);
+    _notice(LoyaltyNoticeKind.portAttackRepulsed,
+        'Your troopers failed to retake the spaceport.');
   }
 
   void _release() {
@@ -692,6 +736,7 @@ class CityLoyalty {
           ],
         if (independentAtS != null) 'independentAt': independentAtS,
         if (independenceCauses != null) 'independentWhy': independenceCauses,
+        if (forceUsed) 'forceUsed': true,
         'reclaim': ?reclaim.toJson(),
       };
 
@@ -738,6 +783,7 @@ class CityLoyalty {
     independentAtS = ind is num ? ind.toDouble() : null;
     final why = json['independentWhy'];
     independenceCauses = why is String ? why : null;
+    forceUsed = json['forceUsed'] == true;
     reclaim.restore(json['reclaim']);
     reclaim.recoverGrievance(this);
   }

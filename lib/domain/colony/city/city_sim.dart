@@ -34,6 +34,7 @@ import 'city_building_spec.dart';
 import 'city_config.dart';
 import 'city_layout.dart';
 import 'city_loyalty.dart';
+import 'city_war.dart';
 import 'city_progression.dart';
 import 'city_term_guard.dart';
 import 'independent_governor.dart';
@@ -519,6 +520,10 @@ class CitySim {
   /// secession it leads to (docs/plans/colony-secession.md; the rules are in
   /// `city_loyalty.dart`, applied from [advance]).
   final CityLoyalty loyalty = CityLoyalty();
+
+  /// The colony at war: troopers away, wounded, a garrison on its port, and
+  /// the operation's inbox and outbox (`city_war.dart`, combat.md §7).
+  final CityWarState war = CityWarState();
 
   /// Colony seconds this colony has run: the neglect clock (§3.1).
   double get colonyTimeS => loyalty.colonyTimeS;
@@ -1370,8 +1375,13 @@ class CitySim {
       final s = e.value;
       // Grown zones contribute in proportion to their utilisation (small/med/
       // large/max). Still-under-construction cells contribute 0. Utils = full.
-      final uf = utilFactor(e.key);
-      powerOut += s.powerOutput * powerFactor(s.type);
+      // A site whose staff are away at war works at the share still home
+      // (combat.md §7.3); exactly 1 while nobody is away.
+      final sf = war.deployed.isEmpty
+          ? 1.0
+          : siteFactorOf(CityWar.cellSite(e.key));
+      final uf = utilFactor(e.key) * sf;
+      powerOut += s.powerOutput * powerFactor(s.type) * sf;
       powerDraw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
       housing += (s.housing * uf).round();
       jobs += (s.jobs * uf).round();
@@ -1391,12 +1401,14 @@ class CitySim {
       final parcelNet = parcelNetwork();
       for (final (parcel, s) in parcelBuiltLots()) {
         if (!parcelNet.lotServed(parcel.id)) continue;
-        final uf = parcelBuildings.containsKey(parcel.id)
-            ? 1.0
-            : parcelUtil(parcel.id);
+        final sf = war.deployed.isEmpty ? 1.0 : siteFactorOf(parcel.id);
+        final uf = (parcelBuildings.containsKey(parcel.id)
+                ? 1.0
+                : parcelUtil(parcel.id)) *
+            sf;
         if (uf <= 0) continue;
         parcelActive.add((s, uf));
-        powerOut += s.powerOutput * powerFactor(s.type);
+        powerOut += s.powerOutput * powerFactor(s.type) * sf;
         powerDraw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
         housing += (s.housing * uf).round();
         jobs += (s.jobs * uf).round();
@@ -1409,7 +1421,8 @@ class CitySim {
     final powerRatio = powerDraw <= 0 ? 1.0 : (powerOut / powerDraw).clamp(0.0, 1.0);
     final computeRatio =
         computeDemand <= 0 ? 1.0 : (computeSupply / computeDemand).clamp(0.0, 1.0);
-    final workforce = math.min(population.floor(), jobs);
+    // Troopers away at war are residents, but they work no job here.
+    final workforce = math.min(math.max(0, population.floor() - troopersAway), jobs);
     // Staffing: a building runs at full only if the city has the workers. Global
     // staffing ratio = filled jobs / required jobs.
     // Commute efficiency: heavy road congestion means workers spend longer
@@ -1445,7 +1458,10 @@ class CitySim {
     }
 
     for (final e in active) {
-      tallyLife(e.value, utilFactor(e.key));
+      tallyLife(
+          e.value,
+          utilFactor(e.key) *
+              (war.deployed.isEmpty ? 1.0 : siteFactorOf(CityWar.cellSite(e.key))));
     }
     for (final (s, uf) in parcelActive) {
       tallyLife(s, uf);
@@ -1533,7 +1549,8 @@ class CitySim {
       s.inputs.forEach((k, v) {
         if (stockOf(k) < v * th * dt) canRun = false;
       });
-      final run = canRun && (s.type != 'o2harvester' || skyO2) ? th : 0.0;
+      final run = (canRun && (s.type != 'o2harvester' || skyO2) ? th : 0.0) *
+          (war.deployed.isEmpty ? 1.0 : siteFactorOf(CityWar.cellSite(e.key)));
       towerRuns.add(s.type, run);
       s.inputs.forEach((k, v) {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
@@ -1897,6 +1914,9 @@ class CitySim {
     // the treasury have moved, so the stage the migration below obeys is
     // this tick's.
     loyaltyTick(dt, localNet: localNet, coverage: coverage);
+    // After the loyalty step, so the seizure guard and the stage-change
+    // events read this tick's stage.
+    warTick(dt);
     // An independent colony's own council (secession §4); nothing otherwise.
     independentGovernorTick(dt, localNet: localNet);
 
@@ -5112,6 +5132,7 @@ class CitySim {
         if (disease != 0) 'disease': disease,
         if (corpses != 0) 'corpses': corpses,
         'loyalty': ?loyaltySaveJson(),
+        'war': ?war.toJson(),
         'funds': funds,
         'milestones': milestonesReached.toList(),
         'research': research,
@@ -5487,6 +5508,8 @@ class CitySim {
     sim.support.addAll((j['support'] as List).cast<int>());
     sim.recompute();
     sim.restoreLoyalty(j['loyalty']);
+    sim.war.restore(j['war']);
+    sim.loyalty.garrisonHoldsPort = (sim.war.garrison?.count ?? 0) > 0;
     sim.agents.restore(j['agents']);
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and

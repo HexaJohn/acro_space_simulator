@@ -88,6 +88,7 @@ class Operation {
     this.attackerRaised = 0,
     this.defenderRaised = 0,
     this.defenderSurrendered = 0,
+    this.garrison = 0,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
   })  : seed = seed ?? combatSeed(targetColonyId, id),
@@ -154,6 +155,10 @@ class Operation {
 
   /// Defenders who laid down their arms: returned alive.
   int defenderSurrendered;
+
+  /// Troopers the player chose to leave holding the port after a win, so the
+  /// rebels cannot take it straight back (docs/plans/combat.md §7.6).
+  final int garrison;
 
   final ResolverTuning tuning;
   final CounterTuning counters;
@@ -596,6 +601,7 @@ class Operation {
         'attRaised': attackerRaised,
         'defRaised': defenderRaised,
         if (defenderSurrendered != 0) 'surrendered': defenderSurrendered,
+        if (garrison != 0) 'garrison': garrison,
       };
 
   factory Operation.fromJson(Map<String, dynamic> j,
@@ -632,6 +638,7 @@ class Operation {
         attackerRaised: (j['attRaised'] as num).toInt(),
         defenderRaised: (j['defRaised'] as num).toInt(),
         defenderSurrendered: (j['surrendered'] as num?)?.toInt() ?? 0,
+        garrison: (j['garrison'] as num?)?.toInt() ?? 0,
         tuning: tuning,
         counters: counters,
       );
