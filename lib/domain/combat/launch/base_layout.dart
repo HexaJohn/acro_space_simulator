@@ -126,3 +126,43 @@ BaseLayout _layoutAt(double anchorE, double anchorN, double distanceM,
 
 double _d(double a, double b, double c, double d) =>
     math.sqrt((a - c) * (a - c) + (b - d) * (b - d));
+
+/// Outpost sockets: 2 modules at 22 m and a turret at 34 m round its centre.
+const double kOutpostModuleRingM = 22;
+const double kOutpostTurretRingM = 34;
+
+/// Clear ground for an outpost beside the objective at ([e], [n]), or null
+/// (Spike S item 6, §7F): the objective's own building is the obstacle
+/// nearest its centre, so the search starts just outside it and tries eight
+/// bearings at each of three distances, nearest first.
+(double, double)? outpostGround(double e, double n, List<(double, double, double)> obstacles) {
+  var own = 0.0;
+  var best = double.infinity;
+  for (final o in obstacles) {
+    final d = _d(o.$1, o.$2, e, n);
+    if (d < best && d < o.$3) {
+      best = d;
+      own = o.$3;
+    }
+  }
+  bool clear(double x, double y) {
+    final pts = [
+      (x + kOutpostModuleRingM, y),
+      (x - kOutpostModuleRingM, y),
+      (x, y + kOutpostTurretRingM),
+      (x, y),
+    ];
+    return pts.every((p) =>
+        !obstacles.any((o) => _d(o.$1, o.$2, p.$1, p.$2) < o.$3 + kModuleHalfM));
+  }
+
+  for (final extra in const [40.0, 80.0, 140.0]) {
+    final r = own + extra;
+    for (var k = 0; k < 8; k++) {
+      final a = k * math.pi / 4;
+      final x = e + r * math.cos(a), y = n + r * math.sin(a);
+      if (clear(x, y)) return (x, y);
+    }
+  }
+  return null;
+}

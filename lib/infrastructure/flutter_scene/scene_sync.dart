@@ -73,6 +73,7 @@ class SceneSync {
     _walker = WalkerNodes(scene);
     _environment = PlanetEnvironmentBaker(scene, _textures);
     _terrain = TerrainNodes(scene);
+    drawnGround = _terrain.drawnGroundRadiusAt;
     _scatter = ScatterNodes(scene);
     _city = CityNodes(scene);
     _starBloom = StarBloomNodes(scene);
@@ -110,6 +111,12 @@ class SceneSync {
   /// [autoExposure]/[lastExposure] and the rest of this class's read-from-
   /// anywhere statics).
   static final Map<String, double> stageMs = {};
+
+  /// The ground as this frame draws it (see [TerrainNodes.drawnGroundRadiusAt]),
+  /// for readers outside the scene: the combat spike's drawn-vs-field
+  /// measurement, and a camera that must stand on what it sees. Null before
+  /// the first sync is built.
+  static double? Function(Vector3 dirBF)? drawnGround;
 
   /// The flight view's frame budget for the streamers (see [FrameBudget]):
   /// the slice the terrain and city passes may spend this frame, written to

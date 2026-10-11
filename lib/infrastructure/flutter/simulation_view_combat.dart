@@ -40,6 +40,10 @@ class _CombatViewState {
   /// second it was worked out at: UI state, recomputed at most once a game
   /// minute, never read by the sim.
   final Map<String, (double, StrikeWindow?)> windows = {};
+
+  /// Spike S item 5's frame timings while a measurement runs (§7F), ms.
+  final List<double> spikeFrames = [];
+  TimingsCallback? spikeTimings;
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -580,6 +584,72 @@ extension _SimulationViewCombat on _SimulationViewState {
   void _power(Operation op, String power, {String? target}) => _operations.inbox.enqueue(
       CommanderPowerCommand(const PlayerId('player'), 0, op.id, power, target: target));
 
+  /// Spike S items 1 and 3 (§7F) over the battle square: the cost of the
+  /// raster's per-cell query (`surfaceRadiusAt`), the share of cells under a
+  /// brush, and the drawn mesh against the field on 200 points.
+  Map<String, Object?> _spikeGround(CitySim city) {
+    final body = _universe.current().body(city.body.id);
+    if (body == null) return {'error': 'no body'};
+    final edits = _terrainEdits.forBody(body.id);
+    final field = body.terrainFieldWith(edits);
+    if (field == null) return {'error': 'no terrain field'};
+    final op = _operations.runningAgainst(city.id);
+    final b = op == null ? null : CombatFrame.of(op).bounds;
+    final ce = b?.e ?? 0, cn = b?.n ?? 0;
+    const side = 1200.0, cell = 8.0;
+    const n = 150;
+    Vector3 dirAt(double e, double nn) =>
+        city.localToBodyFixed(Vec2(e, nn), bodyRadiusM: body.radius).normalized;
+    // Item 1: every 5th cell each way (900 of the 22,500), timed one by one.
+    final costs = <double>[];
+    var brushed = 0, cells = 0;
+    final sw = Stopwatch();
+    for (var i = 0; i < n; i += 5) {
+      for (var j = 0; j < n; j += 5) {
+        final d = dirAt(ce - side / 2 + (i + 0.5) * cell, cn - side / 2 + (j + 0.5) * cell);
+        cells++;
+        if (edits != null && edits.at(d).isNotEmpty) brushed++;
+        sw
+          ..reset()
+          ..start();
+        field.surfaceRadiusAt(d.x, d.y, d.z);
+        sw.stop();
+        costs.add(sw.elapsedMicroseconds / 1000);
+      }
+    }
+    costs.sort();
+    final mean = costs.fold(0.0, (a, v) => a + v) / costs.length;
+    // Item 3: the drawn mesh against the field, 200 points on a 15 × 14 grid.
+    final errs = <double>[];
+    var noMesh = 0;
+    final drawn = SceneSync.drawnGround;
+    for (var i = 0; i < 15; i++) {
+      for (var j = 0; j < 14 && errs.length + noMesh < 200; j++) {
+        final d = dirAt(ce - side / 2 + (i + 0.5) * side / 15, cn - side / 2 + (j + 0.5) * side / 14);
+        final m = drawn?.call(d);
+        if (m == null) {
+          noMesh++;
+          continue;
+        }
+        errs.add((m - field.surfaceRadiusAt(d.x, d.y, d.z)).abs());
+      }
+    }
+    errs.sort();
+    double q(List<double> v, double k) => v.isEmpty ? double.nan : v[((v.length - 1) * k).round()];
+    return {
+      'centre': [ce.round(), cn.round()],
+      'item1': {
+        'cellsTimed': cells,
+        'brushedShare': brushed / cells,
+        'meanMs': mean,
+        'p95Ms': q(costs, 0.95),
+        'bakeSingleThreadS': mean * 22500 / 1000,
+        'bake4WorkersS': mean * 22500 / 1000 / 4,
+      },
+      'item3terrain': {'points': errs.length, 'noMesh': noMesh, 'p50M': q(errs, 0.5), 'p95M': q(errs, 0.95)},
+    };
+  }
+
   /// The drawer's Orbital support section (§7E): who is up there, when they
   /// next pass, the strike buttons, and arming a vessel standing on a pad.
   List<Widget> _orbitalRows(Operation op, BuildContext ctx, String Function(String) place,
@@ -1063,6 +1133,35 @@ extension _SimulationViewCombat on _SimulationViewState {
         _power(running, 'orbitalStrike', target: p['strike']);
         did['strike'] = p['strike'];
       }
+    }
+    // Spike S (§7F): spike=ground measures items 1 and 3 round the battle (or
+    // the colony), spikeFrames=start|report item 5.
+    if (p['spike'] == 'ground' && target != null) did['spike'] = _spikeGround(target);
+    if (p['spikeFrames'] == 'start') {
+      final st = _combatState;
+      st.spikeFrames.clear();
+      if (st.spikeTimings != null) SchedulerBinding.instance.removeTimingsCallback(st.spikeTimings!);
+      st.spikeTimings = (List<FrameTiming> ts) {
+        for (final t in ts) {
+          st.spikeFrames.add(t.totalSpan.inMicroseconds / 1000);
+        }
+      };
+      SchedulerBinding.instance.addTimingsCallback(st.spikeTimings!);
+      did['spikeFrames'] = 'started';
+    }
+    if (p['spikeFrames'] == 'report') {
+      final st = _combatState;
+      if (st.spikeTimings != null) SchedulerBinding.instance.removeTimingsCallback(st.spikeTimings!);
+      st.spikeTimings = null;
+      final f = [...st.spikeFrames]..sort();
+      double q(double k) => f.isEmpty ? 0 : f[((f.length - 1) * k).round()];
+      did['spikeFrames'] = {
+        'frames': f.length,
+        'p50': q(0.5),
+        'p75': q(0.75),
+        'p95': q(0.95),
+        'max': f.isEmpty ? 0 : f.last,
+      };
     }
     final power = p['power'];
     if (power != null && target != null) {
