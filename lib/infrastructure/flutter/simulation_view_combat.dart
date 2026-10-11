@@ -1795,7 +1795,28 @@ extension _SimulationViewCombat on _SimulationViewState {
               if (nav.lineOfSight((u.e, u.n, 1.4), eye)) seen++;
               if (bare.lineOfSight((u.e, u.n, 1.4), eye)) seenBare++;
             }
-            return {'inRange': inRange, 'seen': seen, 'seenOverGround': seenBare, 'walls': nav.footprints.length};
+            LiveUnit? near;
+            var nd = double.infinity;
+            for (final u in l.units) {
+              if (u.side != CombatSide.defender) continue;
+              final d = math.sqrt((u.e - eye.$1) * (u.e - eye.$1) + (u.n - eye.$2) * (u.n - eye.$2));
+              if (d < nd) {
+                nd = d;
+                near = u;
+              }
+            }
+            return {
+              'inRange': inRange,
+              'seen': seen,
+              'seenOverGround': seenBare,
+              'walls': nav.footprints.length,
+              'eye': [eye.$1.round(), eye.$2.round(), eye.$3.toStringAsFixed(1)],
+              if (near != null) 'nearest': [near.e.round(), near.n.round(), near.objectiveId, nd.round()],
+              'squadAt': [
+                for (final u in l.units)
+                  if (u.squad) [u.e.round(), u.n.round()]
+              ].take(3).toList(),
+            };
           }(),
           'drawnOffset': _combatState.drawnOffset,
         },

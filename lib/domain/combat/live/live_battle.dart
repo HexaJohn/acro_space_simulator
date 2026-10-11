@@ -79,6 +79,10 @@ class LiveUnit {
 
   /// Its objective's centre: what its flow field leads to.
   double oe = 0, on = 0;
+
+  /// The cover it fights from (§7I): its objective's fortification while it
+  /// holds its slot there — the resolver's `F_def` — or 1 in the open.
+  double cover = 1;
   double hp = 100;
 
   /// One of the player's squad: live, its hits and wounds real.
@@ -216,6 +220,8 @@ class LiveBattle {
     for (final id in owned) {
       final mine = op.formationById(id);
       if (mine == null || !mine.alive) continue;
+      // Broken, a squad falls back out of the fight, as the resolver's do.
+      if (mine.broken && !(!playerless && id == playerFormationId)) continue;
       final isPlayers = !playerless && id == playerFormationId;
       final count = mine.count - _pendingFor(mine) - (isPlayers && !dead ? 1 : 0);
       final at = op.graph.byId(mine.at);
@@ -242,9 +248,11 @@ class LiveBattle {
         for (var m = 0; m < count && room[f.side]! > 0; m++) {
           room[f.side] = room[f.side]! - 1;
           final (se, sn) = _slot(op, o, f, m);
+          final cover = f.side == CombatSide.defender ? o.fDef + (o.dugIn ? kDigInFortification : 0) : 1.0;
           final have = _unit(f.id, m);
           if (have != null) {
             want.add(have
+              ..cover = cover
               ..objectiveId = o.id
               ..oe = o.e
               ..on = o.n
@@ -258,6 +266,7 @@ class LiveBattle {
           final from = marching ? op.graph.byId(f.fromAt!) : null;
           final (be, bn) = from != null && raster.contains(from.e, from.n) ? _slot(op, from, f, m) : (se, sn);
           want.add(LiveUnit(f.id, m, f.side, f.kind, o.id, be, bn)
+            ..cover = cover
             ..oe = o.e
             ..on = o.n
             ..te = se
@@ -468,10 +477,12 @@ class LiveBattle {
       }
       if (target == null) continue;
       u.shots++;
+      // A defender at its slot is behind its objective's works.
+      final dug = (target.e - target.te).abs() + (target.n - target.tn).abs() < 1 ? target.cover : 1.0;
       final hit = combatUnit(seed, key, 5000 + u.shots) <
-          kDefenderAccuracy * u.quality * math.min(1.0, 30 / math.max(d, 1));
+          kDefenderAccuracy * u.quality * math.min(1.0, 30 / math.max(d, 1)) / dug;
       tracers.add(Tracer(u.e, u.n, 1.4, target.e, target.n, hit ? 1.2 : 2.6, CombatSide.attacker));
-      if (hit) _wound(target, kRifleDamage);
+      if (hit) _wound(target, kDefenderDamage);
     }
   }
 
