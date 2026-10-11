@@ -2105,8 +2105,24 @@ extension _SimulationViewCombat on _SimulationViewState {
     // The APC (§7L): board=1 boards or steps out; apc=1 puts one at the LZ
     // (a dev shortcut past the Fortress and its bay).
     if (p['board'] != null && _liveJoined) {
+      final l = _combatState.live!;
+      // Dev: walk the player to the nearest of their APCs first.
+      if (l.driving == null) {
+        final v = l.units.where((u) => u.vehicle && u.side == CombatSide.attacker).firstOrNull;
+        if (v != null) _combatState.lastEye = (v.e + 2, v.n, 1.7);
+      }
       _boardOrAlight();
       did['board'] = _combatState.live?.drivingFormation;
+    }
+    final drive = p['drive'];
+    if (drive != null) {
+      for (final k in const [LogicalKeyboardKey.keyW, LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD]) {
+        _keysDown.remove(k);
+      }
+      if (drive.contains('W')) _keysDown.add(LogicalKeyboardKey.keyW);
+      if (drive.contains('A')) _keysDown.add(LogicalKeyboardKey.keyA);
+      if (drive.contains('D')) _keysDown.add(LogicalKeyboardKey.keyD);
+      did['drive'] = drive;
     }
     if (p['apc'] != null && target != null) {
       final running = _operations.runningAgainst(target.id);
