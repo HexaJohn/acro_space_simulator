@@ -306,6 +306,18 @@ enum LoyaltyNoticeKind {
 
   /// An independent colony beat an attack off.
   assaultRepulsed,
+
+  /// An occupied colony rose against its garrison (combat.md §7N).
+  uprising,
+
+  /// The garrison held: the rising is crushed.
+  uprisingCrushed,
+
+  /// A rival's raiders carried off part of its stores.
+  raided,
+
+  /// It beat a rival's raiders off.
+  raidBeaten,
 }
 
 /// One announcement for the HUD to raise — a queue a host drains, as it
@@ -712,6 +724,26 @@ class CityLoyalty {
   /// The charter has been offered (the notice raised once).
   bool charterOffered = false;
 
+  /// [colonyTimeS] an occupied colony rose against its garrison (combat.md
+  /// §7N), while the rising runs; null otherwise.
+  double? uprisingSinceS;
+
+  /// The world's combat phase took the rising up: the fight decides it.
+  bool uprisingFought = false;
+
+  /// [colonyTimeS] until which a crushed colony does not rise again.
+  double uprisingQuietUntilS = 0;
+
+  /// A rising nobody fights — a host with no combat phase — throws the
+  /// garrison out after this many days, as before §7N.
+  static const double uprisingFallbackDays = 1;
+
+  /// Days a crushed colony stays quiet before it can rise again.
+  static const double uprisingQuietDays = 5;
+
+  /// Whether a rising is running.
+  bool get risen => uprisingSinceS != null;
+
   bool get occupied => allegiance == Allegiance.occupied;
 
   /// An occupied colony has held the charter line long enough.
@@ -732,11 +764,23 @@ class CityLoyalty {
   /// plain colonial rules from the next tick.
   void _occupiedStep() {
     final t = tuning;
-    if (level <= 0 || revolts.length >= t.revoltsToSecede) {
-      _endOccupation();
-      _notice(LoyaltyNoticeKind.occupationEnded,
-          'The colony has thrown your garrison out: it answers to nobody under '
-          'guard now.');
+    // Pushed past the secession condition, it rises (§7N): the garrison
+    // fights for the Seat, and the fight decides whether it is thrown out.
+    if (!risen &&
+        garrisonHoldsColony &&
+        colonyTimeS >= uprisingQuietUntilS &&
+        (level <= 0 || revolts.length >= t.revoltsToSecede)) {
+      uprisingSinceS = colonyTimeS;
+      uprisingFought = false;
+      _notice(LoyaltyNoticeKind.uprising,
+          'The colony has risen against your garrison: its militia is coming '
+          'for the Seat.');
+    }
+    final rose = uprisingSinceS;
+    if (rose != null &&
+        !uprisingFought &&
+        colonyTimeS - rose >= uprisingFallbackDays * t.daySec) {
+      _thrownOut();
       return;
     }
     if (!garrisonHoldsColony) {
@@ -774,6 +818,37 @@ class CityLoyalty {
     charterSinceS = null;
     charterOffered = false;
     garrisonHoldsColony = false;
+    uprisingSinceS = null;
+    uprisingFought = false;
+  }
+
+  void _thrownOut() {
+    _endOccupation();
+    _notice(LoyaltyNoticeKind.occupationEnded,
+        'The colony has thrown your garrison out: it answers to nobody under '
+        'guard now.');
+  }
+
+  /// The rising is over (§7N). [held]: the garrison kept the Seat and the
+  /// rising is crushed — its revolts cleared, quiet for a while; the
+  /// rebellion halving is the colony's. Else the garrison is thrown out.
+  void uprisingEnded({required bool held}) {
+    if (!occupied) {
+      uprisingSinceS = null;
+      uprisingFought = false;
+      return;
+    }
+    if (!held) {
+      _thrownOut();
+      return;
+    }
+    uprisingSinceS = null;
+    uprisingFought = false;
+    revolts.clear();
+    uprisingQuietUntilS = colonyTimeS + uprisingQuietDays * tuning.daySec;
+    _notice(LoyaltyNoticeKind.uprisingCrushed,
+        'Your garrison held the Seat: the rising is crushed, and the colony '
+        'remembers its dead.');
   }
 
   /// The colony is taken (combat.md §7A), modelled on rejoining: loyalty at
@@ -799,6 +874,9 @@ class CityLoyalty {
     charterSinceS = null;
     charterOffered = false;
     garrisonHoldsColony = true;
+    uprisingSinceS = null;
+    uprisingFought = false;
+    uprisingQuietUntilS = 0;
     final r = reclaim;
     r.grievance = (r.grievance ?? Grievance(warDead: warDead - dead)).withWarDead(dead);
     r.petition = null;
@@ -936,6 +1014,9 @@ class CityLoyalty {
         if (warDead != 0) 'warDead': warDead,
         if (charterSinceS != null) 'charterSince': charterSinceS,
         if (charterOffered) 'charterOffered': true,
+        if (uprisingSinceS != null) 'uprisingSince': uprisingSinceS,
+        if (uprisingFought) 'uprisingFought': true,
+        if (uprisingQuietUntilS != 0) 'quietUntil': uprisingQuietUntilS,
         'reclaim': ?reclaim.toJson(),
       };
 
@@ -987,6 +1068,10 @@ class CityLoyalty {
     final cs = json['charterSince'];
     charterSinceS = cs is num ? cs.toDouble() : null;
     charterOffered = json['charterOffered'] == true;
+    final us = json['uprisingSince'];
+    uprisingSinceS = us is num ? us.toDouble() : null;
+    uprisingFought = json['uprisingFought'] == true;
+    uprisingQuietUntilS = num0(json['quietUntil'], 0);
     reclaim.restore(json['reclaim']);
     reclaim.recoverGrievance(this);
   }

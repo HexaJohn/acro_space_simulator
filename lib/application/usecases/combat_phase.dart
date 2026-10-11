@@ -24,8 +24,10 @@ import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/colony/city/parcel.dart' show Vec2;
 import '../../domain/combat/base/base_modules.dart';
+import '../../domain/combat/combat_rng.dart';
 import '../../domain/combat/formation.dart';
 import '../../domain/combat/lander.dart';
+import '../../domain/combat/launch/plan_defence.dart';
 import '../../domain/combat/launch/plan_operation.dart';
 import '../../domain/combat/launch/snapshots.dart';
 import '../../domain/combat/operation.dart';
@@ -62,6 +64,17 @@ class CombatPhase {
   /// Loyalty every colony loses per player trooper killed: 0.01 per 10.
   static const double wearinessPerDead = 0.001;
 
+  /// A rival — an independent colony of at least [raidMinPopulation] — raids
+  /// its nearest colonial neighbour once every [raidEveryDays] operation
+  /// days, on a day of its own (combat.md §7N).
+  static const int raidEveryDays = 10;
+  static const double raidMinPopulation = 40;
+
+  /// The rival [colonyId]'s own day in [raidEveryDays]: it raids on the
+  /// operation days `d` where `(d + raidPhase) % raidEveryDays == 0`.
+  static int raidPhase(String colonyId) =>
+      (combatUnit(combatKey(colonyId), 0x52414944, 0) * raidEveryDays).floor();
+
   int get _dayUs => (tuning.daySec * 1e6).round();
 
   /// The flying world, read at this tick's end (§7E); null where no world
@@ -73,6 +86,7 @@ class CombatPhase {
     _sky = sky;
     final cities = [...cityList]..sort((a, b) => a.id.compareTo(b.id));
     final opDt = math.min(math.max(0.0, tickDt), 0.5);
+    final beforeUs = registry.clockUs;
     registry.clockUs += (opDt * 1e6).round();
 
     for (final c in registry.inbox.drain()) {
@@ -86,6 +100,7 @@ class CombatPhase {
         _onEvent(city, e, cities);
       }
     }
+    _raids(cities, beforeUs);
     _watchSky(cities);
     // Silo strikes asked for: the lead source pays its missiles (§7M).
     for (final op in registry.operations) {
@@ -139,6 +154,10 @@ class CombatPhase {
     final owned = opId == null ? null : registry.byId(opId);
     if (owned != null && !owned.ownedBy(c.issuedBy.value)) {
       registry.lastRefusal = 'That operation is not yours to order.';
+      return;
+    }
+    if (owned != null && owned.defensive) {
+      registry.lastRefusal = 'Your people are defending: there is nothing to order.';
       return;
     }
     switch (c) {
@@ -459,6 +478,19 @@ class CombatPhase {
       case StageChangedEvent():
         for (final op in registry.operations) {
           if (op.resolved) continue;
+          if (op.defensive) {
+            // A rising ends with the occupation; a raid when its target is
+            // no longer the player's, or its rival rejoins (§7N).
+            if (op.targetColonyId == city.id) {
+              final still = op.kind == OperationKind.uprising
+                  ? e.allegiance == Allegiance.occupied
+                  : e.allegiance == Allegiance.colonial;
+              if (!still) op.endFromOutside(OperationOutcome.overtaken);
+            } else if (op.raiderId == city.id && e.allegiance != Allegiance.independent) {
+              op.endFromOutside(OperationOutcome.rejoined);
+            }
+            continue;
+          }
           if (op.targetColonyId == city.id) {
             if (op.kind == OperationKind.colonyAssault) {
               // It rejoined while the troopers were on their way (a petition
@@ -513,11 +545,141 @@ class CombatPhase {
           registry.lastRefusal = '${city.name} could pay for ${e.paid} of ${e.asked} rounds '
               '($kRoundSteel steel and $kRoundElectronics electronics each).';
         }
+      case UprisingEvent():
+        _rise(city, e);
+      case PlunderedEvent():
+        // Ore and rations, in the base goods' order (ammo, guns, rations).
+        _find(cities, e.raiderId)?.war.inbox.add(BaseGoodsWrite(e.ore, [0, 0, e.rations]));
       case GarrisonSuppliedEvent():
         if (e.amounts.isNotEmpty) {
           registry.runs.add(SupplyRun(
               e.targetColonyId, e.amounts, registry.clockUs + supplyTransitS * 1000000));
         }
+    }
+  }
+
+  // ---- defensive operations (§7N) -------------------------------------------------
+
+  /// [city] has risen against its garrison: the rising is fought, once.
+  void _rise(CitySim city, UprisingEvent e) {
+    final running = registry.runningAgainst(city.id);
+    if (running != null) {
+      if (running.kind == OperationKind.uprising) city.war.inbox.add(UprisingFoughtWrite(running.id));
+      return;
+    }
+    final planned = planUprising(
+      operationId: registry.nextOperationId,
+      target: city.launchSnapshot(defence: true),
+      garrisonOpId: e.garrisonOpId,
+      garrisonHome: e.homeColonyId,
+      troopers: e.troopers,
+      turrets: e.turrets,
+      tuning: tuning,
+    );
+    final op = planned.operation;
+    if (op == null) {
+      // Nothing to fight over, or nobody to fight: the garrison holds.
+      city.war.inbox.add(const UprisingEndWrite(held: true, garrisonLost: 0, rebelDead: 0));
+      return;
+    }
+    registry.nextOperationId++;
+    registry.operations.add(op);
+    city.war.inbox.add(UprisingFoughtWrite(op.id));
+  }
+
+  /// Rivals raid on the day of their own that falls this tick, if one does.
+  void _raids(List<CitySim> cities, int beforeUs) {
+    final day = registry.clockUs ~/ _dayUs;
+    if (day == beforeUs ~/ _dayUs) return;
+    for (final r in cities) {
+      if (r.loyalty.allegiance != Allegiance.independent || r.population < raidMinPopulation) continue;
+      if ((day + raidPhase(r.id)) % raidEveryDays != 0) continue;
+      if (registry.operations.any((o) => !o.resolved && o.raiderId == r.id)) continue;
+      final target = _nearestColonial(r, cities);
+      if (target == null || registry.runningAgainst(target.id) != null) continue;
+      final planned = planRaid(
+        operationId: registry.nextOperationId,
+        target: target.launchSnapshot(defence: true),
+        raider: r.launchSnapshot(),
+        tuning: tuning,
+      );
+      final op = planned.operation;
+      if (op == null) continue;
+      registry.nextOperationId++;
+      registry.operations.add(op);
+    }
+  }
+
+  /// [r]'s nearest colonial neighbour on its own body, ties by id.
+  CitySim? _nearestColonial(CitySim r, List<CitySim> cities) {
+    final radius = r.body.radius;
+    final at = r.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: radius);
+    CitySim? best;
+    var bestD = double.infinity;
+    for (final c in cities) {
+      if (c.id == r.id || c.body.id != r.body.id) continue;
+      if (c.loyalty.allegiance != Allegiance.colonial) continue;
+      final p = c.localToBodyFixed(const Vec2(0, 0), bodyRadiusM: radius);
+      final dx = p.x - at.x, dy = p.y - at.y, dz = p.z - at.z;
+      final d = dx * dx + dy * dy + dz * dz;
+      if (d < bestD) {
+        bestD = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  /// A rising or a raid at its end: each side's dead to its home, and the
+  /// colony told how it went.
+  void _reportDefence(Operation op, List<CitySim> cities) {
+    final target = _find(cities, op.targetColonyId);
+    final taken = op.outcome == OperationOutcome.won;
+    switch (op.kind) {
+      case OperationKind.uprising:
+        var dead = 0, wounded = 0;
+        String? home;
+        for (final f in op.formations) {
+          if (f.side != CombatSide.defender) continue;
+          dead += f.dead;
+          wounded += f.wounded;
+          home ??= f.homeColonyId;
+        }
+        final gOp = op.garrisonOpId;
+        final lost = dead + wounded;
+        if (home != null && gOp != null && lost > 0) {
+          // Under the garrison's own operation, whose members they are.
+          _find(cities, home)
+              ?.war
+              .inbox
+              .add(TroopersHomeWrite(gOp, null, alive: 0, wounded: wounded, dead: dead));
+          for (final g in registry.garrisons) {
+            if (g.targetColonyId == op.targetColonyId && g.opId == gOp) g.count -= lost;
+          }
+          registry.garrisons.removeWhere((g) => g.count <= 0);
+        }
+        target?.war.inbox
+            .add(UprisingEndWrite(held: !taken, garrisonLost: lost, rebelDead: op.attackerDead));
+        if (dead > 0) {
+          for (final c in cities) {
+            c.war.inbox.add(WarWearinessWrite(dead * wearinessPerDead));
+          }
+        }
+      case OperationKind.raid:
+        final id = op.raiderId ?? '';
+        final raider = _find(cities, id);
+        final decided = taken ||
+            op.outcome == OperationOutcome.lost ||
+            op.outcome == OperationOutcome.ceasefire;
+        if (decided || op.defenderDead > 0) {
+          target?.war.inbox.add(RaidEndWrite(id, raider?.name ?? id, raided: taken, dead: op.defenderDead));
+        }
+        if (raider != null && op.attackerDead > 0) {
+          raider.war.inbox.add(TroopersHomeWrite(op.id, null, alive: 0, wounded: 0, dead: op.attackerDead));
+        }
+      case OperationKind.portRetake:
+      case OperationKind.colonyAssault:
+        break;
     }
   }
 
@@ -539,6 +701,7 @@ class CombatPhase {
   /// A source colony broke away: its troopers go home to it, alive, and the
   /// fight goes on without them.
   void _desert(Operation op, CitySim home) {
+    if (op.defensive) return;
     var alive = 0, wounded = 0, dead = 0;
     for (final f in op.formations) {
       if (f.side != CombatSide.attacker || f.homeColonyId != home.id) continue;
@@ -557,6 +720,10 @@ class CombatPhase {
 
   void _report(Operation op, List<CitySim> cities) {
     registry.reported.add(op.id);
+    if (op.defensive) {
+      _reportDefence(op, cities);
+      return;
+    }
     final target = _find(cities, op.targetColonyId);
     // A base's support staff — the reserve, crews, and those fighting as
     // turrets or a formed squad — are reported with the base, under their

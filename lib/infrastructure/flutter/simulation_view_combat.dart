@@ -189,10 +189,24 @@ extension _SimulationViewCombat on _SimulationViewState {
   static bool _assault(Operation op) => op.kind == OperationKind.colonyAssault;
 
   static String _outcomeLabel(Operation op) => switch (op.outcome) {
-        OperationOutcome.won => _assault(op) ? 'Colony taken' : 'Spaceport retaken',
-        OperationOutcome.lost => _assault(op) ? 'Assault repulsed' : 'Attack repulsed',
+        OperationOutcome.won => switch (op.kind) {
+            OperationKind.uprising => 'The rising took the Seat',
+            OperationKind.raid => 'Raiders took the Seat',
+            OperationKind.colonyAssault => 'Colony taken',
+            OperationKind.portRetake => 'Spaceport retaken',
+          },
+        OperationOutcome.lost => switch (op.kind) {
+            OperationKind.uprising => 'Rising crushed',
+            OperationKind.raid => 'Raiders beaten off',
+            OperationKind.colonyAssault => 'Assault repulsed',
+            OperationKind.portRetake => 'Attack repulsed',
+          },
         OperationOutcome.withdrawn => 'Withdrawn',
-        OperationOutcome.ceasefire => 'Ceasefire: no decision',
+        OperationOutcome.ceasefire => switch (op.kind) {
+            OperationKind.uprising => 'The rising melted away',
+            OperationKind.raid => 'The raiders gave up',
+            _ => 'Ceasefire: no decision',
+          },
         OperationOutcome.rejoined => 'The colony rejoined',
         OperationOutcome.overtaken => 'Overtaken by events',
         null => '',
@@ -203,6 +217,8 @@ extension _SimulationViewCombat on _SimulationViewState {
     switch (op.phase) {
       case OperationPhase.mustering:
         return 'Mustering for $where';
+      case OperationPhase.transit when op.kind == OperationKind.raid:
+        return 'Raiders crossing to $where';
       case OperationPhase.transit:
         final down = op.landers.where((l) => l.state == LanderState.landed).length;
         return op.landers.isEmpty
@@ -212,6 +228,8 @@ extension _SimulationViewCombat on _SimulationViewState {
                 : 'In transit to $where');
       case OperationPhase.engaged:
         final day = (op.seconds - op.engagedAtStep) / op.tuning.daySec;
+        if (op.kind == OperationKind.uprising) return 'Rising at $where · day ${day.toStringAsFixed(1)}';
+        if (op.kind == OperationKind.raid) return 'Raiders at $where · day ${day.toStringAsFixed(1)}';
         return _assault(op)
             ? 'Fighting for $where · day ${day.toStringAsFixed(1)}'
             : 'Fighting for $where\'s spaceport · day ${day.toStringAsFixed(1)}';
@@ -249,7 +267,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(op.resolved ? Icons.flag_outlined : Icons.shield_outlined,
                         size: 16,
-                        color: op.outcome == OperationOutcome.won
+                        color: op.playerWon
                             ? AppTheme.accent2
                             : (op.resolved ? AppTheme.textDim : AppTheme.warn)),
                     const SizedBox(width: 6),
@@ -259,7 +277,11 @@ extension _SimulationViewCombat on _SimulationViewState {
                       SizedBox(
                         width: 60,
                         child: LinearProgressIndicator(
-                          value: ((op.graph.byId(op.goalId)?.control ?? -1) + 1) / 2,
+                          // The player's hold: of the goal attacking, of the
+                          // Seat defending.
+                          value: op.defensive
+                              ? (1 - (op.graph.byId(op.goalId)?.control ?? -1)) / 2
+                              : ((op.graph.byId(op.goalId)?.control ?? -1) + 1) / 2,
                           minHeight: 5,
                           color: AppTheme.accent2,
                           backgroundColor: AppTheme.danger.withValues(alpha: 0.5),
@@ -799,6 +821,7 @@ extension _SimulationViewCombat on _SimulationViewState {
 
   /// Why the player cannot join [op] now, or null.
   String? _whyNotJoin(Operation op) {
+    if (op.defensive) return 'Defensive fights are fought from the map.';
     if (op.resolved || op.phase != OperationPhase.engaged) return 'Not until the squads are down.';
     final r = _combatState.rasters[op.id];
     if (r == null || !r.complete) return 'Mapping the ground: ${((r?.progress ?? 0) * 100).round()}%';
@@ -1823,6 +1846,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                 if (op.phase == OperationPhase.engaged || op.resolved)
                   for (final id in _assault(op) ? op.path.skip(1) : [op.goalId])
                     line('Control of ${place(id)}', '${pct(id)}%'),
+                if (op.defensive) ..._defenceRows(op, line, where) else ...[
                 line('Your troopers', '${op.attackerAlive} fit · ${op.attackerWounded} wounded · ${op.attackerDead} dead'),
                 line(_assault(op) ? 'Defenders' : 'Rebels', '${op.defenderRemoved} fallen of ${op.defenderRaised} · '
                     '${op.militia.total} still at home'),
@@ -1839,9 +1863,10 @@ extension _SimulationViewCombat on _SimulationViewState {
                   if (f.alive)
                     line('  ${f.count} ${_kindLabel(f)} · ${where(f)}',
                         'morale ${(f.morale * 100).round()}%'),
+                ],
                 if (op.base case final b?) ..._baseRows(op, b, ctx, line),
-                if (!op.resolved) ..._orbitalRows(op, ctx, place, line),
-                if (!op.resolved && op.phase == OperationPhase.engaged) ...[
+                if (!op.resolved && !op.defensive) ..._orbitalRows(op, ctx, place, line),
+                if (!op.resolved && !op.defensive && op.phase == OperationPhase.engaged) ...[
                   const SizedBox(height: 10),
                   Text('Orders', style: AppTheme.dim),
                   const SizedBox(height: 4),
@@ -1875,7 +1900,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                   ..._abilityRows(op, ctx, place),
                 ],
                 const SizedBox(height: 12),
-                if (!op.resolved && op.phase != OperationPhase.mustering)
+                if (!op.resolved && !op.defensive && op.phase != OperationPhase.mustering)
                   Builder(builder: (_) {
                     final why = _whyNotJoin(op);
                     return Align(
@@ -1917,7 +1942,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                       },
                       child: Text('Watch', style: AppTheme.body.copyWith(color: AppTheme.accent)),
                     ),
-                  if (!op.resolved)
+                  if (!op.resolved && !op.defensive)
                     Builder(builder: (_) {
                       final draws = _readyDraws(op.targetColonyId);
                       final n = draws.fold<int>(0, (a, d) => a + d.count);
@@ -1936,7 +1961,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                       );
                     }),
                   const Spacer(),
-                  if (!op.resolved)
+                  if (!op.resolved && !op.defensive)
                     TextButton(
                       key: const Key('combat-withdraw'),
                       onPressed: () {
@@ -1957,6 +1982,30 @@ extension _SimulationViewCombat on _SimulationViewState {
     );
   }
 
+  /// A rising's or a raid's drawer lines (§7N): the player's side defends.
+  List<Widget> _defenceRows(
+      Operation op, Widget Function(String, String) line, String Function(Formation) where) {
+    final rising = op.kind == OperationKind.uprising;
+    final ours = op.formations.where((f) => f.side == CombatSide.defender).toList();
+    final theirs = op.formations.where((f) => f.side == CombatSide.attacker).toList();
+    final raider = op.raiderId;
+    return [
+      line(rising ? 'Your garrison' : 'Its people',
+          '${op.defenderRemoved} fallen of ${op.defenderRaised} · ${op.militia.total} still at home'),
+      line(rising ? 'Rebels' : 'Raiders from ${raider == null ? '?' : _colonyName(raider)}',
+          '${op.attackerAlive} fit · ${op.attackerRemoved} fallen of ${op.attackerRaised}'),
+      if (op.defenderSurrendered > 0) line('Laid down their arms', '${op.defenderSurrendered}'),
+      const SizedBox(height: 8),
+      Text(rising ? 'Your squads' : 'Its defenders', style: AppTheme.dim),
+      for (final f in ours)
+        if (f.alive) line('  ${f.count} ${_kindLabel(f)} · ${where(f)}', 'morale ${(f.morale * 100).round()}%'),
+      const SizedBox(height: 6),
+      Text(rising ? 'Rebel squads' : 'Raiding squads', style: AppTheme.dim),
+      for (final f in theirs)
+        if (f.alive) line('  ${f.count} ${_kindLabel(f)} · ${where(f)}', 'morale ${(f.morale * 100).round()}%'),
+    ];
+  }
+
   /// `ext.acro.combat` (docs/plans/combat.md §7.9): the operation surface,
   /// driven by name for a headless check.
   ///   status                      operations as JSON
@@ -1973,6 +2022,8 @@ extension _SimulationViewCombat on _SimulationViewState {
   ///   order=auto|hold|fallBack|attack:OBJ   the running operation's order
   ///   reinforce=1                 send every ready trooper as reinforcements
   ///   charter=ready               an occupied colony has held the line 11 days
+  ///   rise=1                      the open colony, occupied, rises (§7N)
+  ///   raidDay=1                   the clock to just before a rival's raid day
   ///   step=S                      run S seconds of world ticks now
   ///   planner=open | drawer=ID    open the planner, or an operation's drawer
   ///   dismiss=1                   close the open sheet
@@ -1984,6 +2035,31 @@ extension _SimulationViewCombat on _SimulationViewState {
     }
     if (p['fixture'] == 'independent' && target != null) {
       did['fixture'] = _combatFixture(target, independent: true);
+    }
+    // rise=1: the open colony, occupied, rises against its garrison (§7N).
+    if (p['rise'] != null && target != null && target.loyalty.occupied) {
+      final t = target.loyalty.colonyTimeS;
+      target.loyalty.revolts.addAll([t, t, t]);
+      did['rise'] = target.loyalty.revolts.length;
+    }
+    // raidDay=1: the operation clock to just before the next day a rival
+    // raids (§7N).
+    if (p['raidDay'] != null) {
+      final dayUs = (const ResolverTuning().daySec * 1e6).round();
+      final today = _operations.clockUs ~/ dayUs;
+      for (var d = 1; d <= CombatPhase.raidEveryDays && did['raidDay'] == null; d++) {
+        for (final c in _cities.all()) {
+          if (c.loyalty.allegiance != Allegiance.independent ||
+              c.population < CombatPhase.raidMinPopulation) {
+            continue;
+          }
+          if ((today + d + CombatPhase.raidPhase(c.id)) % CombatPhase.raidEveryDays == 0) {
+            _operations.clockUs = (today + d) * dayUs - 200000;
+            did['raidDay'] = {'rival': c.id, 'day': today + d};
+            break;
+          }
+        }
+      }
     }
     if (p['charter'] == 'ready' && target != null && target.loyalty.occupied) {
       target.loyalty
@@ -2390,6 +2466,7 @@ extension _SimulationViewCombat on _SimulationViewState {
             'id': op.id,
             'target': op.targetColonyId,
             'phase': op.phase.name,
+            'kind': op.kind.name,
             'outcome': op.outcome?.name,
             'band': op.band.name,
             'seconds': op.seconds,

@@ -3,6 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/colony/city/city_control.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_loyalty.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_occupation.dart';
@@ -101,17 +103,93 @@ void main() {
     expect(held, closeTo(free * (1 - s), 1e-9));
   });
 
-  test('three revolts under guard: it throws the garrison out', () {
+  test('three revolts under guard: it rises, and a lost rising throws the garrison out (§7N)', () {
     final city = taken();
     final t = city.colonyTimeS;
     city.loyalty.revolts.addAll([t, t, t]);
     run(city, 0.5);
+    expect(city.loyalty.allegiance, Allegiance.occupied, reason: 'the fight decides it now');
+    expect(city.loyalty.risen, isTrue);
+    expect(city.loyalty.notices.last.kind, LoyaltyNoticeKind.uprising);
+    final up = city.war.outbox.whereType<UprisingEvent>().last;
+    expect((up.troopers, up.homeColonyId), (6, 'home'));
+    city.war.outbox.clear();
+
+    city.applyCombatWrite(const UprisingFoughtWrite(3));
+    run(city, 0.5);
+    expect(city.war.outbox.whereType<UprisingEvent>(), isEmpty, reason: 'taken up: said once');
+
+    city.applyCombatWrite(const UprisingEndWrite(held: false, garrisonLost: 2, rebelDead: 5));
     expect(city.loyalty.allegiance, isNot(Allegiance.occupied));
+    expect(city.loyalty.warDead, 4 + 5, reason: 'the rebels killed are a grievance');
+    run(city, 0.5);
     expect(city.war.garrison, isNull);
     final home = city.war.outbox.whereType<GarrisonHomeEvent>().single;
     expect(home.expelled, isTrue);
-    expect(home.count, 6);
+    expect(home.count, 4, reason: 'the survivors');
     expect(city.loyalty.notices.map((n) => n.kind), contains(LoyaltyNoticeKind.occupationEnded));
+  });
+
+  test('a rising the garrison holds is crushed: revolts cleared, rebellion halved, quiet a while', () {
+    final city = taken();
+    final t = city.colonyTimeS;
+    city.loyalty.revolts.addAll([t, t, t]);
+    run(city, 0.5);
+    city.applyCombatWrite(const UprisingFoughtWrite(3));
+    city.rebellion = 0.8;
+    city.applyCombatWrite(const UprisingEndWrite(held: true, garrisonLost: 1, rebelDead: 3));
+    final l = city.loyalty;
+    expect(l.allegiance, Allegiance.occupied);
+    expect(l.risen, isFalse);
+    expect(l.revolts, isEmpty);
+    expect(city.rebellion, closeTo(0.4, 1e-12));
+    expect(city.war.garrison!.count, 5);
+    expect(l.notices.last.kind, LoyaltyNoticeKind.uprisingCrushed);
+    // Three more revolts would raise it again at once: not while it is quiet.
+    final t2 = l.colonyTimeS;
+    l.revolts.addAll([t2, t2, t2]);
+    run(city, 1);
+    expect(l.risen, isFalse);
+    l.colonyTimeS = l.uprisingQuietUntilS;
+    l.revolts
+      ..clear()
+      ..addAll([l.colonyTimeS, l.colonyTimeS, l.colonyTimeS]);
+    run(city, 1);
+    expect(l.risen, isTrue);
+    final back = CitySim.fromJson(city.toJson(), bodies: fixtureBodies);
+    expect(back.loyalty.risen, isTrue);
+    expect(back.loyalty.uprisingQuietUntilS, l.uprisingQuietUntilS);
+  });
+
+  test('a rising nobody fights — no combat phase — throws the garrison out after a day', () {
+    final city = taken();
+    final t = city.colonyTimeS;
+    city.loyalty.revolts.addAll([t, t, t]);
+    run(city, 0.5);
+    expect(city.loyalty.risen, isTrue);
+    run(city, CityLoyalty.uprisingFallbackDays * 120 + 1);
+    expect(city.loyalty.allegiance, isNot(Allegiance.occupied));
+    expect(city.war.garrison, isNull);
+    expect(city.war.outbox.whereType<GarrisonHomeEvent>().single.expelled, isTrue);
+  });
+
+  test('a raid: beaten off, or a fifth of the ore and rations gone', () {
+    final city = starterKit();
+    city.stock[Commodity.ore] = 100;
+    city.stock[Commodity.rations] = 50;
+    final level = city.loyalty.level;
+    city.applyCombatWrite(const RaidEndWrite('r', 'Rival', raided: false, dead: 0));
+    expect(city.stockOf(Commodity.ore), 100);
+    expect(city.loyalty.notices.last.kind, LoyaltyNoticeKind.raidBeaten);
+    city.applyCombatWrite(const RaidEndWrite('r', 'Rival', raided: true, dead: 0));
+    expect(city.stockOf(Commodity.ore), closeTo(80, 1e-9));
+    expect(city.stockOf(Commodity.rations), closeTo(40, 1e-9));
+    expect(city.loyalty.level, closeTo(math.max(0.0, level - 0.05), 1e-12));
+    final p = city.war.outbox.whereType<PlunderedEvent>().single;
+    expect(p.raiderId, 'r');
+    expect(p.ore, closeTo(20, 1e-9));
+    expect(p.rations, closeTo(10, 1e-9));
+    expect(city.loyalty.notices.last.kind, LoyaltyNoticeKind.raided);
   });
 
   test('the charter: offered after ten days on the line, restored on the order', () {

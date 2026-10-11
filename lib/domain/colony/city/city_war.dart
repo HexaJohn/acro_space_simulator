@@ -127,6 +127,11 @@ class PortGarrison {
 const int kTurretTroopers = 2;
 const int kTurretCrew = 2;
 
+/// What a successful raid costs the colony it plunders (combat.md §7N): the
+/// share of its ore and rations carried off, and loyalty.
+const double kRaidPlunderShare = 0.2;
+const double kRaidLoyaltyCost = 0.05;
+
 /// Resolve a beaten-off assault adds, and for how many loyalty days.
 const double kResolveBoost = 0.2;
 const double kResolveBoostDays = 10;
@@ -281,6 +286,33 @@ class SiloDebitWrite extends CombatWrite {
   final int missiles;
 }
 
+/// The combat phase took the colony's rising up as operation [opId]
+/// (combat.md §7N): the fight decides it now.
+class UprisingFoughtWrite extends CombatWrite {
+  const UprisingFoughtWrite(this.opId);
+  final int opId;
+}
+
+/// The rising is over (§7N): [held] or not, [garrisonLost] of the garrison
+/// killed or wounded, [rebelDead] of the colony's people killed.
+class UprisingEndWrite extends CombatWrite {
+  const UprisingEndWrite({required this.held, required this.garrisonLost, required this.rebelDead});
+  final bool held;
+  final int garrisonLost;
+  final int rebelDead;
+}
+
+/// A rival's raid on this colony is over (§7N): [raided] — the raiders took
+/// the Seat and carry off a fifth of its ore and rations — or beaten off;
+/// [dead] of its people killed either way.
+class RaidEndWrite extends CombatWrite {
+  const RaidEndWrite(this.raiderId, this.raiderName, {required this.raided, required this.dead});
+  final String raiderId;
+  final String raiderName;
+  final bool raided;
+  final int dead;
+}
+
 /// War weariness: the player's dead cost every colony's loyalty
 /// (combat.md §7.6). Only a colony that takes the player's orders feels it.
 class WarWearinessWrite extends CombatWrite {
@@ -336,6 +368,23 @@ class GarrisonSuppliedEvent extends CombatEvent {
   const GarrisonSuppliedEvent(this.targetColonyId, this.amounts);
   final String targetColonyId;
   final Map<String, double> amounts;
+}
+
+/// The colony has risen against its occupation garrison (combat.md §7N):
+/// posted each tick until the combat phase takes the rising up.
+class UprisingEvent extends CombatEvent {
+  const UprisingEvent(this.garrisonOpId, this.homeColonyId, this.troopers, this.turrets);
+  final int garrisonOpId;
+  final String homeColonyId;
+  final int troopers;
+  final int turrets;
+}
+
+/// Raiders carried off [ore] and [rations] for [raiderId] (§7N).
+class PlunderedEvent extends CombatEvent {
+  const PlunderedEvent(this.raiderId, this.ore, this.rations);
+  final String raiderId;
+  final double ore, rations;
 }
 
 /// Garrison troopers went home (unpaid, or expelled), alive.
@@ -553,8 +602,10 @@ extension CityWar on CitySim {
     );
   }
 
-  /// This colony as the target, as it stands now.
-  LaunchSnapshot launchSnapshot() {
+  /// This colony as the target, as it stands now. [defence]: as the ground
+  /// of a fight it defends (combat.md §7N) — its Seat, barracks troopers and
+  /// guns named whatever its allegiance, as an independent colony's are.
+  LaunchSnapshot launchSnapshot({bool defence = false}) {
     var portJobs = 0;
     Parcel? port;
     var portBest = -1;
@@ -598,7 +649,7 @@ extension CityWar on CitySim {
     var regulars = 0;
     final guns = <EmplacementSite>[];
     var sheltered = 0.0;
-    if (independent) {
+    if (independent || defence) {
       for (final (parcel, s) in _sitesInOrder()) {
         final c = parcel.centroid;
         if (s.type == 'barracks' || s.type == 'base') {
@@ -623,7 +674,7 @@ extension CityWar on CitySim {
       portE: portAt?.e ?? 0,
       portN: portAt?.n ?? 0,
       independent: independent,
-      objectives: independent ? assaultObjectives() : const [],
+      objectives: independent || defence ? assaultObjectives() : const [],
       regulars: regulars,
       emplacements: guns,
       shelterCover: population <= 0 ? 0 : (sheltered / population).clamp(0.0, 1.0),
@@ -826,6 +877,42 @@ extension CityWar on CitySim {
           sent[k] = n;
         }
         war.outbox.add(GarrisonSuppliedEvent(w.targetColonyId, sent));
+      case UprisingFoughtWrite():
+        if (loyalty.risen) loyalty.uprisingFought = true;
+      case UprisingEndWrite():
+        final g = war.garrison;
+        if (g != null && g.occupation && w.garrisonLost > 0) {
+          g.count = math.max(0, g.count - w.garrisonLost);
+          if (g.count == 0) war.garrison = null;
+        }
+        if (w.rebelDead > 0) {
+          // Its people, killed by the player's troopers: a grievance.
+          recordWarDead(w.rebelDead, corpses: true);
+          loyalty.warDead += w.rebelDead;
+          final gr = loyalty.reclaim.grievance;
+          if (gr != null) loyalty.reclaim.grievance = gr.withWarDead(w.rebelDead);
+        }
+        final crushed = w.held && loyalty.occupied && war.garrison != null;
+        if (crushed) rebellion *= 0.5;
+        loyalty.uprisingEnded(held: crushed);
+      case RaidEndWrite():
+        recordWarDead(w.dead, corpses: true);
+        if (w.raided) {
+          final ore = stockOf(Commodity.ore) * kRaidPlunderShare;
+          final rations = stockOf(Commodity.rations) * kRaidPlunderShare;
+          stock[Commodity.ore] = stockOf(Commodity.ore) - ore;
+          stock[Commodity.rations] = stockOf(Commodity.rations) - rations;
+          if (loyalty.allegiance == Allegiance.colonial) {
+            loyalty.level = (loyalty.level - kRaidLoyaltyCost).clamp(0.0, 1.0);
+          }
+          war.outbox.add(PlunderedEvent(w.raiderId, ore, rations));
+          loyalty.notice(LoyaltyNoticeKind.raided,
+              'Raiders from ${w.raiderName} took the Seat and carried off a fifth of the '
+              'ore and rations. The colony asks where you were.');
+        } else {
+          loyalty.notice(LoyaltyNoticeKind.raidBeaten,
+              'The colony beat off raiders from ${w.raiderName}.');
+        }
       case WarWearinessWrite():
         if (loyalty.allegiance == Allegiance.colonial) {
           loyalty.level = (loyalty.level - w.loyaltyCost).clamp(0.0, 1.0);
@@ -912,6 +999,11 @@ extension CityWar on CitySim {
         w.garrison = null;
       } else {
         _garrisonUpkeep(g, dt, fromColony: true);
+        // A rising nobody has taken up yet (§7N): said until it is.
+        final up = w.garrison;
+        if (loyalty.risen && !loyalty.uprisingFought && up != null) {
+          w.outbox.add(UprisingEvent(up.opId, up.homeColonyId, up.count, up.turrets));
+        }
       }
     } else if (g != null) {
       if (loyalty.allegiance != Allegiance.colonial || loyalty.stage != LoyaltyStage.standoff) {

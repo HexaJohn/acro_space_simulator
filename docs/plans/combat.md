@@ -770,6 +770,10 @@ or life support) is razed (`WarRazeWrite`).
 **Cut *(default)*:** wheeled/tracked/hover models (one APC), second seats and eject, rockets, rubble and wrecks as
 battle additions, bridges and tunnels, Ram/Unload/Boost, live destruction during the fight.
 
+**Built** aad4596, b6917c8; verified live on the Moon: boarded the APC, turned, and 5 s of throttle covered ~45 m.
+Found live: the bubble's 24-unit cap squeezed the APC out (vehicles are exempt now); the cannon round stepped past
+targets (0.5 m sub-steps); a steep slope east of the LZ stops a vehicle, as it should.
+
 ## 7M. Phase 7 spec: Pilot and strikes
 
 Specified 2026-10-11; defaults *(default)* for review.
@@ -795,6 +799,9 @@ takes manual control as for any vessel, the landing guidance resumes when let go
 **Cut *(default)*:** `PilotInputCommand` and the lander as a respawn point, live gunship models and strafing runs in
 the bubble (the pass is abstract, with a notice), Earth and Mars (the aero fix is cross-lane).
 
+**Built** 30a75a2; verified live on the Moon: the gunship's 30 s pass hit the Seat, the silo strike landed 57 s
+after the call on the power plant, and the rebels' daily missile took out a supply pad.
+
 ## 7N. Phase 8 spec: Uprisings, rivals, multiplayer groundwork
 
 Specified 2026-10-11; defaults *(default)* for review.
@@ -803,18 +810,21 @@ Specified 2026-10-11; defaults *(default)* for review.
 raids its colonial neighbours; combat commands travel on the wire with each operation answering only its owner.
 
 **Defensive operations** (`OperationKind.uprising`, `OperationKind.raid`): the same resolver with the sides' roles
-swapped — the colony's (or a rival's) militia attack from an LZ at the colony's edge toward its Seat, and the
-player's troopers there defend. Abstract only *(default)*: no base, no landers, no live bubble.
+swapped — the colony's (or a rival's) militia attack from a gathering point out from its Seat, and the player's
+troopers there defend. Abstract only *(default)*: no base, no landers, no live bubble, no orders (the drawer shows
+the fight; the chip's bar is the player's hold). A fight that never comes on melts away after 5 days: held.
 
-**Uprising:** where an occupation would expel its garrison (level ≤ 0 or three revolts), an uprising starts
-instead, while none is running: the garrison holds the Seat against its militia. **Rebels win:** the garrison is
-expelled as before. **Garrison holds:** the revolt is crushed — revolts cleared, rebellion halved, the dead a
-grievance.
+**Uprising:** where an occupation would expel its garrison (level ≤ 0 or three revolts), it rises instead, while
+none is running: its whole militia gathers 150 m out from the Seat, against the garrison there (the post's turrets
+crewed). **Rebels win:** the garrison is expelled as before. **Garrison holds:** the rising is crushed — revolts
+cleared, rebellion halved, the dead a grievance, and quiet for 5 days. A rising no combat phase takes up within a
+day (a host without one) throws the garrison out, as before.
 
 **Raid** (rivals, faction `rival:<colony>`): an independent colony with 40 or more people raids its nearest colonial
-neighbour on the same body once every 10 days (seeded); its militia's tenth attack, the target's own barracks
-troopers and militia defend. **Raiders win:** they carry off a fifth of its ore and rations, loyalty −0.05; held,
-nothing lost but the dead.
+neighbour on the same body once every 10 operation days, on a day of its own (seeded by its id); a third of its
+militia (at least four, or no raid) crosses from an LZ 450 m out, and the target's own barracks troopers, guns and
+militia defend. **Raiders win:** they carry off a fifth of its ore and rations, loyalty −0.05; held, nothing lost
+but the dead.
 
 **Wire:** `CombatJson { json }` in `wire/sim.fbs`' command union carries every `CombatCommand` as its JSON;
 `FlatBufferCodec` round-trips them. **Authority:** each operation keeps its owner (the launcher's `PlayerId`);
@@ -822,6 +832,10 @@ commands for it from anyone else are refused.
 
 **Cut *(default)*:** live defensive fights and the post as the defender's base, rival bases and doctrine, server
 snapshots with prediction over a real transport.
+
+**Built** 71005ab (wire, authority) and the defensive operations after it. Found while building: a 450 m march
+outlasted a 2-day ceasefire, so every rising and raid "melted away" still marching; risings now gather in town and
+defensive fights run 5 days.
 
 ## 8. Open questions
 

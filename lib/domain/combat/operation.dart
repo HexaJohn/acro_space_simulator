@@ -41,7 +41,20 @@ enum OperationKind {
 
   /// Phase 2: take an independent colony, and occupy it.
   colonyAssault,
+
+  /// Phase 8 (§7N): an occupied colony's militia rise against the garrison
+  /// holding its Seat. The sides' roles swap: the rebels attack, the
+  /// player's troopers defend.
+  uprising,
+
+  /// Phase 8 (§7N): a rival — an independent colony — raids a colonial
+  /// neighbour; the neighbour's own people defend.
+  raid,
 }
+
+/// Days a defensive fight runs before a rising or a raid that will not come
+/// on melts away (§7N): the defenders held.
+const double kDefenceCeasefireDays = 5;
 
 /// Rules of engagement (docs/plans/combat.md §7A). Append-only: saved by name.
 enum Roe {
@@ -255,6 +268,30 @@ class Operation {
   /// Who launched it (a `PlayerId` value): the only player it takes orders
   /// from (§7N). The single-player game is `player`.
   String ownerId = 'player';
+
+  /// The operation of the garrison an uprising fights (§7N), whose members
+  /// are away from home under that id; null for any other kind.
+  int? garrisonOpId;
+
+  /// The player defends, not attacks (§7N): an uprising or a raid. The
+  /// attacker side is the rebels' or the raiders', and the player gives it no
+  /// orders.
+  bool get defensive => kind == OperationKind.uprising || kind == OperationKind.raid;
+
+  /// The player's side came out on top: the attackers took the goal, or —
+  /// defending — they did not.
+  bool get playerWon => defensive
+      ? outcome == OperationOutcome.lost || outcome == OperationOutcome.ceasefire
+      : outcome == OperationOutcome.won;
+
+  /// The raiding colony (§7N), from its squads' home; null for any other kind.
+  String? get raiderId {
+    if (kind != OperationKind.raid) return null;
+    for (final f in formations) {
+      if (f.side == CombatSide.attacker && f.homeColonyId != null) return f.homeColonyId;
+    }
+    return null;
+  }
 
   /// Whether [playerId] may order it: its owner, or (one player under two
   /// names, reference §4.4) the local player's other spelling.
@@ -711,9 +748,11 @@ class Operation {
   bool get resolved => phase == OperationPhase.resolved;
 
   /// Days of fighting before a ceasefire.
-  double get ceasefireDays => kind == OperationKind.colonyAssault
-      ? tuning.assaultCeasefireDays
-      : tuning.ceasefireDays;
+  double get ceasefireDays => switch (kind) {
+        OperationKind.colonyAssault => tuning.assaultCeasefireDays,
+        OperationKind.uprising || OperationKind.raid => kDefenceCeasefireDays,
+        OperationKind.portRetake => tuning.ceasefireDays,
+      };
 
   /// Operation time, s.
   double get seconds => clock.seconds;
@@ -1437,6 +1476,7 @@ class Operation {
         if (directed.isNotEmpty) 'directed': [for (final d in directed) [d.$1, d.$2]],
         if (!air.isEmpty) 'air': air.toJson(),
         if (ownerId != 'player') 'owner': ownerId,
+        if (garrisonOpId != null) 'gOp': garrisonOpId,
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
             for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
@@ -1449,7 +1489,8 @@ class Operation {
           CounterTuning counters = const CounterTuning.uniform(),
           int? seedOverride}) =>
       _fromJson(j, tuning: tuning, counters: counters, seedOverride: seedOverride)
-        ..ownerId = j['owner'] as String? ?? 'player';
+        ..ownerId = j['owner'] as String? ?? 'player'
+        ..garrisonOpId = (j['gOp'] as num?)?.toInt();
 
   static Operation _fromJson(Map<String, dynamic> j,
           {required ResolverTuning tuning, required CounterTuning counters, int? seedOverride}) =>

@@ -24,6 +24,7 @@ import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/combat/operation.dart';
 import 'package:acro_space_simulator/domain/combat/operation_registry.dart';
 import 'package:acro_space_simulator/domain/combat/powers/sky.dart';
+import 'package:acro_space_simulator/domain/combat/resolver_tuning.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/multiplayer/command.dart';
 import 'package:acro_space_simulator/domain/multiplayer/player.dart';
@@ -644,6 +645,118 @@ void main() {
     w.ops.inbox.enqueue(WithdrawOperationCommand(player, 0, op.id));
     w.tick.execute(w.clock);
     expect(op.outcome, OperationOutcome.withdrawn, reason: 'its owner can');
+  });
+
+  /// A Moon colony of [pop] occupied by [troopers] of the player's from 'src'.
+  CitySim occupied(int pop, int troopers) {
+    final c = moonColony('tgt')
+      ..complexity = 0.2
+      ..population = pop.toDouble();
+    c.stock[Commodity.rations] = 2000;
+    c.stock[Commodity.guns] = 10;
+    c.loyalty
+      ..allegiance = Allegiance.independent
+      ..stage = LoyaltyStage.seceded;
+    c.applyCombatWrite(OccupyWrite(PortGarrison(
+      opId: 77,
+      homeColonyId: 'src',
+      count: troopers,
+      perTrooperDay: const {Commodity.rations: 0.1},
+      stock: {Commodity.rations: 500},
+      occupation: true,
+    )));
+    return c;
+  }
+
+  Operation? runRising(({AdvanceSimulationTick tick, SimulationClock clock, OperationRegistry ops,
+      InMemoryCityRepository cities}) w, CitySim tgt) {
+    final t = tgt.colonyTimeS;
+    tgt.loyalty.revolts.addAll([t, t, t]);
+    runUntilReported(w);
+    return w.ops.operations.where((o) => o.kind == OperationKind.uprising).firstOrNull;
+  }
+
+  test('a rising the garrison holds is crushed through the tick (§7N)', () {
+    final src = source(1), tgt = occupied(80, 30);
+    final w = world([src, tgt]);
+    final op = runRising(w, tgt);
+    expect(op, isNotNull);
+    // ignore: avoid_print
+    print('rising: ${op!.outcome} · garrison lost ${op.defenderRemoved} of ${op.defenderRaised}'
+        ' · rebels ${op.attackerRemoved} of ${op.attackerRaised}');
+    expect(op.garrisonOpId, 77);
+    expect(op.playerWon, isTrue);
+    expect(tgt.loyalty.allegiance, Allegiance.occupied);
+    expect(tgt.loyalty.risen, isFalse);
+    expect(tgt.loyalty.revolts, isEmpty);
+    expect(tgt.loyalty.notices.map((n) => n.kind), contains(LoyaltyNoticeKind.uprisingCrushed));
+    expect(tgt.war.garrison!.count, 30 - op.defenderRemoved);
+    expect(w.ops.lastRefusal, isNull);
+    // The player cannot order a fight they are defending.
+    w.ops.inbox.enqueue(WithdrawOperationCommand(player, 0, op.id));
+    w.tick.execute(w.clock);
+    expect(op.outcome, isNot(OperationOutcome.withdrawn));
+    expect(Operation.fromJson(jsonDecode(jsonEncode(op.toJson()))).kind, OperationKind.uprising);
+  });
+
+  test('a rising that takes the Seat throws the garrison out through the tick (§7N)', () {
+    final src = source(1), tgt = occupied(400, 2);
+    final w = world([src, tgt]);
+    final op = runRising(w, tgt);
+    expect(op, isNotNull);
+    // ignore: avoid_print
+    print('rising: ${op!.outcome} · garrison lost ${op.defenderRemoved} of ${op.defenderRaised}'
+        ' · rebels ${op.attackerRemoved} of ${op.attackerRaised}');
+    expect(op.outcome, OperationOutcome.won);
+    expect(op.playerWon, isFalse);
+    w.tick.execute(w.clock);
+    expect(tgt.loyalty.allegiance, isNot(Allegiance.occupied));
+    expect(tgt.war.garrison, isNull);
+    expect(w.ops.garrisons.where((g) => g.targetColonyId == 'tgt'), isEmpty);
+  });
+
+  test('a rival raids its colonial neighbour on its own day (§7N)', () {
+    final tgt = moonColony('tgt')
+      ..complexity = 0.2
+      ..population = 60;
+    tgt.stock[Commodity.ore] = 500;
+    tgt.stock[Commodity.rations] = 500;
+    final rival = moonColony('rival')
+      ..complexity = 0.2
+      ..population = 400;
+    rival.stock[Commodity.rations] = 2000;
+    rival.stock[Commodity.guns] = 60;
+    rival.loyalty
+      ..allegiance = Allegiance.independent
+      ..stage = LoyaltyStage.seceded;
+    final w = world([tgt, rival]);
+    final dayUs = (const ResolverTuning().daySec * 1e6).round();
+    Operation? raid;
+    for (var d = 1; d <= CombatPhase.raidEveryDays && raid == null; d++) {
+      w.ops.clockUs = d * dayUs - 100000;
+      w.tick.execute(w.clock);
+      raid = w.ops.operations.where((o) => o.kind == OperationKind.raid).firstOrNull;
+      if (raid == null) expect(w.ops.operations, isEmpty, reason: 'no raid but on its day');
+    }
+    expect(raid, isNotNull, reason: 'one day in ten is its own');
+    expect(raid!.raiderId, 'rival');
+    expect(raid.targetColonyId, 'tgt');
+    final rations0 = rival.stockOf(Commodity.rations);
+    runUntilReported(w);
+    // ignore: avoid_print
+    print('raid: ${raid.outcome} · raiders ${raid.attackerRemoved} of ${raid.attackerRaised}'
+        ' · defenders ${raid.defenderRemoved} of ${raid.defenderRaised}');
+    expect(raid.resolved, isTrue);
+    final kinds = tgt.loyalty.notices.map((n) => n.kind);
+    if (raid.outcome == OperationOutcome.won) {
+      expect(kinds, contains(LoyaltyNoticeKind.raided));
+      expect(tgt.stockOf(Commodity.ore), lessThan(500 * 0.81));
+      w.tick.execute(w.clock);
+      expect(rival.stockOf(Commodity.ore), greaterThan(0), reason: 'the plunder went home');
+    } else {
+      expect(kinds, contains(LoyaltyNoticeKind.raidBeaten));
+      expect(rival.stockOf(Commodity.rations), lessThanOrEqualTo(rations0));
+    }
   });
 }
 
