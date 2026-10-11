@@ -31,7 +31,7 @@ abstract final class Factions {
 }
 
 /// What a formation is. Append-only: saved by name.
-enum FormationKind { infantry, regular, militia, emplacement }
+enum FormationKind { infantry, regular, militia, emplacement, armour }
 
 /// What a formation counts as for the counter table (Halo Wars' triangle,
 /// docs/plans/combat.md §2). Phase 1 uses only [inf] and [empHmg], with the

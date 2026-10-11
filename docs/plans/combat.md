@@ -745,6 +745,31 @@ possesses, D-pad left holds, down hands back to the plan, B leaves. `GamepadMapp
 edges) is pure and tested on stub states. **Cut *(default)*:** G2 (web, macOS, Linux), rumble, rebinding, the
 pad's cursor in the command view (selection stays the mouse's). Not verified on hardware: no pad was attached.
 
+## 7L. Phase 6 spec: Driver, heavy weapons, destruction
+
+Specified 2026-10-11; defaults *(default)* for review.
+
+**Ships:** the base builds an APC; drive it into the fight and fire its cannon; AT turrets answer armour; under
+Heavy rules the buildings fought over are destroyed, at a civilian cost.
+
+**Armour:** `FormationKind.armour` (counter class ARM, power 4 a crew member): one vehicle, its crew the members.
+**The vehicle bay** (Fortress only, needs an Arms Factory at home: 120 Materiel + 30 steel, 90 s, 3 crew, 15 kW)
+assembles an APC every 120 s from 60 Materiel + 15 steel, crewed by 3 support staff. **The AT turret** (a turret
+socket, 80 + 10 steel, 40 s, 2 crew): an emplacement of class EMP-AT. **Counters** (`halo2`): infantry ×0.5 and HMG
+×0.6 against ARM; AT ×1.6 against ARM, ×0.7 against infantry; ARM ×1.4 against infantry, ×1.2 against HMG, ×1.5
+against structures. Balanced builds a bay after the Fortress.
+
+**Live:** an APC is one vehicle in the bubble, 100 hp a crew member (each 100 lost is one off the battle); small arms
+do a quarter against it. **Drive it:** F within 6 m boards your side's APC — W/S drive (9 m/s), A/D steer, the left
+button fires the cannon (a slow round, 2 s to reload, 4 m blast), F again steps out.
+
+**Heavy ROE** (`Roe.heavy`): fire ×1.4, civilians 0.6 of the defender dead (less shelters), orbital strikes on the
+Seat too. **Destruction:** when a Heavy operation ends, the building of every objective fought over (never the LZ
+or life support) is razed (`WarRazeWrite`).
+
+**Cut *(default)*:** wheeled/tracked/hover models (one APC), second seats and eject, rockets, rubble and wrecks as
+battle additions, bridges and tunnels, Ram/Unload/Boost, live destruction during the fight.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

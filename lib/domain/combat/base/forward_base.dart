@@ -557,7 +557,7 @@ class ForwardBase {
         b += kOutpostFortification;
       }
       for (final m in s.modules) {
-        if (m.kind == ModuleKind.turret) b += kTurretFortification;
+        if (isTurretKind(m.kind)) b += kTurretFortification;
       }
     }
     return b;
@@ -593,6 +593,9 @@ class ForwardBase {
     if (site >= sites.length || sites[site].razed) return 'That site is gone.';
     if (!hasGate(s.gate)) return '${s.label} needs a source colony with ${gateLabel(s.gate!)}.';
     if (countOf(kind) >= s.max) return 'The base has all the ${s.label.toLowerCase()}s it can use.';
+    if (kind == ModuleKind.vehicleBay && (sites[site].outpost || sites[site].tier != BaseTier.fortress)) {
+      return 'A vehicle bay needs the Fortress.';
+    }
     if (site < sites.length && sites[site].blocked(s.socket, socket)) return 'No room for this socket.';
     if (!_socketFree(site, s.socket, socket)) return 'That socket is taken.';
     return null;
@@ -763,6 +766,7 @@ class ForwardBase {
     _turrets(op, t);
     final since = t - deployAtStep;
     if (since % kWorkshopBatchS == 0) _workshop(op);
+    if (since % kBayCycleS == 0) _vehicleBay(op, t);
     if (since % kHospitalCycleS == 0) _hospital(op);
     if (since % kPodCycleS == 0) _podForm(op, t);
     _resupply(op, t);
@@ -852,7 +856,7 @@ class ForwardBase {
   }
 
   void _turretFormation(Operation op, BaseSite s, BaseModule m, int t) {
-    if (m.kind != ModuleKind.turret || m.formationId != null) return;
+    if (!isTurretKind(m.kind) || m.formationId != null) return;
     // Its crew come from the reserve and become the formation's members.
     final n = m.crew;
     if (n <= 0) return;
@@ -862,7 +866,7 @@ class ForwardBase {
       side: CombatSide.attacker,
       faction: Factions.player,
       kind: FormationKind.emplacement,
-      counterClass: CounterClass.empHmg,
+      counterClass: m.kind == ModuleKind.atTurret ? CounterClass.empAt : CounterClass.empHmg,
       count: n,
       quality: 0.8,
       morale: 0.8,
@@ -970,7 +974,7 @@ class ForwardBase {
       final m = BaseModule(kind: j.kind!, socket: j.socket);
       s.modules.add(m);
       _crew();
-      if (m.kind == ModuleKind.turret) _turretFormation(op, s, m, t);
+      if (isTurretKind(m.kind)) _turretFormation(op, s, m, t);
       events.add((BaseEventKind.built, '${m.spec.label} built.'));
     } else if (j.upgrade != null) {
       s.tier = j.upgrade!;
@@ -1040,7 +1044,7 @@ class ForwardBase {
   void _turrets(Operation op, int t) {
     final r = powerRatio;
     for (final (s, m) in allModules) {
-      if (m.kind != ModuleKind.turret) continue;
+      if (!isTurretKind(m.kind)) continue;
       final f = m.formationId == null ? null : op.formationById(m.formationId!);
       if (f == null || !f.alive) continue;
       final runs = _siteRuns(op, s);
@@ -1053,6 +1057,38 @@ class ForwardBase {
       // Turrets never move and never rout off their guns.
       if (f.broken) f.broken = false;
       if (f.at == FormationAt.reserve) f.at = s.objectiveId;
+    }
+  }
+
+  /// The vehicle bay assembles an APC from shipped kits (§7L): Materiel and
+  /// steel off the base, three support staff its crew. APCs built, for the
+  /// drawer.
+  int apcsBuilt = 0;
+
+  void _vehicleBay(Operation op, int t) {
+    for (final (s, m) in allModules) {
+      if (m.kind != ModuleKind.vehicleBay || !_online(op, s, m) || powerRatio < 0.5) continue;
+      if (materielC < kApcMaterielC || stockOf('steel') < kApcSteelC || reserve < kApcCrew) continue;
+      materielC -= kApcMaterielC;
+      _take('steel', kApcSteelC);
+      reserve -= kApcCrew;
+      apcsBuilt++;
+      op.addAttacker(Formation(
+        id: op.nextFormationId,
+        side: CombatSide.attacker,
+        faction: Factions.player,
+        kind: FormationKind.armour,
+        counterClass: CounterClass.arm,
+        count: kApcCrew,
+        quality: 1.0,
+        morale: 0.9,
+        kitDays: 3,
+        at: s.objectiveId,
+        arriveStep: t,
+        homeColonyId: homeColonyId,
+        homeSiteId: 'support',
+      ));
+      events.add((BaseEventKind.deployed, 'The vehicle bay rolled out an APC.'));
     }
   }
 
@@ -1310,7 +1346,7 @@ class ForwardBase {
   /// order.
   List<Formation> turretCrews(Operation op) => [
         for (final (_, m) in allModules)
-          if (m.kind == ModuleKind.turret && m.formationId != null)
+          if (isTurretKind(m.kind) && m.formationId != null)
             if (op.formationById(m.formationId!) case final f? when f.alive) f
       ];
 
@@ -1318,7 +1354,7 @@ class ForwardBase {
   int get turretsStanding {
     var n = 0;
     for (final (_, m) in allModules) {
-      if (m.kind == ModuleKind.turret) n++;
+      if (isTurretKind(m.kind)) n++;
     }
     return n;
   }
@@ -1337,6 +1373,7 @@ class ForwardBase {
         'gates': List<String>.of(gates),
         if (deployed) 'deployed': true,
         if (deployAtStep >= 0) 'deployAt': deployAtStep,
+        if (apcsBuilt != 0) 'apcs': apcsBuilt,
         if (lost) 'lost': true,
         if (overrun) 'overrun': true,
         if (overrunHeldS != 0) 'overrunHeld': overrunHeldS,
@@ -1398,6 +1435,7 @@ class ForwardBase {
     }
     b.layoutBlockedModules = [for (final v in (j['layoutBlockedM'] as List? ?? const [])) (v as num).toInt()];
     b.layoutBlockedTurrets = [for (final v in (j['layoutBlockedT'] as List? ?? const [])) (v as num).toInt()];
+    b.apcsBuilt = (j['apcs'] as num?)?.toInt() ?? 0;
     return b;
   }
 

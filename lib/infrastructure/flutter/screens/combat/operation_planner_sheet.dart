@@ -412,6 +412,7 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
               for (final (roe, label) in const [
                 (Roe.restrained, 'Restrained'),
                 (Roe.standard, 'Standard'),
+                (Roe.heavy, 'Heavy'),
               ])
                 ChoiceChip(
                   key: Key('planner-roe-${roe.name}'),

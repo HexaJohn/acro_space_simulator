@@ -593,6 +593,7 @@ extension _SimulationViewCombat on _SimulationViewState {
         FormationKind.regular => 'regulars',
         FormationKind.militia => 'militia',
         FormationKind.emplacement => f.side == CombatSide.attacker ? 'turret crew' : 'gun emplacement',
+        FormationKind.armour => 'APC crew',
       };
 
   Widget _socketRow(Operation op, ForwardBase b, SocketKind ring, int i, BuildContext ctx,

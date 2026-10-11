@@ -13,7 +13,10 @@
 library;
 
 /// A module. Append-only: saved by name.
-enum ModuleKind { supplyPad, turret, barracksPod, stores, fieldHospital, generator, workshop }
+enum ModuleKind { supplyPad, turret, barracksPod, stores, fieldHospital, generator, workshop, vehicleBay, atTurret }
+
+/// A turret of either kind: an emplacement its crew fight from (§7L).
+bool isTurretKind(ModuleKind k) => k == ModuleKind.turret || k == ModuleKind.atTurret;
 
 /// Which ring a module stands in.
 enum SocketKind { module, turret }
@@ -145,7 +148,39 @@ const List<ModuleSpec> kBaseModules = [
     gate: 'gunfactory',
     max: 1,
   ),
+  ModuleSpec(
+    kind: ModuleKind.vehicleBay,
+    label: 'Vehicle bay',
+    socket: SocketKind.module,
+    materiel: 120,
+    steel: 30,
+    buildS: 90,
+    crew: 3,
+    powerKw: 15,
+    hp: 3,
+    gate: 'gunfactory',
+    max: 1,
+  ),
+  ModuleSpec(
+    kind: ModuleKind.atTurret,
+    label: 'AT turret',
+    socket: SocketKind.turret,
+    materiel: 80,
+    steel: 10,
+    buildS: 40,
+    crew: 2,
+    powerKw: 6,
+    hp: 2,
+    gate: 'gunfactory',
+  ),
 ];
+
+/// The vehicle bay's APC: every this many seconds, from these, crewed by
+/// this many support staff (§7L).
+const int kBayCycleS = 120;
+const int kApcMaterielC = 6000;
+const int kApcSteelC = 1500;
+const int kApcCrew = 3;
 
 ModuleSpec moduleSpec(ModuleKind k) {
   for (final s in kBaseModules) {
@@ -273,6 +308,7 @@ String doctrineLabel(Doctrine d) => switch (d) {
 
 /// One item of a doctrine's list: a module, a tier upgrade, or an outpost.
 enum DoctrineStep {
+  bay,
   pad,
   pod,
   turret,
@@ -296,6 +332,7 @@ const Map<Doctrine, List<DoctrineStep>> kDoctrines = {
     DoctrineStep.workshop,
     DoctrineStep.outpost,
     DoctrineStep.fortress,
+    DoctrineStep.bay,
     DoctrineStep.turret,
     DoctrineStep.turret,
     DoctrineStep.pad,
@@ -334,5 +371,6 @@ ModuleKind? moduleOfStep(DoctrineStep s) => switch (s) {
       DoctrineStep.hospital => ModuleKind.fieldHospital,
       DoctrineStep.generator => ModuleKind.generator,
       DoctrineStep.workshop => ModuleKind.workshop,
+      DoctrineStep.bay => ModuleKind.vehicleBay,
       DoctrineStep.station || DoctrineStep.fortress || DoctrineStep.outpost => null,
     };

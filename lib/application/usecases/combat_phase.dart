@@ -618,6 +618,9 @@ class CombatPhase {
           ? const AssaultRepulsedWrite()
           : const PortRepulsedWrite());
     }
+    // Heavy rules raze what was fought over (§7L).
+    final razed = op.razedSites;
+    if (target != null && razed.isNotEmpty) target.war.inbox.add(WarRazeWrite(razed));
     final won = op.outcome == OperationOutcome.won;
     if (target != null && !(won && op.kind == OperationKind.colonyAssault)) {
       final dead = op.defenderDead + op.civilianDead;

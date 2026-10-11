@@ -266,6 +266,13 @@ class ArmDebitWrite extends CombatWrite {
   final int steelEach, electronicsEach;
 }
 
+/// Heavy rules' destruction (combat.md §7L): the buildings on these sites,
+/// fought over, are gone.
+class WarRazeWrite extends CombatWrite {
+  const WarRazeWrite(this.siteIds);
+  final List<String> siteIds;
+}
+
 /// War weariness: the player's dead cost every colony's loyalty
 /// (combat.md §7.6). Only a colony that takes the player's orders feels it.
 class WarWearinessWrite extends CombatWrite {
@@ -709,6 +716,15 @@ extension CityWar on CitySim {
             ship(kBaseGoods[i], i < w.stock.length ? w.stock[i] : 0)
         ];
         war.outbox.add(BaseRunShippedEvent(w.opId, w.runId, m, sent));
+      case WarRazeWrite():
+        for (final id in w.siteIds) {
+          if (id.startsWith('cell:')) {
+            final k = int.tryParse(id.substring(5));
+            if (k != null) flattenAt(k);
+          } else {
+            clearParcel(id);
+          }
+        }
       case ArmDebitWrite():
         var n = w.rounds;
         if (w.steelEach > 0) n = math.min(n, (stockOf(Commodity.steel) / w.steelEach).floor());

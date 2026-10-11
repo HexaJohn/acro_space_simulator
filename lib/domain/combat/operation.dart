@@ -51,6 +51,10 @@ enum Roe {
   /// Heavier fire, and the town pays for it: civilians die alongside the
   /// defenders, less the share in shelters.
   standard,
+
+  /// Heavy weapons and destruction (§7L): heavier fire still, more
+  /// civilians, strikes on the Seat, and the buildings fought over razed.
+  heavy,
 }
 
 /// The player's standing order to the attackers (docs/plans/combat.md §7B).
@@ -325,13 +329,12 @@ class Operation {
   /// [Roe.standard] also the Port, Power, Depot and Airfield. Never the Seat,
   /// Life support or the LZ.
   bool strikeAllowed(Objective o) {
-    if (o.kind == ObjectiveKind.lz || o.kind == ObjectiveKind.seat || o.kind == ObjectiveKind.lifeSupport) {
-      return false;
-    }
+    if (o.kind == ObjectiveKind.lz || o.kind == ObjectiveKind.lifeSupport) return false;
+    if (o.kind == ObjectiveKind.seat) return roe == Roe.heavy;
     final gun = formations.any((f) =>
         f.side == CombatSide.defender && f.kind == FormationKind.emplacement && f.alive && f.at == o.id);
     if (gun) return true;
-    return roe == Roe.standard &&
+    return roe != Roe.restrained &&
         (o.kind == ObjectiveKind.port ||
             o.kind == ObjectiveKind.power ||
             o.kind == ObjectiveKind.depot ||
@@ -753,7 +756,13 @@ class Operation {
       if (f.engagedMembers == 0) f.engagedMembers = f.count;
     }
     final charging = chargeAt == o.id && t < chargeUntilStep;
-    final fire = (roe == Roe.standard ? tuning.standardFire : 1.0) * (charging ? chargeFire : 1.0);
+    final fire = switch (roe) {
+          Roe.restrained => 1.0,
+          Roe.standard => tuning.standardFire,
+          Roe.heavy => tuning.heavyFire,
+        } *
+        (charging ? chargeFire : 1.0);
+    o.fought = true;
     final attS = [
       for (final i in att)
         formationStrength(formations[i], tuning,
@@ -1218,10 +1227,22 @@ class Operation {
   /// Townsfolk killed alongside the defenders: none under [Roe.restrained];
   /// under [Roe.standard] a [ResolverTuning.collateralShare] of the defender
   /// dead again, less the share a shelter held.
-  int get civilianDead => roe == Roe.standard
-      ? (defenderDead * tuning.collateralShare * (1 - shelterCover.clamp(0.0, 1.0)))
-          .round()
-      : 0;
+  int get civilianDead => roe == Roe.restrained
+      ? 0
+      : (defenderDead *
+              (roe == Roe.heavy ? tuning.heavyCollateralShare : tuning.collateralShare) *
+              (1 - shelterCover.clamp(0.0, 1.0)))
+          .round();
+
+  /// The buildings a Heavy operation razes when it ends (§7L): every
+  /// objective fought over, never the LZ or life support; by site id.
+  List<String> get razedSites => roe != Roe.heavy
+      ? const []
+      : [
+          for (final o in graph.objectives)
+            if (o.fought && o.siteId != null && o.kind != ObjectiveKind.lz && o.kind != ObjectiveKind.lifeSupport)
+              o.siteId!
+        ];
 
   /// Attacker dead and wounded by home colony, in colony id order: what each
   /// home is charged when the operation reports back. [exceptSite] leaves out

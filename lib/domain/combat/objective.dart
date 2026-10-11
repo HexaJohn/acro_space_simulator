@@ -31,6 +31,8 @@ class Objective {
     this.n = 0,
     this.quietS = 0,
     this.dugIn = false,
+    this.siteId,
+    this.fought = false,
   });
 
   final String id;
@@ -67,6 +69,11 @@ class Objective {
   int quietS;
   bool dugIn;
 
+  /// The colony site it stands on, when it is a building (§7L: what Heavy
+  /// rules raze); and whether it was ever fought over.
+  final String? siteId;
+  bool fought;
+
   /// The objective width for a footprint of [areaM2] square metres:
   /// `min(cap, 6 + 4·sqrt(m² / 10,000))` — a 1 ha port is about 10.
   static double widthFor(double areaM2, {double cap = 24}) =>
@@ -85,6 +92,8 @@ class Objective {
         if (n != 0) 'n': n,
         if (quietS != 0) 'quiet': quietS,
         if (dugIn) 'dugIn': true,
+        if (siteId != null) 'site': siteId,
+        if (fought) 'fought': true,
       };
 
   factory Objective.fromJson(Map<String, dynamic> j) => Objective(
@@ -100,6 +109,8 @@ class Objective {
         n: (j['n'] as num?)?.toDouble() ?? 0,
         quietS: (j['quiet'] as num?)?.toInt() ?? 0,
         dugIn: j['dugIn'] == true,
+        siteId: j['site'] as String?,
+        fought: j['fought'] == true,
       );
 }
 

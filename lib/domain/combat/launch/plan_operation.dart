@@ -488,6 +488,7 @@ PlannedOperation planColonyAssault({
       control: -1,
       e: o.e,
       n: o.n,
+      siteId: o.siteId,
     ));
   }
   // The LZ: out from the port (else the seat), away from the colony centre,

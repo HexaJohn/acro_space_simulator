@@ -32,6 +32,9 @@ class ResolverTuning {
     this.winHoldS = 60,
     this.noAmmoFactor = 0.35,
     this.emplacementPower = 3.0,
+    this.armourPower = 4.0,
+    this.heavyFire = 1.4,
+    this.heavyCollateralShare = 0.6,
     this.daySec = 120,
     this.ceasefireDays = 10,
     this.assaultCeasefireDays = 20,
@@ -89,6 +92,13 @@ class ResolverTuning {
   /// Strength per member of a gun emplacement.
   final double emplacementPower;
 
+  /// An armoured vehicle's strength per crew member (§7L).
+  final double armourPower;
+
+  /// Attacker fire and civilians killed per defender killed under Heavy ROE.
+  final double heavyFire;
+  final double heavyCollateralShare;
+
   /// An operation day, s (the loyalty calendar's day).
   final double daySec;
 
@@ -134,8 +144,11 @@ class ResolverTuning {
   final double collateralShare;
 
   /// Strength per member before quality, morale and supply.
-  double powerOf(FormationKind kind) =>
-      kind == FormationKind.emplacement ? emplacementPower : 1.0;
+  double powerOf(FormationKind kind) => switch (kind) {
+        FormationKind.emplacement => emplacementPower,
+        FormationKind.armour => armourPower,
+        _ => 1.0,
+      };
 }
 
 /// Halo Wars' counter triangle as M[dealer][target], applied to loss sharing
@@ -155,14 +168,19 @@ class CounterTuning {
   double factor(CounterClass dealer, CounterClass target) =>
       _m == null ? 1.0 : _m[dealer.index][target.index];
 
-  static CounterTuning byName(String? n) => n == kCounters.name ? kCounters : const CounterTuning.uniform();
+  static CounterTuning byName(String? n) => switch (n) {
+        'halo1' => kCountersV1,
+        'halo2' => kCounters,
+        _ => const CounterTuning.uniform(),
+      };
 }
 
 /// The 1b-ii table (combat.md §7D), rows the dealer, columns the target, in
 /// [CounterClass] order (inf, empHmg, empAt, empAa, arm, air, structure): a
 /// heavy machine gun cuts infantry down, and infantry behind a gun's arc
-/// suffer it; everything else is even until armour and air arrive.
-const CounterTuning kCounters = CounterTuning([
+/// suffer it; everything else is even until armour and air arrive. Kept for
+/// operations launched on it.
+const CounterTuning kCountersV1 = CounterTuning([
   [1, 0.8, 0.8, 0.8, 1, 1, 1],
   [1.25, 1, 1, 1, 1, 1, 1],
   [1, 1, 1, 1, 1, 1, 1],
@@ -171,3 +189,16 @@ const CounterTuning kCounters = CounterTuning([
   [1, 1, 1, 1, 1, 1, 1],
   [1, 1, 1, 1, 1, 1, 1],
 ], name: 'halo1');
+
+/// The phase 6 table (§7L): armour arrives. Small arms and the HMG barely
+/// scratch it, the AT gun is built for it, and it rolls over infantry and
+/// guns. Air (phase 7) stays even.
+const CounterTuning kCounters = CounterTuning([
+  [1, 0.8, 0.8, 0.8, 0.5, 1, 1],
+  [1.25, 1, 1, 1, 0.6, 1, 1],
+  [0.7, 1, 1, 1, 1.6, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1.4, 1.2, 0.9, 1.2, 1, 1, 1.5],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+], name: 'halo2');

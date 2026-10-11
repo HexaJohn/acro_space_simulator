@@ -455,6 +455,16 @@ void main() {
     expect(reg.loadout, isEmpty, reason: 'its rounds went with it');
   });
 
+  test('Heavy rules raze a site: its building is gone from the colony', () {
+    final c = source(1);
+    final (parcel, _) = c.buildingParcels().first;
+    final before = c.buildingParcels().length;
+    c.war.inbox.add(WarRazeWrite([parcel.id]));
+    c.drainCombatInbox();
+    expect(c.buildingParcels().length, before - 1);
+    expect(c.buildingParcels().any((e) => e.$1.id == parcel.id), isFalse);
+  });
+
   test('an assault ends Rejoined when the colony comes back on its own', () {
     final src = source(2), tgt = rebels();
     final w = world([src, tgt]);
