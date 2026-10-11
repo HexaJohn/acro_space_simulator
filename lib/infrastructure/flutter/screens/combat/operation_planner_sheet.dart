@@ -326,10 +326,8 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
         if (n > 0) ...[
           const SizedBox(height: 6),
           Text(
-              'You lose ${p.quantile((r) => r.attackerLost, 0.1)}–'
-              '${p.quantile((r) => r.attackerLost, 0.9)} troopers, killed or wounded; '
-              'the rebels ${p.quantile((r) => r.defenderLost, 0.1)}–'
-              '${p.quantile((r) => r.defenderLost, 0.9)}. Usually decided in about '
+              'You lose ${_span(p, (r) => r.attackerLost, 'no')} troopers, killed or wounded; '
+              'the rebels ${_span(p, (r) => r.defenderLost, 'none')}. Usually decided in about '
               '${(p.quantile((r) => r.seconds, 0.5) / 120).toStringAsFixed(1)} days.',
               style: AppTheme.dim),
         ],
@@ -361,3 +359,10 @@ List<CitySim> forceSourcesFor(CitySim target, Iterable<CitySim> all) => [
       for (final c in all)
         if (c.id != target.id && c.loyalty.allegiance != Allegiance.independent) c,
     ]..sort((a, b) => a.id.compareTo(b.id));
+
+/// "3–5", or "3" when the likely range is one number, or [none] when it is 0.
+String _span(OperationPreview p, int Function(PreviewRun) of, String none) {
+  final lo = p.quantile(of, 0.1), hi = p.quantile(of, 0.9);
+  if (hi == 0) return none;
+  return lo == hi ? '$lo' : '$lo–$hi';
+}

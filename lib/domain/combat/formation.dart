@@ -11,6 +11,8 @@
 /// troopers are colonists, and every one removed is charged to [homeColonyId].
 library;
 
+import 'combat_rng.dart';
+
 /// Which side of an operation a formation fights on.
 enum CombatSide { attacker, defender }
 
@@ -132,13 +134,16 @@ class Formation {
       at == objectiveId && !broken && count > 0 && step >= arriveStep;
 
   /// Removes [n] members (killed or wounded), half of each, the odd one going
-  /// by the running total so the split never drifts.
+  /// by the running total so the split never drifts. Which way the odd one
+  /// goes is the formation's own coin: always dead, and a fight of many small
+  /// squads that each lost one had no wounded at all.
   void removeMembers(int n) {
     if (n <= 0) return;
     final take = n > count ? count : n;
-    final deadBefore = (removed + 1) ~/ 2;
+    final odd = combatMix32(id) & 1;
+    final deadBefore = (removed + odd) ~/ 2;
     removed += take;
-    final deadAfter = (removed + 1) ~/ 2;
+    final deadAfter = (removed + odd) ~/ 2;
     final newDead = deadAfter - deadBefore;
     dead += newDead;
     wounded += take - newDead;

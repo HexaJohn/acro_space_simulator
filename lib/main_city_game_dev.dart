@@ -298,14 +298,14 @@ Future<void> main() async {
         title: 'Acro — city builder dev',
         debugShowCheckedModeBanner: false,
         theme: ThemeData.dark(useMaterial3: true),
-        home: RepaintBoundary(
-          key: _shotKey,
-          child: SimulationView(
-            injectedCity: colony,
-            cityMode: true,
-            spawnDemoOrbiter: false,
-            initialBackend: RenderBackend.flutterScene,
-          ),
+        // The boundary wraps the Navigator, not just home, so a screenshot
+        // shows the sheets and dialogs open over the view.
+        builder: (context, child) => RepaintBoundary(key: _shotKey, child: child),
+        home: SimulationView(
+          injectedCity: colony,
+          cityMode: true,
+          spawnDemoOrbiter: false,
+          initialBackend: RenderBackend.flutterScene,
         ),
       ),
     ),

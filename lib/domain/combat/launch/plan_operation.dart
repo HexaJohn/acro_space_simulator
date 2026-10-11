@@ -10,8 +10,6 @@
 /// source must hand over out. The caller debits the sources and launches.
 library;
 
-import 'dart:math' as math;
-
 import '../defender_sizing.dart';
 import '../formation.dart';
 import '../objective.dart';
@@ -117,9 +115,11 @@ PlannedOperation planPortRetake({
     if (src.bodyId != target.bodyId) sameBody = false;
     garrisonKit ??= site.kitPerTrooperDay;
     debits.add(SourceDebit(src.colonyId, site.siteId, d.count, site.jobs, kit));
-    var left = d.count;
-    while (left > 0) {
-      final n = math.min(8, left);
+    // Squads of at most 8, as even as they split: 9 is 5 and 4, not 8 and a
+    // lone trooper who breaks the moment anyone shoots at him.
+    final squads = (d.count + 7) ~/ 8;
+    for (var i = 0; i < squads; i++) {
+      final n = d.count ~/ squads + (i < d.count % squads ? 1 : 0);
       formations.add(Formation(
         id: nextId++,
         side: CombatSide.attacker,
@@ -133,7 +133,6 @@ PlannedOperation planPortRetake({
         homeColonyId: src.colonyId,
         homeSiteId: site.siteId,
       ));
-      left -= n;
     }
     total += d.count;
   }

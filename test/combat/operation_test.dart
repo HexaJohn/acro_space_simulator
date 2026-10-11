@@ -91,11 +91,68 @@ void main() {
       var cost = 0;
       for (final f in op.formations) {
         if (f.side == CombatSide.attacker && f.alive) cost += (f.count * 0.1).round();
+        // Fire already carried is settled on its own (the next test).
+        f.lossCarry = 0;
       }
       op.withdraw();
       expect(op.outcome, OperationOutcome.withdrawn);
       expect(cost, greaterThan(0));
       expect(op.attackerAlive, before - cost, reason: 'a tenth of each squad, rounded');
+    });
+
+    test('fire carried under one member is settled when the battle ends, not '
+        'forgotten', () {
+      const runs = 400;
+      var lost = 0;
+      for (var i = 0; i < runs; i++) {
+        final op = portOperation(opId: i + 1);
+        final f = op.formations.first..lossCarry = 0.5;
+        op.endFromOutside(OperationOutcome.rejoined);
+        if (f.removed == 1) lost++;
+        expect(f.lossCarry, 0);
+      }
+      expect(lost / runs, closeTo(0.5, 0.08));
+    });
+
+    test('splitting a force thin does not dodge its losses', () {
+      // The same 27 troopers as squads of 8, 8, 8, 3 and as nine squads of
+      // 3, over many seeds: the losses they take should be alike, not the
+      // thin force's floored to nothing.
+      double meanLoss(int squad) {
+        var sum = 0;
+        for (var i = 0; i < 40; i++) {
+          final op = portOperation(troopers: 27, holders: 21, opId: i + 1);
+          final attackers = [for (final f in op.formations) if (f.side == CombatSide.attacker) f];
+          op.formations.removeWhere((f) => f.side == CombatSide.attacker);
+          var id = 1000, left = 27;
+          while (left > 0) {
+            final n = left > squad ? squad : left;
+            op.formations.add(Formation(
+              id: id++,
+              side: CombatSide.attacker,
+              faction: Factions.player,
+              kind: FormationKind.infantry,
+              count: n,
+              quality: 1.0,
+              morale: attackers.first.morale,
+              kitDays: attackers.first.kitDays,
+              at: FormationAt.transit,
+              homeColonyId: 'colony-src',
+              homeSiteId: 'barracks-1',
+            ));
+            left -= n;
+          }
+          runOp(op);
+          sum += op.attackerRemoved;
+        }
+        return sum / 40;
+      }
+
+      final thick = meanLoss(8), thin = meanLoss(3);
+      // ignore: avoid_print
+      print('27 troopers vs 21: mean loss $thick in squads of 8, $thin in squads of 3');
+      expect(thin, greaterThan(0));
+      expect(thin, greaterThanOrEqualTo(thick * 0.5));
     });
 
     test('casualties are half dead, half wounded, and charged home', () {

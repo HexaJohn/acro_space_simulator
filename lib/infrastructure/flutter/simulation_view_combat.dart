@@ -149,7 +149,9 @@ extension _SimulationViewCombat on _SimulationViewState {
   }
 
   void _openOperationDrawer(Operation op) {
-    _combatState.announced.add(op.id);
+    // Only a result is seen by opening it: a look at the fight mid-way must
+    // not hide the chip that will say how it ended.
+    if (op.resolved) _combatState.announced.add(op.id);
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppTheme.panel,
@@ -163,9 +165,14 @@ extension _SimulationViewCombat on _SimulationViewState {
             );
         final attackers = op.formations.where((f) => f.side == CombatSide.attacker).toList();
         final defenders = op.formations.where((f) => f.side == CombatSide.defender).toList();
+        String place(String at) =>
+            at == op.goalId ? 'the port' : (at == op.lzId ? 'the landing zone' : at);
+        // A marching squad is already booked at where it is going.
         String where(Formation f) => f.broken
             ? 'broken'
-            : (f.at == op.goalId ? 'at the port' : (f.at == op.lzId ? 'at the landing zone' : f.at));
+            : (f.at == FormationAt.transit
+                ? 'in transit'
+                : (op.clock.steps < f.arriveStep ? 'marching on ${place(f.at)}' : 'at ${place(f.at)}'));
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(16),

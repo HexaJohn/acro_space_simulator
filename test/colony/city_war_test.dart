@@ -3,11 +3,14 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:math' as math;
+
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_loyalty.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_war.dart';
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
+import 'package:acro_space_simulator/domain/combat/formation.dart';
 import 'package:acro_space_simulator/domain/combat/launch/plan_operation.dart';
 import 'package:acro_space_simulator/domain/combat/operation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -253,6 +256,29 @@ void main() {
     if (op.outcome == OperationOutcome.won) {
       t.applyCombatWrite(const PortRetakenWrite(null));
       expect(t.loyalty.portSeized, isFalse);
+    }
+  });
+
+  test('troopers go in even squads of at most eight, never a lone straggler', () {
+    final s = source(people: 400);
+    final src = s.city.sourceSnapshot();
+    final avail = src.sources.single.available;
+    expect(avail, greaterThanOrEqualTo(9));
+    for (final n in {9, avail}) {
+      final op = planPortRetake(
+        operationId: 1,
+        target: seizedTarget().launchSnapshot(),
+        sources: [src],
+        draws: [TrooperDraw(src.colonyId, s.site, n)],
+      ).operation!;
+      final sizes = [
+        for (final f in op.formations)
+          if (f.side == CombatSide.attacker) f.count,
+      ];
+      expect(sizes.fold<int>(0, (a, b) => a + b), n);
+      expect(sizes.length, (n + 7) ~/ 8);
+      expect(sizes.reduce(math.max) - sizes.reduce(math.min), lessThanOrEqualTo(1),
+          reason: '$n troopers split as $sizes');
     }
   });
 

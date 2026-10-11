@@ -506,6 +506,7 @@ class Operation {
   }
 
   void _resolve(OperationOutcome why) {
+    _settleCarry();
     // A won goal is the attacker's however it was won — held, or handed over
     // by a surrender — so what the colony is told matches the readout.
     if (why == OperationOutcome.won) graph.byId(goalId)?.control = 1.0;
@@ -513,6 +514,22 @@ class Operation {
     resolvedAtStep = clock.steps;
     phase = OperationPhase.resolved;
     band = _bandFor(why);
+  }
+
+  /// Salt for the end-of-battle carry roll, apart from the fuzz rolls' rounds.
+  static const int _settleSalt = 0x7fffffff;
+
+  /// The fire each formation took but never paid for — under one member, so
+  /// [_apply] carried it — is settled with one roll: a squad carrying 0.6 of
+  /// a loss loses a member six times in ten. Floored and forgotten, it was up
+  /// to a member a squad a battle, and a force split thin took no losses.
+  void _settleCarry() {
+    for (final f in formations) {
+      if (f.alive && f.lossCarry > 0 && combatUnit(seed, f.id, _settleSalt) < f.lossCarry) {
+        f.removeMembers(1);
+      }
+      f.lossCarry = 0;
+    }
   }
 
   OutcomeBand _bandFor(OperationOutcome why) {
