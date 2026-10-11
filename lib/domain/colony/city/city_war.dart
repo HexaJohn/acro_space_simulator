@@ -273,6 +273,14 @@ class WarRazeWrite extends CombatWrite {
   final List<String> siteIds;
 }
 
+/// A silo strike (combat.md §7M): fire [missiles] if you have them.
+class SiloDebitWrite extends CombatWrite {
+  const SiloDebitWrite(this.opId, this.objectiveId, this.missiles);
+  final int opId;
+  final String objectiveId;
+  final int missiles;
+}
+
 /// War weariness: the player's dead cost every colony's loyalty
 /// (combat.md §7.6). Only a colony that takes the player's orders feels it.
 class WarWearinessWrite extends CombatWrite {
@@ -300,6 +308,14 @@ class BaseRunShippedEvent extends CombatEvent {
   final int runId;
   final double materiel;
   final List<double> stock;
+}
+
+/// The silo answered: fired, or had not the missiles.
+class SiloFiredEvent extends CombatEvent {
+  const SiloFiredEvent(this.opId, this.objectiveId, {required this.fired});
+  final int opId;
+  final String objectiveId;
+  final bool fired;
 }
 
 /// Rounds paid for: [paid] of [asked] are loading aboard [vesselId].
@@ -616,6 +632,7 @@ extension CityWar on CitySim {
       obstacles: obstacles,
       pads: pads,
       walls: walls,
+      rebelSilos: [for (final (_, s) in _sitesInOrder()) if (s.type == 'silo') s].length,
     );
   }
 
@@ -716,6 +733,10 @@ extension CityWar on CitySim {
             ship(kBaseGoods[i], i < w.stock.length ? w.stock[i] : 0)
         ];
         war.outbox.add(BaseRunShippedEvent(w.opId, w.runId, m, sent));
+      case SiloDebitWrite():
+        final ok = stockOf(Commodity.missiles) >= w.missiles;
+        if (ok) stock[Commodity.missiles] = stockOf(Commodity.missiles) - w.missiles;
+        war.outbox.add(SiloFiredEvent(w.opId, w.objectiveId, fired: ok));
       case WarRazeWrite():
         for (final id in w.siteIds) {
           if (id.startsWith('cell:')) {

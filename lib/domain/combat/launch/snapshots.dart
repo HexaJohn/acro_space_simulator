@@ -143,6 +143,7 @@ class LaunchSnapshot {
     this.obstacles = const [],
     this.pads = const [],
     this.walls = const [],
+    this.rebelSilos = 0,
   });
 
   final String colonyId;
@@ -200,4 +201,7 @@ class LaunchSnapshot {
   /// Its buildings that stop a walk or a shot: [obstacles] less the pads and
   /// aprons, which are open ground (§7H; a spaceport's apron reaches 545 m).
   final List<(double, double, double)> walls;
+
+  /// Its Missile Silos: the rebels strike a base with them (§7M).
+  final int rebelSilos;
 }

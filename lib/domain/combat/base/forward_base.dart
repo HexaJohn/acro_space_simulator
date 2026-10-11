@@ -866,7 +866,11 @@ class ForwardBase {
       side: CombatSide.attacker,
       faction: Factions.player,
       kind: FormationKind.emplacement,
-      counterClass: m.kind == ModuleKind.atTurret ? CounterClass.empAt : CounterClass.empHmg,
+      counterClass: switch (m.kind) {
+        ModuleKind.atTurret => CounterClass.empAt,
+        ModuleKind.aaTurret => CounterClass.empAa,
+        _ => CounterClass.empHmg,
+      },
       count: n,
       quality: 0.8,
       morale: 0.8,
@@ -1058,6 +1062,50 @@ class ForwardBase {
       if (f.broken) f.broken = false;
       if (f.at == FormationAt.reserve) f.at = s.objectiveId;
     }
+  }
+
+  /// Spends [c] centi-units of [k] from the base's stock: false (and nothing
+  /// spent) when it has not got them.
+  bool spend(String k, int c) {
+    if (stockOf(k) < c) return false;
+    _take(k, c);
+    return true;
+  }
+
+  /// Crewed AA turrets standing (§7M): each a chance at the rebels' missile.
+  int aaTurretsCrewed(Operation op) {
+    var n = 0;
+    for (final (_, m) in allModules) {
+      if (m.kind != ModuleKind.aaTurret || m.formationId == null) continue;
+      if (op.formationById(m.formationId!)?.alive ?? false) n++;
+    }
+    return n;
+  }
+
+  /// The rebels' missile came through (§7M): one module at the core —
+  /// [pick] chooses which, by a seeded roll — destroyed, its crew half dead.
+  /// The landing turret, in the core itself, is never the one. What was hit,
+  /// or null with nothing to hit.
+  String? missileHit(Operation op, double pick) {
+    final c = core;
+    if (c == null) return null;
+    final targets = [
+      for (final m in c.modules)
+        if (!(isTurretKind(m.kind) && m.socket == 0)) m
+    ];
+    if (targets.isEmpty) return null;
+    final m = targets[(pick * targets.length).floor().clamp(0, targets.length - 1)];
+    c.modules.remove(m);
+    if (m.formationId != null) {
+      final f = op.formationById(m.formationId!);
+      if (f != null && f.alive) f.removeMembers(f.count);
+    } else if (m.crew > 0) {
+      supportDead += m.crew ~/ 2;
+      supportWounded += m.crew - m.crew ~/ 2;
+      m.crew = 0;
+    }
+    events.add((BaseEventKind.deployed, 'A rebel missile destroyed the ${m.spec.label.toLowerCase()}.'));
+    return m.spec.label;
   }
 
   /// The vehicle bay assembles an APC from shipped kits (§7L): Materiel and

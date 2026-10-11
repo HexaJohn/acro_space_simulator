@@ -23,6 +23,7 @@ import 'base/forward_base.dart';
 import 'lander.dart';
 import 'objective.dart';
 import 'operation_clock.dart';
+import 'powers/air.dart';
 import 'powers/orbital.dart';
 import 'resolver.dart';
 import 'resolver_tuning.dart';
@@ -148,12 +149,14 @@ class Operation {
     this.supplyDropReadyStep = 0,
     this.medevacReadyStep = 0,
     OrbitalSupport? orbital,
+    AirSupport? air,
     List<(int, String)>? directed,
     Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
   })  : garrisonKit = garrisonKit ?? const {},
         orbital = orbital ?? OrbitalSupport(),
+        air = air ?? AirSupport(),
         directed = directed ?? [],
         landers = landers ?? [],
         seed = seed ?? combatSeed(targetColonyId, id),
@@ -246,6 +249,9 @@ class Operation {
   /// craters they left (§7E).
   final OrbitalSupport orbital;
 
+  /// Gunship passes, silo strikes, and the rebels' own silo (§7M).
+  final AirSupport air;
+
   /// A charge under way (§7D): the objective, and when it ends.
   String? chargeAt;
   int chargeUntilStep;
@@ -262,6 +268,46 @@ class Operation {
   int get chargeCooldownS => (tuning.daySec * 2).round();
   int get supplyDropCooldownS => (tuning.daySec * 2).round();
   int get medevacCooldownS => tuning.daySec.round();
+  int get gunshipCooldownS => (tuning.daySec * 2).round();
+
+  /// The source paid (or could not pay) for the silo strike (§7M): with
+  /// [ok], four missiles are in the air on [objectiveId], down in 60 s.
+  void siloFired(String objectiveId, {required bool ok}) {
+    air.pendingSilo = null;
+    if (!ok) {
+      air.notices.add('The silo had not the missiles for a strike.');
+      return;
+    }
+    final t = clock.steps;
+    orbital.inFlight.add(StrikeInFlight(orbital.nextSeq++, 'silo', objectiveId, t + kSiloFlightS, kSiloSlantM));
+    air.notices.add('Missiles away from the silo: down on $objectiveId in $kSiloFlightS s.');
+  }
+
+  /// Passes end; the rebels' silo fires on its day (§7M).
+  void _airStep(int t) {
+    for (final p in [...air.passes]) {
+      if (t < p.$3) continue;
+      air.passes.remove(p);
+      final f = formationById(p.$1);
+      // Home, not dead: a pass that ends flies off.
+      if (f != null && f.alive) f.count = 0;
+    }
+    final b = base;
+    if (air.rebelSilos <= 0 || b == null || !b.standing) return;
+    if (air.rebelNextStep < 0) air.rebelNextStep = t + tuning.daySec.round();
+    if (t < air.rebelNextStep) return;
+    air
+      ..rebelNextStep = t + tuning.daySec.round()
+      ..rebelSeq += 1;
+    final key = combatKey('rebelSilo');
+    final p = math.min(kAaInterceptMax, kAaIntercept * b.aaTurretsCrewed(this));
+    if (combatUnit(seed, key, air.rebelSeq * 2) < p) {
+      air.notices.add('AA fire brought down the rebels\' missile.');
+      return;
+    }
+    final hit = b.missileHit(this, combatUnit(seed, key, air.rebelSeq * 2 + 1));
+    air.notices.add(hit == null ? 'A rebel missile struck the base: nothing to break.' : 'A rebel missile destroyed the $hit.');
+  }
 
   /// Orders a charge at [objectiveId]: the squads there fight ×1.5 for 30 s,
   /// then pay for it in morale. Null, or why not.
@@ -289,6 +335,50 @@ class Operation {
         if (t < supplyDropReadyStep) return 'The next supply drop is not ready.';
         b.supplyDrop(this);
         supplyDropReadyStep = t + supplyDropCooldownS;
+        return null;
+      case 'gunship':
+        if (!b.hasGate('airfield')) return 'Gunship passes need a source colony with an Airfield.';
+        if (t < air.gunshipReadyStep) return 'The next gunship is not ready.';
+        final o = graph.byId(objectiveId ?? '');
+        if (o == null || o.kind == ObjectiveKind.lz) return 'A pass over where?';
+        if (b.stockOf('fuel') < kGunshipFuelC || b.stockOf('ammo') < kGunshipAmmoC) {
+          return 'The base has not the fuel and ammo for a pass (60 of each).';
+        }
+        b
+          ..spend('fuel', kGunshipFuelC)
+          ..spend('ammo', kGunshipAmmoC);
+        final f = Formation(
+          id: nextFormationId++,
+          side: CombatSide.attacker,
+          faction: Factions.player,
+          kind: FormationKind.air,
+          counterClass: CounterClass.air,
+          count: 1,
+          quality: 1,
+          morale: 1,
+          kitDays: 1,
+          at: o.id,
+          arriveStep: t,
+        );
+        formations
+          ..add(f)
+          ..sort((a, b) => a.id.compareTo(b.id));
+        air.passes.add((f.id, t, t + kGunshipPassS));
+        final airpad = b.countOf(ModuleKind.airpad) > 0;
+        air.gunshipReadyStep = t + (gunshipCooldownS * (airpad ? 0.5 : 1)).round();
+        air.notices.add('A gunship is making its pass over ${o.id}.');
+        return null;
+      case 'silo':
+        if (!b.hasGate('silo')) return 'Silo strikes need a source colony with a Missile Silo.';
+        if (t < air.siloReadyStep) return 'The silo is not ready.';
+        if (air.pendingSilo != null) return 'A silo strike is already called.';
+        final o = graph.byId(objectiveId ?? '');
+        if (o == null) return 'A strike on where?';
+        if (!strikeAllowed(o)) return 'The rules of engagement do not allow a strike there.';
+        air
+          ..pendingSilo = o.id
+          ..siloPosted = false
+          ..siloReadyStep = t + gunshipCooldownS;
         return null;
       case 'medevac':
         if (t < medevacReadyStep) return 'The Medevac is not ready.';
@@ -685,6 +775,7 @@ class Operation {
         base?.uplinkWanted = orbital.any;
         base?.step(this, t);
         _orbitalStep(t);
+        _airStep(t);
         _chargeEnd(t);
         _digIn(t);
         if ((t - engagedAtStep) % tuning.aiEveryS == 0) {
@@ -767,7 +858,8 @@ class Operation {
       for (final i in att)
         formationStrength(formations[i], tuning,
                 armed: formations[i].kitDays > 0) *
-            fire
+            fire *
+            (air.strafing(formations[i].id, t) ? kGunshipStrafe : 1.0)
     ];
     final pinned = orbital.pinnedAt(o.id, t) ? kPinnedFire : 1.0;
     final defS = [
@@ -1334,6 +1426,7 @@ class Operation {
         if (orderTarget != null) 'orderTarget': orderTarget,
         if (!orbital.isEmpty || orbital.centreBF != null) 'orbital': orbital.toJson(),
         if (directed.isNotEmpty) 'directed': [for (final d in directed) [d.$1, d.$2]],
+        if (!air.isEmpty) 'air': air.toJson(),
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
             for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
@@ -1397,6 +1490,7 @@ class Operation {
         supplyDropReadyStep: (j['dropReady'] as num?)?.toInt() ?? 0,
         medevacReadyStep: (j['medevacReady'] as num?)?.toInt() ?? 0,
         orbital: OrbitalSupport.fromJson((j['orbital'] as Map?)?.cast<String, dynamic>()),
+        air: AirSupport.fromJson((j['air'] as Map?)?.cast<String, dynamic>()),
         directed: [
           for (final d in (j['directed'] as List? ?? const []))
             (((d as List)[0] as num).toInt(), d[1] as String)

@@ -30,6 +30,7 @@ import '../../domain/combat/launch/plan_operation.dart';
 import '../../domain/combat/launch/snapshots.dart';
 import '../../domain/combat/operation.dart';
 import '../../domain/combat/operation_registry.dart';
+import '../../domain/combat/powers/air.dart';
 import '../../domain/combat/powers/orbital.dart';
 import '../../domain/combat/powers/overhead.dart';
 import '../../domain/combat/powers/sky.dart';
@@ -86,6 +87,14 @@ class CombatPhase {
       }
     }
     _watchSky(cities);
+    // Silo strikes asked for: the lead source pays its missiles (§7M).
+    for (final op in registry.operations) {
+      final a = op.air;
+      final b = op.base;
+      if (op.resolved || a.pendingSilo == null || a.siloPosted || b == null) continue;
+      a.siloPosted = true;
+      _find(cities, b.homeColonyId)?.war.inbox.add(SiloDebitWrite(op.id, a.pendingSilo!, kSiloMissiles));
+    }
     for (final op in registry.operations) {
       if (!op.resolved) op.advance(opDt);
       for (final v in op.orbital.fired) {
@@ -407,6 +416,7 @@ class CombatPhase {
     registry.lastRefusal = null;
     registry.nextOperationId++;
     _orbitalAtLaunch(op, target, snap);
+    op.air.rebelSilos = snap.rebelSilos;
     if (_landersFor(target)) {
       op.landers.addAll(packLanders(
           op.id, [for (final f in op.formations) if (f.side == CombatSide.attacker) f]));
@@ -472,6 +482,9 @@ class CombatPhase {
           // Shipped to an operation already over: the goods go back.
           city.war.inbox.add(BaseGoodsWrite(e.materiel, e.stock));
         }
+      case SiloFiredEvent():
+        final op = registry.byId(e.opId);
+        if (op != null && !op.resolved) op.siloFired(e.objectiveId, ok: e.fired);
       case ArmedEvent():
         registry.loadRounds(e.vesselId, e.paid, registry.clockUs + kArmLoadS * 1000000);
         if (e.paid < e.asked) {

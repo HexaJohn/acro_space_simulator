@@ -13,10 +13,23 @@
 library;
 
 /// A module. Append-only: saved by name.
-enum ModuleKind { supplyPad, turret, barracksPod, stores, fieldHospital, generator, workshop, vehicleBay, atTurret }
+enum ModuleKind {
+  supplyPad,
+  turret,
+  barracksPod,
+  stores,
+  fieldHospital,
+  generator,
+  workshop,
+  vehicleBay,
+  atTurret,
+  airpad,
+  aaTurret,
+}
 
-/// A turret of either kind: an emplacement its crew fight from (§7L).
-bool isTurretKind(ModuleKind k) => k == ModuleKind.turret || k == ModuleKind.atTurret;
+/// A turret of any kind: an emplacement its crew fight from (§7L, §7M).
+bool isTurretKind(ModuleKind k) =>
+    k == ModuleKind.turret || k == ModuleKind.atTurret || k == ModuleKind.aaTurret;
 
 /// Which ring a module stands in.
 enum SocketKind { module, turret }
@@ -160,6 +173,30 @@ const List<ModuleSpec> kBaseModules = [
     hp: 3,
     gate: 'gunfactory',
     max: 1,
+  ),
+  ModuleSpec(
+    kind: ModuleKind.airpad,
+    label: 'Airpad',
+    socket: SocketKind.module,
+    materiel: 60,
+    buildS: 40,
+    crew: 2,
+    powerKw: 6,
+    hp: 2,
+    gate: 'airfield',
+    max: 1,
+  ),
+  ModuleSpec(
+    kind: ModuleKind.aaTurret,
+    label: 'AA turret',
+    socket: SocketKind.turret,
+    materiel: 70,
+    steel: 10,
+    buildS: 40,
+    crew: 2,
+    powerKw: 6,
+    hp: 2,
+    gate: 'gunfactory',
   ),
   ModuleSpec(
     kind: ModuleKind.atTurret,

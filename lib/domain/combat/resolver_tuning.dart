@@ -33,6 +33,7 @@ class ResolverTuning {
     this.noAmmoFactor = 0.35,
     this.emplacementPower = 3.0,
     this.armourPower = 4.0,
+    this.airPower = 8.0,
     this.heavyFire = 1.4,
     this.heavyCollateralShare = 0.6,
     this.daySec = 120,
@@ -95,6 +96,9 @@ class ResolverTuning {
   /// An armoured vehicle's strength per crew member (§7L).
   final double armourPower;
 
+  /// A gunship's strength (§7M).
+  final double airPower;
+
   /// Attacker fire and civilians killed per defender killed under Heavy ROE.
   final double heavyFire;
   final double heavyCollateralShare;
@@ -147,6 +151,7 @@ class ResolverTuning {
   double powerOf(FormationKind kind) => switch (kind) {
         FormationKind.emplacement => emplacementPower,
         FormationKind.armour => armourPower,
+        FormationKind.air => airPower,
         _ => 1.0,
       };
 }
@@ -190,15 +195,16 @@ const CounterTuning kCountersV1 = CounterTuning([
   [1, 1, 1, 1, 1, 1, 1],
 ], name: 'halo1');
 
-/// The phase 6 table (§7L): armour arrives. Small arms and the HMG barely
-/// scratch it, the AT gun is built for it, and it rolls over infantry and
-/// guns. Air (phase 7) stays even.
+/// The phase 6 and 7 table (§7L, §7M): armour and air arrive. Small arms and
+/// the HMG barely scratch armour, the AT gun is built for it, and it rolls
+/// over infantry and guns; a gunship strafes guns, and only the AA gun
+/// really answers it.
 const CounterTuning kCounters = CounterTuning([
-  [1, 0.8, 0.8, 0.8, 0.5, 1, 1],
-  [1.25, 1, 1, 1, 0.6, 1, 1],
-  [0.7, 1, 1, 1, 1.6, 1, 1],
-  [1, 1, 1, 1, 1, 1, 1],
-  [1.4, 1.2, 0.9, 1.2, 1, 1, 1.5],
-  [1, 1, 1, 1, 1, 1, 1],
+  [1, 0.8, 0.8, 0.8, 0.5, 0.3, 1],
+  [1.25, 1, 1, 1, 0.6, 0.6, 1],
+  [0.7, 1, 1, 1, 1.6, 0.6, 1],
+  [0.8, 1, 1, 1, 0.8, 1.6, 1],
+  [1.4, 1.2, 0.9, 1.2, 1, 0.5, 1.5],
+  [1.2, 1.5, 1.5, 0.6, 1.3, 1, 1],
   [1, 1, 1, 1, 1, 1, 1],
 ], name: 'halo2');

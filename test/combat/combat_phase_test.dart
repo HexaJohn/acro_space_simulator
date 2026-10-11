@@ -455,6 +455,19 @@ void main() {
     expect(reg.loadout, isEmpty, reason: 'its rounds went with it');
   });
 
+  test('a silo strike debits four missiles, or reports it could not', () {
+    final c = source(1);
+    c.stock[Commodity.missiles] = 5;
+    c.war.inbox.add(const SiloDebitWrite(1, 'port', 4));
+    c.drainCombatInbox();
+    expect(c.stockOf(Commodity.missiles), closeTo(1, 1e-9));
+    expect((c.war.outbox.last as SiloFiredEvent).fired, isTrue);
+    c.war.inbox.add(const SiloDebitWrite(1, 'port', 4));
+    c.drainCombatInbox();
+    expect((c.war.outbox.last as SiloFiredEvent).fired, isFalse);
+    expect(c.stockOf(Commodity.missiles), closeTo(1, 1e-9));
+  });
+
   test('Heavy rules raze a site: its building is gone from the colony', () {
     final c = source(1);
     final (parcel, _) = c.buildingParcels().first;

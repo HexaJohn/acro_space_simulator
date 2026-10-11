@@ -598,6 +598,7 @@ extension _SimulationViewCombat on _SimulationViewState {
         FormationKind.militia => 'militia',
         FormationKind.emplacement => f.side == CombatSide.attacker ? 'turret crew' : 'gun emplacement',
         FormationKind.armour => 'APC crew',
+        FormationKind.air => 'gunship',
       };
 
   Widget _socketRow(Operation op, ForwardBase b, SocketKind ring, int i, BuildContext ctx,
@@ -905,6 +906,22 @@ extension _SimulationViewCombat on _SimulationViewState {
     st.commandOp = null;
     // Your squad is the bubble's while you fight with it (§7H).
     _operations.inbox.enqueue(LiveSquadCommand(const PlayerId('player'), 0, op.id, squad.id));
+  }
+
+  /// Follows the lead troop lander still coming down (§7M): the chase
+  /// camera on it; M takes manual control as for any vessel.
+  void _rideLander(Operation op) {
+    final l = op.landers.where((l) => l.state == LanderState.descending).firstOrNull;
+    if (l == null) return;
+    final v = _vessels.byId(VesselId(l.vesselId));
+    if (v == null) return;
+    rebuild(() {
+      if (_walkMode) _toggleWalk();
+      _freecam = false;
+      _focusVessel = v.id;
+      _focusBody = null;
+      _craftCam = true;
+    });
   }
 
   /// F: into the nearest of your APCs within reach, or out of the one you
@@ -1634,6 +1651,8 @@ extension _SimulationViewCombat on _SimulationViewState {
         ),
       for (final n in o.notices.length > 3 ? o.notices.sublist(o.notices.length - 3) : o.notices)
         Text('  $n', style: AppTheme.dim),
+      for (final n in op.air.notices.length > 3 ? op.air.notices.sublist(op.air.notices.length - 3) : op.air.notices)
+        Text('  $n', style: AppTheme.dim),
     ];
     return rows;
   }
@@ -1700,6 +1719,26 @@ extension _SimulationViewCombat on _SimulationViewState {
                       _order(op, 'charge', target: id);
                       Navigator.of(ctx).maybePop();
                     }),
+        if (b != null && b.standing && b.hasGate('airfield'))
+          for (final o in op.graph.objectives)
+            if (o.kind != ObjectiveKind.lz)
+              button('combat-gunship-${o.id}', 'Gunship over ${place(o.id)}${wait(op.air.gunshipReadyStep)}',
+                  t < op.air.gunshipReadyStep
+                      ? null
+                      : () {
+                          _power(op, 'gunship', target: o.id);
+                          Navigator.of(ctx).maybePop();
+                        }),
+        if (b != null && b.standing && b.hasGate('silo'))
+          for (final o in op.graph.objectives)
+            if (op.strikeAllowed(o))
+              button('combat-silo-${o.id}', 'Silo strike on ${place(o.id)}${wait(op.air.siloReadyStep)}',
+                  t < op.air.siloReadyStep || op.air.pendingSilo != null
+                      ? null
+                      : () {
+                          _power(op, 'silo', target: o.id);
+                          Navigator.of(ctx).maybePop();
+                        }),
         if (b != null && b.standing) ...[
           button('combat-supply-drop', 'Emergency supply drop${wait(op.supplyDropReadyStep)}',
               t < op.supplyDropReadyStep
@@ -1856,6 +1895,18 @@ extension _SimulationViewCombat on _SimulationViewState {
                       ),
                     );
                   }),
+                if (op.landers.any((l) => l.state == LanderState.descending))
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      key: const Key('combat-ride-lander'),
+                      onPressed: () {
+                        Navigator.of(ctx).maybePop();
+                        _rideLander(op);
+                      },
+                      child: Text('Ride the lander down (M takes the controls)', style: AppTheme.body),
+                    ),
+                  ),
                 Row(children: [
                   if (!op.resolved && op.phase != OperationPhase.mustering)
                     TextButton(

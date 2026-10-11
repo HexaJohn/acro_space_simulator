@@ -770,6 +770,31 @@ or life support) is razed (`WarRazeWrite`).
 **Cut *(default)*:** wheeled/tracked/hover models (one APC), second seats and eject, rockets, rubble and wrecks as
 battle additions, bridges and tunnels, Ram/Unload/Boost, live destruction during the fight.
 
+## 7M. Phase 7 spec: Pilot and strikes
+
+Specified 2026-10-11; defaults *(default)* for review.
+
+**Ships:** call a gunship pass from an Airfield and a silo strike from a Missile Silo; AA turrets answer the rebels'
+own silo; ride the lead lander down.
+
+**Gunship pass** (`power('gunship', objective)`, a source Airfield, the base standing): 60 fuel + 60 ammo off the
+base, every 2 days (1 with an **airpad**). For 30 s a gunship (`FormationKind.air`, class AIR, power 8) fights at the
+objective, strafing for its first 15 s (×1.33 on top of the table's AIR→EMP 1.5). Only fire reaches it, and little
+does: rifles ×0.3, the HMG ×0.6, an **AA turret** (EMP-AA, a turret socket, 70 + 10 steel) ×1.6.
+
+**Silo strike** (`power('silo', objective)`, a source Missile Silo): 4 missiles debited from the lead source (it pays
+what it has; under 4, no strike), every 2 days; lands 60 s later with a 30 m scatter, under the orbital strike's
+impact and ROE rules.
+
+**The rebels' silo:** a target with Missile Silos strikes the base core once a day; each crewed AA turret
+intercepts 40% (at most 90%); a hit destroys one module (seeded), its crew half dead.
+
+**Pilot:** the drawer's "Ride the lander down" follows the lead troop lander on its descent (the chase camera; M
+takes manual control as for any vessel, the landing guidance resumes when let go).
+
+**Cut *(default)*:** `PilotInputCommand` and the lander as a respawn point, live gunship models and strafing runs in
+the bubble (the pass is abstract, with a notice), Earth and Mars (the aero fix is cross-lane).
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.
