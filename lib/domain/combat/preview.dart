@@ -31,7 +31,7 @@ typedef PreviewRun = ({
 class OperationPreview {
   /// Previews [source] over [runs] seeds, none of them the real one.
   OperationPreview(Operation source, {this.runs = 32})
-      : _source = source.toJson(),
+      : _source = source.toJson()..remove('landers'),
         _seed = source.seed,
         _tuning = source.tuning,
         _counters = source.counters;

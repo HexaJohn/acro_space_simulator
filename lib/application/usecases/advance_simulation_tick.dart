@@ -66,6 +66,7 @@ import '../ports/event_bus.dart';
 import '../ports/repositories.dart';
 import '../ports/world_repositories.dart';
 import 'combat_phase.dart';
+import 'force_landers.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/combat/operation_registry.dart';
 
@@ -112,7 +113,14 @@ class AdvanceSimulationTick {
 
   /// The combat phase over [operations], built once.
   late final CombatPhase? _combat =
-      operations == null ? null : CombatPhase(operations!);
+      operations == null ? null : CombatPhase(operations!, landers: forceLanders);
+
+  /// Fly operations' squads down as real troop landers on airless bodies,
+  /// and hold warp at 1× while one descends (docs/plans/combat.md §7B).
+  final bool forceLanders;
+
+  late final ForceLanderFlight _landerFlight =
+      ForceLanderFlight(vessels: vessels, terrainEdits: terrainEdits);
 
   /// Moves goods between a craft standing on a pad and the colony under it.
   final ShuttleCargoService shuttleCargo;
@@ -204,6 +212,7 @@ class AdvanceSimulationTick {
     this.atmosphere = const NullAtmosphereRepository(),
     this.planetAtmosphere = const PlanetAtmosphereService(),
     this.operations,
+    this.forceLanders = false,
     this.shuttleCargo = const ShuttleCargoService(),
     this.cargo = const NullCargoScheduleRepository(),
     this.converter = const StateVectorOrbitConverter(),
@@ -252,6 +261,13 @@ class AdvanceSimulationTick {
   }) : research = research ?? ResearchLedger();
 
   void execute(SimulationClock clock) {
+    // The battle warp ceiling (combat.md §7B): above 4× a descending lander is
+    // on rails and its guidance does nothing, so while one is in the air the
+    // clock runs at 1× — here, for every host; the view also moves its ladder.
+    final ops = operations;
+    if (forceLanders && ops != null && clock.warpFactor > 1 && ForceLanderFlight.aloft(ops)) {
+      clock.warpFactor = 1;
+    }
     final dt = clock.advance();
     final system = universe.current();
     final forceRails = clock.forcesRails;
@@ -409,6 +425,11 @@ class AdvanceSimulationTick {
       if (agents.frameBudgeted) agents.replayTick = _replayCity;
       if (agents.holdTick(dt)) continue;
       _cityPhase(city, dt, system, clock);
+    }
+    // Troop landers, after motion like the shuttles: their throttle and
+    // attitude take effect on the next tick's integration.
+    if (forceLanders && ops != null) {
+      _landerFlight.run(ops, cities.all(), system, clock);
     }
 
     // ---- Planetary-atmosphere phase: every colony's gas flows, summed per

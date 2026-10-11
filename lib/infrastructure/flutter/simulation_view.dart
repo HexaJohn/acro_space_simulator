@@ -54,7 +54,9 @@ import '../../domain/colony/city/city_loyalty.dart';
 import '../../domain/colony/city/city_starter_kit.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/colony/city/commodity.dart';
+import '../../application/usecases/force_landers.dart';
 import '../../domain/combat/formation.dart';
+import '../../domain/combat/lander.dart';
 import '../../domain/combat/objective.dart';
 import '../../domain/combat/operation.dart';
 import '../../domain/combat/operation_registry.dart';
@@ -1988,6 +1990,17 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       } else {
         _clock.warpFactor = (remaining / 1.5).clamp(1.0, 1e6);
       }
+    }
+
+    // The battle warp ceiling (combat.md §7B), after every warp setter above:
+    // a troop lander on its descent is on rails above 4×, its guidance dead.
+    // The tick clamps the clock for every host; here the ladder follows, so
+    // the warp readout says 1× and the next step-up starts from there.
+    if (_clock.warpFactor > 1 && ForceLanderFlight.aloft(_session.operations)) {
+      _clock.warpFactor = _warpLevels[_warp1x];
+      _warpIndex = _warp1x;
+      _warpTarget = null;
+      _warpTargetLabel = null;
     }
 
     // Run as many fixed steps as real time accrued. Carry the leftover across

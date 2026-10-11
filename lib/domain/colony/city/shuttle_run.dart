@@ -111,11 +111,17 @@ class ColonyShuttleFactory {
   /// Co-rotation matters: spawning at inertial rest over a spinning body is
   /// spawning with hundreds of m/s of sideways surface velocity, and the
   /// guidance would spend its margin killing a drift the dispatcher invented.
+  ///
+  /// [name] and [withCargo] make the same airframe a troop lander
+  /// (docs/plans/combat.md §7B): no care package, whose cargo a pad's unload
+  /// would otherwise take.
   Vessel build({
     required String id,
     required CelestialBody body,
     required Vector3 padBF,
     required Quaternion bodyOrientation,
+    String name = 'Supply Shuttle',
+    bool withCargo = true,
   }) {
     final upBF = padBF.normalized;
     final posBF = upBF * (padBF.length + spawnAltM);
@@ -146,7 +152,7 @@ class ColonyShuttleFactory {
 
     final hull = Part(
       id: PartId('$id-hull'),
-      name: 'Supply Shuttle',
+      name: name,
       dryMass: 2200,
       inertiaContribution: Vector3(2600, 2600, 1400),
       engine: const Engine(
@@ -158,10 +164,12 @@ class ColonyShuttleFactory {
       ),
       resources: [
         tank,
-        cargo(ResourceType.food, 160),
-        cargo(ResourceType.water, 160),
-        cargo(ResourceType.oxygen, 120),
-        cargo(ResourceType.ore, 120),
+        if (withCargo) ...[
+          cargo(ResourceType.food, 160),
+          cargo(ResourceType.water, 160),
+          cargo(ResourceType.oxygen, 120),
+          cargo(ResourceType.ore, 120),
+        ],
       ],
       crossSectionArea: 2.0,
       // No thermal parts, deliberately: the overheat check skips a vessel with
@@ -170,7 +178,7 @@ class ColonyShuttleFactory {
 
     return Vessel(
       id: VesselId(id),
-      name: 'Supply Shuttle',
+      name: name,
       ownerId: 'logistics',
       state: StateVector(
         position: bodyOrientation.rotate(posBF),

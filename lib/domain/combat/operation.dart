@@ -18,6 +18,7 @@ import 'dart:math' as math;
 
 import 'combat_rng.dart';
 import 'formation.dart';
+import 'lander.dart';
 import 'objective.dart';
 import 'operation_clock.dart';
 import 'resolver.dart';
@@ -131,10 +132,12 @@ class Operation {
     this.garrison = 0,
     this.order = OrderKind.auto,
     this.orderTarget,
+    List<LanderRecord>? landers,
     Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
   })  : garrisonKit = garrisonKit ?? const {},
+        landers = landers ?? [],
         seed = seed ?? combatSeed(targetColonyId, id),
         clock = clock ?? OperationClock(),
         formations = [...formations]..sort((a, b) => a.id.compareTo(b.id)) {
@@ -214,6 +217,49 @@ class Operation {
   /// What one garrison trooper eats and fires per operation day: their home
   /// building's inputs, recorded at launch so reporting reads no colony.
   final Map<String, double> garrisonKit;
+
+  /// Troop landers flying the squads down (§7B); empty where landing is
+  /// abstract. The transit waits on them.
+  final List<LanderRecord> landers;
+
+  /// A lander is still to come down.
+  bool get landersAloft => landers.any((l) => !l.settled);
+
+  LanderRecord? _lander(String vesselId) {
+    for (final l in landers) {
+      if (l.vesselId == vesselId) return l;
+    }
+    return null;
+  }
+
+  /// The world's lander flight: [vesselId] is down at the LZ, and its squads
+  /// with it.
+  void landerDown(String vesselId) {
+    final l = _lander(vesselId);
+    if (l == null || l.settled) return;
+    l.state = LanderState.landed;
+    final t = clock.steps;
+    for (final f in formations) {
+      if (l.formationIds.contains(f.id) && f.at == FormationAt.transit) {
+        f.at = lzId;
+        f.arriveStep = t;
+      }
+    }
+  }
+
+  /// The world's lander flight: [vesselId] was lost before touchdown, and
+  /// everyone aboard with it — dead, charged home (§7.6).
+  void landerLost(String vesselId) {
+    final l = _lander(vesselId);
+    if (l == null || l.settled) return;
+    l.state = LanderState.lost;
+    for (final f in formations) {
+      if (!l.formationIds.contains(f.id) || f.at != FormationAt.transit) continue;
+      f.dead += f.count;
+      f.removed += f.count;
+      f.count = 0;
+    }
+  }
 
   /// The player's standing order, and the objective an [OrderKind.attack]
   /// is for.
@@ -311,13 +357,20 @@ class Operation {
           phaseEndsStep = t + (days * tuning.daySec).round();
         }
       case OperationPhase.transit:
-        if (t >= phaseEndsStep) _land(t);
+        // With landers, the crossing ends when the last is down or lost.
+        if (t >= phaseEndsStep && !landersAloft) _land(t);
       case OperationPhase.engaged:
-        // Reinforcements land at the LZ on their own schedule.
+        // Reinforcements land at the LZ on their own schedule — or with
+        // their lander, when they have one.
+        final flying = <int>[
+          for (final l in landers)
+            if (!l.settled) ...l.formationIds
+        ];
         for (final f in formations) {
           if (f.side == CombatSide.attacker &&
               f.at == FormationAt.transit &&
-              t >= f.arriveStep) {
+              t >= f.arriveStep &&
+              !flying.contains(f.id)) {
             f.at = lzId;
             f.arriveStep = t;
           }
@@ -844,6 +897,7 @@ class Operation {
         if (defenderSurrendered != 0) 'surrendered': defenderSurrendered,
         if (garrison != 0) 'garrison': garrison,
         if (order != OrderKind.auto) 'order': order.name,
+        if (landers.isNotEmpty) 'landers': [for (final l in landers) l.toJson()],
         if (orderTarget != null) 'orderTarget': orderTarget,
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
@@ -894,6 +948,10 @@ class Operation {
         garrison: (j['garrison'] as num?)?.toInt() ?? 0,
         order: j['order'] == null ? OrderKind.auto : OrderKind.values.byName(j['order'] as String),
         orderTarget: j['orderTarget'] as String?,
+        landers: [
+          for (final l in (j['landers'] as List? ?? const []))
+            LanderRecord.fromJson((l as Map).cast<String, dynamic>())
+        ],
         garrisonKit: {
           for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
             if ((j['garrisonKit'] as Map?)?[k] is num)

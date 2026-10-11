@@ -107,7 +107,12 @@ extension _SimulationViewCombat on _SimulationViewState {
       case OperationPhase.mustering:
         return 'Mustering for $where';
       case OperationPhase.transit:
-        return 'In transit to $where';
+        final down = op.landers.where((l) => l.state == LanderState.landed).length;
+        return op.landers.isEmpty
+            ? 'In transit to $where'
+            : (op.landers.any((l) => l.state == LanderState.descending)
+                ? 'Landers descending on $where · $down of ${op.landers.length} down · warp held at 1×'
+                : 'In transit to $where');
       case OperationPhase.engaged:
         final day = (op.seconds - op.engagedAtStep) / op.tuning.daySec;
         return _assault(op)

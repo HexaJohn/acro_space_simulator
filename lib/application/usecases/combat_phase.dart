@@ -23,6 +23,7 @@ import '../../domain/colony/city/city_loyalty.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/combat/formation.dart';
+import '../../domain/combat/lander.dart';
 import '../../domain/combat/launch/plan_operation.dart';
 import '../../domain/combat/launch/snapshots.dart';
 import '../../domain/combat/operation.dart';
@@ -31,10 +32,18 @@ import '../../domain/combat/resolver_tuning.dart';
 import '../../domain/multiplayer/command.dart';
 
 class CombatPhase {
-  CombatPhase(this.registry, {this.tuning = const ResolverTuning()});
+  CombatPhase(this.registry, {this.tuning = const ResolverTuning(), this.landers = false});
 
   final OperationRegistry registry;
   final ResolverTuning tuning;
+
+  /// Fly the squads down as real troop landers where the target's body has
+  /// no air (docs/plans/combat.md §7B). Off where no world flies them — a
+  /// test of the colonies alone, a host without vessels — and landing is
+  /// abstract.
+  final bool landers;
+
+  bool _landersFor(CitySim target) => landers && !target.body.hasAtmosphere;
 
   /// Supply runs to a garrison leave every this many operation days.
   static const double supplyEveryDays = 3;
@@ -135,6 +144,10 @@ class CombatPhase {
     }
     registry.lastRefusal = null;
     op.reinforce(planned.formations);
+    if (_landersFor(target)) {
+      op.landers.addAll(
+          packLanders(op.id, planned.formations, firstIndex: op.landers.length));
+    }
     for (final d in planned.debits) {
       _find(cities, d.colonyId)
           ?.war
@@ -200,6 +213,10 @@ class CombatPhase {
     }
     registry.lastRefusal = null;
     registry.nextOperationId++;
+    if (_landersFor(target)) {
+      op.landers.addAll(packLanders(
+          op.id, [for (final f in op.formations) if (f.side == CombatSide.attacker) f]));
+    }
     registry.operations.add(op);
     for (final d in planned.debits) {
       _find(cities, d.colonyId)

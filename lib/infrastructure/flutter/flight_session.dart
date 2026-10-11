@@ -160,6 +160,7 @@ class FlightSession {
       terrainEdits: terrainEdits,
       atmosphere: atmospheres,
       operations: operations,
+      forceLanders: true,
       megastructures: megastructures,
       disableOverheat: _cheats.disableOverheat,
       disableAeroStress: _cheats.disableAeroStress,
