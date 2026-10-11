@@ -357,13 +357,9 @@ PlannedOperation planPortRetake({
     morale: 0.4,
     at: 'port',
   ));
-  final marchS = (kLzDistanceM / kInfantryMarchMps).round();
   final layout = layoutBase(
-      anchorE: target.portE,
-      anchorN: target.portN,
-      distanceM: kLzDistanceM,
-      obstacles: target.obstacles,
-      pads: target.pads);
+      anchorE: target.portE, anchorN: target.portN, obstacles: target.obstacles, pads: target.pads);
+  final marchS = (layout.distanceM / kInfantryMarchMps).round();
   final lz = (layout.e, layout.n);
   planned?.base
     ?..layoutBlockedModules = layout.blockedModules
@@ -498,11 +494,7 @@ PlannedOperation planColonyAssault({
   // past the impound radius of its pads.
   final anchor = at['port'] ?? at['seat']!;
   final layout = layoutBase(
-      anchorE: anchor.$1,
-      anchorN: anchor.$2,
-      distanceM: kLzDistanceM,
-      obstacles: target.obstacles,
-      pads: target.pads);
+      anchorE: anchor.$1, anchorN: anchor.$2, obstacles: target.obstacles, pads: target.pads);
   at['lz'] = (layout.e, layout.n);
   planned?.base
     ?..layoutBlockedModules = layout.blockedModules

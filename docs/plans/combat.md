@@ -567,6 +567,48 @@ suppression while two of the garrison can crew it *(default)*.
 **Out of scope:** the vehicle bay and airpad (phases 6–7), AT/AA turrets, orbital and silo powers (3b, 7), fog (with
 the battle view), the depth-tested 3D base (4a's renderer).
 
+**Built** ae4f96e, 9fafb97, 748853c, 67304d2; verified live on the Moon (Station, charge, supply drop, the post kept
+one turret and its crew; found live: lot-sized obstacles blocked every socket, now building footprints).
+
+## 7E. Phase 3b spec: Orbital support
+
+Specified 2026-10-11, on the ref's §10A.12 with these defaults *(default)* for review.
+
+**Ships:** park an armed ship of yours over the battle, assign it, and call down a strike when it passes.
+
+**Arming (Q23, the loadout route):** a world-level `VesselLoadout` (vessel id → rounds, saved with the operations).
+`ArmVesselCommand(vessel, colony, rounds)` applies while the vessel is landed within 60 m of a pad of a colonial or
+occupied colony; it posts a debit of 25 steel + 5 electronics a round, and what the colony could pay arrives aboard
+60 s later. Rounds are massless. No parts lane.
+
+**Assigning:** `AssignOrbitalSupportCommand(op, vessel, on)`: a player vessel, not landed, in the target body's SOI,
+not a troop lander. Lost (gone, landed, out of the SOI) → unassigned with a notice. While any is assigned and the
+operation runs, warp is held at 10× (1× still wins while landers descend).
+
+**Overhead** (`powers/overhead.dart`): at each tick end, per assigned vessel, `d = v − p` from the objective's
+inertial point; strike if `dot(d, p̂) ≥ 0.5|d|` and `|d| ≤ 2,500 km`; recon at 10°. The booleans and slant are saved.
+
+**The uplink** rides in the core: online while the base stands with 8 kW to spare and 2 support staff in reserve.
+No base, no strikes.
+
+**Firing:** `CommanderPowerCommand(op, orbitalStrike, target)` queues one strike; it fires at the first step with an
+assigned vessel overhead (strike), a round aboard, its 60 s cooldown done and the uplink online, lowest vessel id
+first. Flight `10 s + slant / 3 km/s`, CEP `5 m + 5e-5·slant`, D from `craterForImpact` (250 kg at 3 km/s).
+**Impact** per §10A.12: the emplacement there by priority (else the largest formation) destroyed with
+`p = 0.8·min(1, (D/CEP)²)`; area casualties `min(0.4n, (πD²/50)·cover)·min(1, (r_f/CEP)²)`, half dead; morale −0.15
+and defender fire ×0.5 for 20 s there; attackers present take half the area rule. **ROE:** Restrained strikes only
+where an emplacement stands; Standard also the Port, Power and Depot; never the Seat or Life support.
+
+**Craters:** at most 16 per operation, keyed (op, seq, aim, D), saved; a world brush only where the scattered impact
+is clear of every building footprint and the body has terrain; re-brushed once per session from the saved records.
+
+**UI:** the drawer's Orbital support section (assignable vessels, assign/unassign, rounds, overhead now, next pass
+from `powers/strike_window.dart`, Strike buttons per objective, Arm at a pad); the overlay draws the streak, the
+blast and the scorch.
+
+**Cut *(default)*:** Time the launch, the auto policy and "Orbital weapons free", recon's fog reveal (no fog yet),
+the danger-close prompt (the drawer says it instead), real ordnance parts.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

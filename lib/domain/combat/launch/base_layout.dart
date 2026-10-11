@@ -10,7 +10,9 @@
 /// bearings, starting from straight out from the colony centre, it takes the
 /// one whose socket rings have the most free ground and which keeps 400 m
 /// from every pad; a tie keeps the earlier bearing, so a colony with nothing
-/// in the way lands where it always did. A socket whose box would touch a
+/// in the way lands where it always did. Where no bearing is wholly clear —
+/// a spaceport's apron can reach past 450 m — it tries 600, 800 and 1,000 m
+/// too, and lands at the nearest that is (found live, §7D). A socket whose box would touch a
 /// building's footprint is blocked; open ground on a big lot is not.
 library;
 
@@ -25,11 +27,18 @@ const int kLayoutModuleSockets = 7;
 const int kLayoutTurretSockets = 4;
 const double kPadClearM = 400;
 
+/// How far out an LZ may be put, in the order tried.
+const List<double> kLzDistancesM = [450, 600, 800, 1000];
+
 class BaseLayout {
-  const BaseLayout(this.e, this.n, this.blockedModules, this.blockedTurrets, this.facing);
+  const BaseLayout(this.e, this.n, this.blockedModules, this.blockedTurrets, this.facing,
+      {this.distanceM = 450});
 
   /// The LZ.
   final double e, n;
+
+  /// How far it is from the anchor.
+  final double distanceM;
 
   /// Socket indices with no room.
   final List<int> blockedModules;
@@ -67,10 +76,21 @@ List<(double, double)> socketRing(double e, double n, double facing, {required b
 BaseLayout layoutBase({
   required double anchorE,
   required double anchorN,
-  required double distanceM,
   required List<(double, double, double)> obstacles,
   required List<(double, double)> pads,
+  List<double> distancesM = kLzDistancesM,
 }) {
+  BaseLayout? best;
+  for (final d in distancesM) {
+    final l = _layoutAt(anchorE, anchorN, d, obstacles, pads);
+    if (l.free == kLayoutModuleSockets + kLayoutTurretSockets) return l;
+    if (best == null || l.free > best.free) best = l;
+  }
+  return best!;
+}
+
+BaseLayout _layoutAt(double anchorE, double anchorN, double distanceM,
+    List<(double, double, double)> obstacles, List<(double, double)> pads) {
   var outE = anchorE, outN = anchorN;
   var len = math.sqrt(outE * outE + outN * outN);
   if (len < 1) {
@@ -95,13 +115,13 @@ BaseLayout layoutBase({
       ];
     }
 
-    final l = BaseLayout(e, n, blocked(false), blocked(true), facing);
+    final l = BaseLayout(e, n, blocked(false), blocked(true), facing, distanceM: distanceM);
     if (best == null || l.free > best.free) best = l;
   }
   // Nowhere clear of the pads: straight out, as before.
   return best ??
       BaseLayout(anchorE + distanceM * math.cos(out), anchorN + distanceM * math.sin(out),
-          const [], const [], out + math.pi);
+          const [], const [], out + math.pi, distanceM: distanceM);
 }
 
 double _d(double a, double b, double c, double d) =>

@@ -10,7 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('nothing in the way: the LZ is straight out from the centre, every socket free', () {
-    final l = layoutBase(anchorE: 100, anchorN: 0, distanceM: 450, obstacles: const [], pads: const []);
+    final l = layoutBase(anchorE: 100, anchorN: 0, obstacles: const [], pads: const []);
     expect(l.e, closeTo(550, 1e-9));
     expect(l.n, closeTo(0, 1e-9));
     expect(l.free, kLayoutModuleSockets + kLayoutTurretSockets);
@@ -19,14 +19,14 @@ void main() {
 
   test('a building on the straight-out ground turns the LZ to clear ground', () {
     final l = layoutBase(
-        anchorE: 100, anchorN: 0, distanceM: 450, obstacles: const [(550, 0, 60)], pads: const []);
+        anchorE: 100, anchorN: 0, obstacles: const [(550, 0, 60)], pads: const []);
     expect(l.free, kLayoutModuleSockets + kLayoutTurretSockets);
     expect((l.e - 550).abs() + l.n.abs(), greaterThan(100));
   });
 
   test('an LZ keeps 400 m from every pad', () {
     final l = layoutBase(
-        anchorE: 100, anchorN: 0, distanceM: 450, obstacles: const [], pads: const [(560, 0)]);
+        anchorE: 100, anchorN: 0, obstacles: const [], pads: const [(560, 0)]);
     expect(math.sqrt((l.e - 560) * (l.e - 560) + l.n * l.n), greaterThanOrEqualTo(kPadClearM));
   });
 
@@ -35,7 +35,8 @@ void main() {
       for (var k = 0; k < 8; k++)
         (100 + 450 * math.cos(k * math.pi / 4) + 40, 450 * math.sin(k * math.pi / 4), 20.0)
     ];
-    final l = layoutBase(anchorE: 100, anchorN: 0, distanceM: 450, obstacles: obstacles, pads: const []);
+    final l = layoutBase(
+        anchorE: 100, anchorN: 0, obstacles: obstacles, pads: const [], distancesM: const [450]);
     expect(l.blockedModules.length + l.blockedTurrets.length, greaterThan(0));
     final ring = socketRing(l.e, l.n, l.facing, turrets: false);
     for (final i in l.blockedModules) {
@@ -44,5 +45,11 @@ void main() {
         return d < o.$3 + kModuleHalfM;
       }), isTrue);
     }
+  });
+
+  test('a spaceport apron past 450 m: the LZ moves out to clear ground', () {
+    final l = layoutBase(anchorE: 500, anchorN: 500, obstacles: const [(500, 500, 545)], pads: const [(500, 500)]);
+    expect(l.free, kLayoutModuleSockets + kLayoutTurretSockets);
+    expect(l.distanceM, 800);
   });
 }
