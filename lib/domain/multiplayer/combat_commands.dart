@@ -40,18 +40,22 @@ sealed class CombatCommand extends SimCommand {
           ],
           kitDays: (j['kit'] as num?)?.toDouble() ?? 3,
           garrison: (j['garrison'] as num?)?.toInt() ?? 0,
+          roe: j['roe'] as String? ?? 'restrained',
         );
       case 'withdraw':
         return WithdrawOperationCommand(by, tick, (j['op'] as num).toInt());
       case 'withdrawGarrison':
         return WithdrawGarrisonCommand(by, tick, j['colony'] as String);
+      case 'restoreCharter':
+        return RestoreCharterCommand(by, tick, j['colony'] as String);
     }
     return null;
   }
 }
 
-/// Launch an operation to retake [targetColonyId]'s seized port with
-/// troopers drawn from the listed buildings.
+/// Launch an operation against [targetColonyId] with troopers drawn from the
+/// listed buildings: to retake its seized port, or — an independent colony —
+/// to take it (docs/plans/combat.md §7A).
 class LaunchOperationCommand extends CombatCommand {
   const LaunchOperationCommand(
     super.issuedBy,
@@ -60,14 +64,18 @@ class LaunchOperationCommand extends CombatCommand {
     required this.draws,
     this.kitDays = 3,
     this.garrison = 0,
+    this.roe = 'restrained',
   });
 
   final String targetColonyId;
   final List<({String colonyId, String siteId, int count})> draws;
   final double kitDays;
 
-  /// Troopers to leave holding the port after a win.
+  /// Troopers to leave holding the port, or the colony, after a win.
   final int garrison;
+
+  /// Rules of engagement, by name: `restrained` or `standard`.
+  final String roe;
 
   @override
   String get targetAssetId => targetColonyId;
@@ -83,6 +91,7 @@ class LaunchOperationCommand extends CombatCommand {
         ],
         'kit': kitDays,
         'garrison': garrison,
+        if (roe != 'restrained') 'roe': roe,
       };
 }
 
@@ -99,7 +108,8 @@ class WithdrawOperationCommand extends CombatCommand {
       {'kind': 'withdraw', 'by': issuedBy.value, 'tick': tick, 'op': operationId};
 }
 
-/// Bring the garrison holding [colonyId]'s port home.
+/// Bring the garrison holding [colonyId]'s port home — or, from an occupied
+/// colony, end the occupation early.
 class WithdrawGarrisonCommand extends CombatCommand {
   const WithdrawGarrisonCommand(super.issuedBy, super.tick, this.colonyId);
   final String colonyId;
@@ -110,4 +120,18 @@ class WithdrawGarrisonCommand extends CombatCommand {
   @override
   Map<String, dynamic> toJson() =>
       {'kind': 'withdrawGarrison', 'by': issuedBy.value, 'tick': tick, 'colony': colonyId};
+}
+
+/// Restore an occupied colony's charter, once it has earned it: colonial
+/// again, and the garrison comes home (docs/plans/combat.md §7A).
+class RestoreCharterCommand extends CombatCommand {
+  const RestoreCharterCommand(super.issuedBy, super.tick, this.colonyId);
+  final String colonyId;
+
+  @override
+  String get targetAssetId => colonyId;
+
+  @override
+  Map<String, dynamic> toJson() =>
+      {'kind': 'restoreCharter', 'by': issuedBy.value, 'tick': tick, 'colony': colonyId};
 }

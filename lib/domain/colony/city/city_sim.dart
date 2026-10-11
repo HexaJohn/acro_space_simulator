@@ -34,6 +34,7 @@ import 'city_building_spec.dart';
 import 'city_config.dart';
 import 'city_layout.dart';
 import 'city_loyalty.dart';
+import 'city_occupation.dart';
 import 'city_war.dart';
 import 'city_progression.dart';
 import 'city_term_guard.dart';
@@ -1867,7 +1868,8 @@ class CitySim {
                 lawHappiness() +
                 transitBonus() +
                 biomeFx.happy +
-                eventHappyBonus) // festival/aurora cheer or cult/blackout gloom
+                eventHappyBonus - // festival/aurora cheer or cult/blackout gloom
+                occupationMoodCost) // troops in the streets (combat.md §7A)
             .clamp(economy.happinessFloor, 1.0);
     if (starved) happyTarget = 0.0;
     happiness =
@@ -2254,8 +2256,11 @@ class CitySim {
             0.2 * inequality +
             0.1 * corruption) *
         govt.rebellionSensitivity;
-    rebellion =
-        (rebellion + (unrest - 0.4 - rebellion) * 0.15 * dt).clamp(0.0, 1.0);
+    // An occupation garrison holds the growth down (combat.md §7A); the
+    // easing back is its own.
+    final drift = (unrest - 0.4 - rebellion) * 0.15 * dt;
+    rebellion = (rebellion + (drift > 0 ? drift * (1 - suppression) : drift))
+        .clamp(0.0, 1.0);
     if (rebellion >= 1.0 && pop > 0) {
       final lost = (pop * 0.3).round();
       population = (pop - lost).clamp(0, double.infinity);
@@ -5509,7 +5514,9 @@ class CitySim {
     sim.recompute();
     sim.restoreLoyalty(j['loyalty']);
     sim.war.restore(j['war']);
-    sim.loyalty.garrisonHoldsPort = (sim.war.garrison?.count ?? 0) > 0;
+    final held = sim.war.garrison;
+    sim.loyalty.garrisonHoldsPort = held != null && !held.occupation && held.count > 0;
+    sim.loyalty.garrisonHoldsColony = held != null && held.occupation && held.count > 0;
     sim.agents.restore(j['agents']);
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and

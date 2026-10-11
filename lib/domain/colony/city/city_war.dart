@@ -22,6 +22,8 @@ import 'city_loyalty.dart';
 import 'city_reclaim.dart';
 import 'city_sim.dart';
 import 'commodity.dart';
+import 'independent_governor.dart';
+import 'parcel.dart';
 
 /// Troopers away from one of this colony's buildings.
 class DeployedTroopers {
@@ -62,6 +64,7 @@ class PortGarrison {
     required this.perTrooperDay,
     required this.stock,
     this.unpaidS = 0,
+    this.occupation = false,
   });
   final int opId;
   final String homeColonyId;
@@ -74,6 +77,9 @@ class PortGarrison {
   /// Seconds the garrison has gone short.
   double unpaidS;
 
+  /// It holds the whole colony (combat.md §7A), not just a retaken port.
+  final bool occupation;
+
   Map<String, dynamic> toJson() => {
         'op': opId,
         'home': homeColonyId,
@@ -81,6 +87,7 @@ class PortGarrison {
         'per': {for (final k in kWarCommodities) if (perTrooperDay[k] != null) k: perTrooperDay[k]},
         'stock': {for (final k in kWarCommodities) if (stock[k] != null) k: stock[k]},
         if (unpaidS != 0) 'unpaid': unpaidS,
+        if (occupation) 'occ': true,
       };
 
   static PortGarrison? fromJson(Object? j) {
@@ -99,9 +106,14 @@ class PortGarrison {
       perTrooperDay: m(j['per']),
       stock: m(j['stock']),
       unpaidS: (j['unpaid'] as num?)?.toDouble() ?? 0,
+      occupation: j['occ'] == true,
     );
   }
 }
+
+/// Resolve a beaten-off assault adds, and for how many loyalty days.
+const double kResolveBoost = 0.2;
+const double kResolveBoostDays = 10;
 
 /// What a war is fought with, in a fixed order.
 const List<String> kWarCommodities = [
@@ -146,6 +158,22 @@ class PortRetakenWrite extends CombatWrite {
 /// The attempt failed.
 class PortRepulsedWrite extends CombatWrite {
   const PortRepulsedWrite();
+}
+
+/// The colony was taken: [garrison] holds it (combat.md §7A).
+class OccupyWrite extends CombatWrite {
+  const OccupyWrite(this.garrison);
+  final PortGarrison garrison;
+}
+
+/// An independent colony beat an assault off: its resolve rises.
+class AssaultRepulsedWrite extends CombatWrite {
+  const AssaultRepulsedWrite();
+}
+
+/// The player restores an occupied colony's charter.
+class RestoreCharterWrite extends CombatWrite {
+  const RestoreCharterWrite();
 }
 
 /// Defenders and townsfolk killed in this colony.
@@ -221,6 +249,14 @@ class CityWarState {
   final List<WoundedTroopers> wounded = [];
   PortGarrison? garrison;
 
+  /// [CitySim.colonyTimeS] until which a beaten-off assault hardens the
+  /// colony's resolve (+[kResolveBoost]).
+  double resolveBoostUntilS = 0;
+
+  /// An occupation garrison is eating the colony's own stores this tick:
+  /// what the mood pays for. Working state, not saved.
+  bool requisitioning = false;
+
   /// Writes waiting for the colony's tick. Never saved: the world drains it
   /// before a save, and a save asserts it empty.
   final List<CombatWrite> inbox = [];
@@ -241,7 +277,8 @@ class CityWarState {
     return n;
   }
 
-  bool get isEmpty => deployed.isEmpty && wounded.isEmpty && garrison == null;
+  bool get isEmpty =>
+      deployed.isEmpty && wounded.isEmpty && garrison == null && resolveBoostUntilS == 0;
 
   Map<String, dynamic>? toJson() => isEmpty
       ? null
@@ -249,13 +286,16 @@ class CityWarState {
           if (deployed.isNotEmpty) 'deployed': [for (final d in deployed) d.toJson()],
           if (wounded.isNotEmpty) 'wounded': [for (final w in wounded) w.toJson()],
           if (garrison != null) 'garrison': garrison!.toJson(),
+          if (resolveBoostUntilS != 0) 'boostUntil': resolveBoostUntilS,
         };
 
   void restore(Object? j) {
     deployed.clear();
     wounded.clear();
     garrison = null;
+    resolveBoostUntilS = 0;
     if (j is! Map) return;
+    resolveBoostUntilS = (j['boostUntil'] as num?)?.toDouble() ?? 0;
     for (final d in (j['deployed'] is List ? j['deployed'] as List : const [])) {
       final v = DeployedTroopers.fromJson(d);
       if (v != null) deployed.add(v);
@@ -406,6 +446,21 @@ extension CityWar on CitySim {
             revoltsToSecede: loyalty.tuning.revoltsToSecede)
         : (loyalty.reclaim.grievance ?? const Grievance())
             .severity(loyalty.reclaim.tuning, revoltsToSecede: loyalty.tuning.revoltsToSecede);
+    final independent = loyalty.allegiance == Allegiance.independent;
+    var regulars = 0;
+    final guns = <EmplacementSite>[];
+    var sheltered = 0.0;
+    if (independent) {
+      for (final (parcel, s) in _sitesInOrder()) {
+        final c = parcel.centroid;
+        if (s.type == 'barracks' || s.type == 'base') {
+          regulars += (s.jobs * restThrottle * 0.5).floor();
+        } else if (s.type == 'gunemplacement') {
+          guns.add(EmplacementSite(_siteIdOf(parcel.id), c.e, c.n, (s.jobs / 2).ceil()));
+        }
+        if (s.type == 'shelter' || s.type == 'bunker') sheltered += s.housing;
+      }
+    }
     return LaunchSnapshot(
       colonyId: id,
       bodyId: body.id.value,
@@ -417,7 +472,68 @@ extension CityWar on CitySim {
       spaceportJobs: portJobs,
       gunsInStock: stockOf(Commodity.guns).floor(),
       portSeized: loyalty.portSeized,
+      independent: independent,
+      objectives: independent ? assaultObjectives() : const [],
+      regulars: regulars,
+      emplacements: guns,
+      shelterCover: population <= 0 ? 0 : (sheltered / population).clamp(0.0, 1.0),
+      resolveBoost: colonyTimeS < war.resolveBoostUntilS ? kResolveBoost : 0,
     );
+  }
+
+  /// A built site's war id: `cell:<key>` for a grid building (the parcel the
+  /// grid derives for it is `cell-<key>`), else the parcel id.
+  static String _siteIdOf(String parcelId) =>
+      parcelId.startsWith('cell-') ? 'cell:${parcelId.substring(5)}' : parcelId;
+
+  /// Every built site, in site id order.
+  List<(Parcel, CityBuildingSpec)> _sitesInOrder() =>
+      [...buildingParcels()]..sort((a, b) => a.$1.id.compareTo(b.$1.id));
+
+  /// What an assault on this colony fights over (combat.md §7A): its Seat —
+  /// the biggest civic building by jobs, nearest the centre on a tie; else
+  /// the biggest building that is not homes; else its port — then its Port,
+  /// Life support and Power, each only when it is a site not already picked.
+  List<ObjectiveSite> assaultObjectives() {
+    const civic = ['police', 'emergency', 'hospital', 'school', 'clinic'];
+    final sites = _sitesInOrder();
+    (Parcel, CityBuildingSpec)? best(bool Function(CityBuildingSpec) ok,
+        double Function(CityBuildingSpec) size, List<String> taken) {
+      (Parcel, CityBuildingSpec)? pick;
+      for (final e in sites) {
+        if (!ok(e.$2) || taken.contains(e.$1.id)) continue;
+        if (pick == null) {
+          pick = e;
+          continue;
+        }
+        final a = size(e.$2), b = size(pick.$2);
+        if (a > b ||
+            (a == b && e.$1.centroid.length < pick.$1.centroid.length)) {
+          pick = e;
+        }
+      }
+      return pick;
+    }
+
+    final taken = <String>[];
+    final out = <ObjectiveSite>[];
+    void add(String kind, (Parcel, CityBuildingSpec)? e) {
+      if (e == null) return;
+      taken.add(e.$1.id);
+      final c = e.$1.centroid;
+      out.add(ObjectiveSite(
+          kind: kind, siteId: _siteIdOf(e.$1.id), e: c.e, n: c.n, areaM2: e.$1.area));
+    }
+
+    final seat = best((s) => civic.contains(s.type), (s) => s.jobs.toDouble(), taken) ??
+        best((s) => s.group != 'res' && s.jobs > 0, (s) => s.jobs.toDouble(), taken) ??
+        best((s) => s.type == 'spaceport', (s) => s.jobs.toDouble(), taken);
+    add('seat', seat);
+    if (seat == null) return out;
+    add('port', best((s) => s.type == 'spaceport', (s) => s.jobs.toDouble(), taken));
+    add('lifeSupport', best(CitySim.isLifeSupport, (s) => s.jobs.toDouble(), taken));
+    add('power', best((s) => s.powerOutput > 0, (s) => s.powerOutput, taken));
+    return out;
   }
 
   // ---- the inbox ---------------------------------------------------------------
@@ -465,14 +581,35 @@ extension CityWar on CitySim {
         loyalty.garrisonHoldsPort = (war.garrison?.count ?? 0) > 0;
       case PortRepulsedWrite():
         loyalty.onForceRepulsed();
+      case OccupyWrite():
+        if (w.garrison.count <= 0) break;
+        war.garrison = w.garrison;
+        loyalty.occupy();
+        // Its council's acts are its last independence's story.
+        governorLog.clear();
+      case AssaultRepulsedWrite():
+        war.resolveBoostUntilS = colonyTimeS + kResolveBoostDays * loyalty.tuning.daySec;
+        loyalty.onAssaultRepulsed();
+      case RestoreCharterWrite():
+        final g = war.garrison;
+        if (g != null && g.occupation && loyalty.restoreCharter()) {
+          war.outbox.add(GarrisonHomeEvent(g.opId, g.homeColonyId, g.count));
+          war.garrison = null;
+        }
       case WarDeadWrite():
         recordWarDead(w.dead, corpses: true);
+        // Its people, killed by the player's troopers: a grievance it keeps.
+        loyalty.warDead += w.dead;
+        final gr = loyalty.reclaim.grievance;
+        if (gr != null) loyalty.reclaim.grievance = gr.withWarDead(w.dead);
       case GarrisonWithdrawWrite():
         final g = war.garrison;
         if (g != null) {
           war.outbox.add(GarrisonHomeEvent(g.opId, g.homeColonyId, g.count));
           war.garrison = null;
           loyalty.garrisonHoldsPort = false;
+          loyalty.garrisonHoldsColony = false;
+          if (g.occupation) loyalty.withdrawOccupation();
         }
       case GarrisonSupplyDebitWrite():
         final sent = <String, double>{};
@@ -500,6 +637,45 @@ extension CityWar on CitySim {
     }
   }
 
+  /// What a garrison eats and fires over [dt]: from its own stock, and for an
+  /// occupation garrison ([fromColony]) what that leaves short is
+  /// requisitioned from the colony's stores, which costs the colony mood.
+  /// Short of both, a tenth of it goes home a day.
+  void _garrisonUpkeep(PortGarrison g, double dt, {required bool fromColony}) {
+    final w = war;
+    final day = loyalty.tuning.daySec;
+    var short = false;
+    for (final k in kWarCommodities) {
+      final per = g.perTrooperDay[k] ?? 0;
+      if (per <= 0) continue;
+      final need = per * g.count * dt / day;
+      final have = g.stock[k] ?? 0;
+      if (have + 1e-12 >= need) {
+        g.stock[k] = math.max(0.0, have - need);
+        continue;
+      }
+      g.stock[k] = 0;
+      var gap = need - have;
+      if (fromColony && gap > 0) {
+        final take = math.min(gap, stockOf(k));
+        if (take > 0) {
+          stock[k] = stockOf(k) - take;
+          gap -= take;
+          w.requisitioning = true;
+        }
+      }
+      if (gap > 1e-12) short = true;
+    }
+    g.unpaidS = short ? g.unpaidS + dt : 0;
+    if (g.unpaidS >= day) {
+      final leave = math.max(1, (g.count * 0.1).round());
+      g.count = math.max(0, g.count - leave);
+      g.unpaidS -= day;
+      w.outbox.add(GarrisonHomeEvent(g.opId, g.homeColonyId, leave));
+      if (g.count == 0) w.garrison = null;
+    }
+  }
+
   /// [n] people of this colony killed in war, through the colony's own death
   /// write: the E8 ledger when citizens own the population, else the scalar.
   /// [corpses] when they died in town (defenders); troopers are buried where
@@ -523,7 +699,17 @@ extension CityWar on CitySim {
     final w = war;
     if (w.wounded.isNotEmpty) w.wounded.removeWhere((x) => x.untilS <= colonyTimeS);
     final g = w.garrison;
-    if (g != null) {
+    w.requisitioning = false;
+    if (g != null && g.occupation) {
+      if (!loyalty.occupied) {
+        // The colony threw it out (the loyalty step ended the occupation):
+        // home, alive.
+        w.outbox.add(GarrisonHomeEvent(g.opId, g.homeColonyId, g.count, expelled: true));
+        w.garrison = null;
+      } else {
+        _garrisonUpkeep(g, dt, fromColony: true);
+      }
+    } else if (g != null) {
       if (loyalty.allegiance != Allegiance.colonial || loyalty.stage != LoyaltyStage.standoff) {
         // Its job is done (the standoff ended), or it has nothing to hold
         // (the colony broke away): home, alive.
@@ -531,27 +717,12 @@ extension CityWar on CitySim {
             expelled: loyalty.allegiance != Allegiance.colonial));
         w.garrison = null;
       } else {
-        final day = loyalty.tuning.daySec;
-        var short = false;
-        for (final k in kWarCommodities) {
-          final per = g.perTrooperDay[k] ?? 0;
-          if (per <= 0) continue;
-          final need = per * g.count * dt / day;
-          final have = g.stock[k] ?? 0;
-          if (have + 1e-12 < need) short = true;
-          g.stock[k] = math.max(0.0, have - need);
-        }
-        g.unpaidS = short ? g.unpaidS + dt : 0;
-        if (g.unpaidS >= day) {
-          final leave = math.max(1, (g.count * 0.1).round());
-          g.count = math.max(0, g.count - leave);
-          g.unpaidS -= day;
-          w.outbox.add(GarrisonHomeEvent(g.opId, g.homeColonyId, leave));
-          if (g.count == 0) w.garrison = null;
-        }
+        _garrisonUpkeep(g, dt, fromColony: false);
       }
     }
-    loyalty.garrisonHoldsPort = (w.garrison?.count ?? 0) > 0;
+    final held = w.garrison;
+    loyalty.garrisonHoldsPort = held != null && !held.occupation && held.count > 0;
+    loyalty.garrisonHoldsColony = held != null && held.occupation && held.count > 0;
     // Edges the operation must hear about.
     final a = loyalty.allegiance, s = loyalty.stage;
     if (w._seenAllegiance != null && (a != w._seenAllegiance || s != w._seenStage)) {

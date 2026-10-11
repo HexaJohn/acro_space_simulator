@@ -390,9 +390,14 @@ objectives it holds with the phase 1 strength test. The defender sends waves and
 valuable threatened objective. On the phase 1 graph (LZ and Port) both reduce exactly to phase 1's rules, so its
 pins hold unchanged.
 
-**ROE** *(default Q5: Restrained)*. Restrained: attacker fire ×0.9, no civilian harm. Standard: full fire, and a
-quarter of the defender dead again as civilians, less the share sheltered (Fallout Shelters and Bunkers), charged
-to the target with corpses and into its grievance. Heavy is phase 6.
+**ROE** *(default Q5: Restrained)*. Restrained is phase 1's baseline, so its pins hold: small arms, no civilian
+harm. Standard: attacker fire ×1.2, and a quarter of the defender dead again as civilians, less the share
+sheltered (Fallout Shelters and Bunkers), charged to the target with corpses and into its grievance. Heavy is
+phase 6.
+
+**Built:** the battle core at 7bc293c. Found while building it: the advance test compared width-capped strengths
+and never went in behind fortification (now whole strengths); an assault needs 20 days before a ceasefire and
+about 6 days of kit (two fights, where a port retake is one).
 
 **Occupation** (`city_occupation.dart`, the reference's §7.2 nearly as written):
 - `occupy()`: allegiance occupied, loyalty 0.2 (Defiant), revolts, independence, council log, petition and terms

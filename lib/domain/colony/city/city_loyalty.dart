@@ -22,6 +22,7 @@ library;
 
 import 'dart:math' as math;
 
+import 'city_occupation.dart';
 import 'city_reclaim.dart';
 import 'city_sim.dart';
 import 'commodity.dart';
@@ -35,8 +36,9 @@ enum Allegiance {
   /// Seceded (§4): a faction the simulation runs.
   independent,
 
-  /// Retaken by force (§6.3, phase 4). Never entered in phase 1; the value
-  /// exists so a save written by a later build loads.
+  /// Taken by force and held by a garrison (combat.md §7A): the player's
+  /// orders under guard, until the charter is restored or the garrison is
+  /// thrown out.
   occupied,
 }
 
@@ -97,6 +99,10 @@ class CityLoyaltyTuning {
     this.standoffTax = 0.0,
     this.bearableMood = 0.5,
     this.taxPullDays = 2,
+    this.occupiedLevel = 0.2,
+    this.charterLevel = 0.6,
+    this.charterDays = 10,
+    this.withdrawCost = 0.2,
   });
 
   /// Colony seconds in one day of this calendar.
@@ -183,6 +189,14 @@ class CityLoyaltyTuning {
   final double bearableMood;
   final double taxPullDays;
 
+  /// Occupation (combat.md §7A): the loyalty a taken colony starts at
+  /// (Defiant); the line it must hold for [charterDays] before its charter
+  /// can be restored; and what bringing the garrison home early costs.
+  final double occupiedLevel;
+  final double charterLevel;
+  final double charterDays;
+  final double withdrawCost;
+
   double get graceS => graceDays * daySec;
   double get neglectScaleS => neglectScaleDays * daySec;
   double get recentS => recentDays * daySec;
@@ -214,6 +228,7 @@ class LoyaltyInputs {
     this.hasSpaceport = true,
     this.starving = false,
     this.populated = true,
+    this.suppression = 0,
     this.causes,
   });
 
@@ -242,6 +257,10 @@ class LoyaltyInputs {
   /// (no need, no shortfall), and one that suffocated to its last settler
   /// must not then "secede": nobody is left to declare anything.
   final bool populated;
+
+  /// 0..0.8: how hard an occupation garrison sits on the colony. Misrule
+  /// drift runs at (1 − suppression); neglect does not (combat.md §7A).
+  final double suppression;
 
   /// The warning's cause text, built only when a notice needs it.
   final String Function()? causes;
@@ -272,6 +291,21 @@ enum LoyaltyNoticeKind {
 
   /// The player's troopers failed to take it.
   portAttackRepulsed,
+
+  /// The player's troopers took the colony and hold it (combat.md §7A).
+  occupied,
+
+  /// The occupation is over: the garrison was thrown out, or went home.
+  occupationEnded,
+
+  /// An occupied colony has earned its charter back.
+  charterReady,
+
+  /// Its charter is restored: colonial again.
+  charterRestored,
+
+  /// An independent colony beat an attack off.
+  assaultRepulsed,
 }
 
 /// One announcement for the HUD to raise — a queue a host drains, as it
@@ -414,7 +448,10 @@ class CityLoyalty {
   int get recentRevolts => revolts.length;
 
   /// The colony governs itself (§3.5): auto-voted laws, the tax revolt.
-  bool get selfGoverning => stage != LoyaltyStage.loyal;
+  /// Never under occupation: a garrison in the streets is the colony's
+  /// government, whatever its mood (combat.md §7A).
+  bool get selfGoverning =>
+      stage != LoyaltyStage.loyal && allegiance != Allegiance.occupied;
 
   /// What non-life-support production runs at: the strike.
   double get strikeThrottle => switch (stage) {
@@ -537,8 +574,9 @@ class CityLoyalty {
       final erosion = t.absenceRate *
           math.min(1.0, neglect) *
           (1 - t.contentShield * content);
-      final misrule =
-          t.misruleRate * math.max(0.0, i.rebellion - t.misruleFloor);
+      final misrule = t.misruleRate *
+          math.max(0.0, i.rebellion - t.misruleFloor) *
+          (1 - i.suppression.clamp(0.0, 1.0));
       final recovery = recent ? t.recoverRate * content : 0.0;
       level = (level + (recovery - erosion - misrule) * dt).clamp(0.0, 1.0);
       lastErosion = erosion * t.daySec;
@@ -569,6 +607,10 @@ class CityLoyalty {
     String causes() => i.causes?.call() ?? '';
     if (allegiance == Allegiance.independent) {
       stage = LoyaltyStage.seceded;
+      return;
+    }
+    if (allegiance == Allegiance.occupied) {
+      _occupiedStep();
       return;
     }
     final condition = level <= 0 || revolts.length >= t.revoltsToSecede;
@@ -655,6 +697,153 @@ class CityLoyalty {
   /// colony's war state, `city_war.dart`; not saved here).
   bool garrisonHoldsPort = false;
 
+  /// Whether an occupation garrison holds the colony; set like
+  /// [garrisonHoldsPort].
+  bool garrisonHoldsColony = false;
+
+  /// The colony's people the player's troopers have killed, ever: what its
+  /// grievance carries if it breaks away again.
+  int warDead = 0;
+
+  /// [colonyTimeS] an occupied colony's loyalty last rose to the charter line
+  /// and has stayed there since; null below it.
+  double? charterSinceS;
+
+  /// The charter has been offered (the notice raised once).
+  bool charterOffered = false;
+
+  bool get occupied => allegiance == Allegiance.occupied;
+
+  /// An occupied colony has held the charter line long enough.
+  bool get charterReady =>
+      occupied &&
+      charterSinceS != null &&
+      colonyTimeS - charterSinceS! >= tuning.charterDays * tuning.daySec;
+
+  /// Days of the charter line held so far, for the readout.
+  double get charterDaysHeld => charterSinceS == null
+      ? 0
+      : math.max(0.0, colonyTimeS - charterSinceS!) / tuning.daySec;
+
+  /// An occupied colony's stage step (combat.md §7A). The colonial rules but
+  /// for two: while the garrison holds, the colony cannot secede or stand
+  /// off, and it does not govern itself. Pushed past the secession condition
+  /// it throws the garrison out instead; with the garrison gone, it takes the
+  /// plain colonial rules from the next tick.
+  void _occupiedStep() {
+    final t = tuning;
+    if (level <= 0 || revolts.length >= t.revoltsToSecede) {
+      _endOccupation();
+      _notice(LoyaltyNoticeKind.occupationEnded,
+          'The colony has thrown your garrison out: it answers to nobody under '
+          'guard now.');
+      return;
+    }
+    if (!garrisonHoldsColony) {
+      _endOccupation();
+      _notice(LoyaltyNoticeKind.occupationEnded,
+          'Your garrison has gone home: the colony takes the ordinary rules '
+          'again.');
+      return;
+    }
+    var s = stage;
+    if (s == LoyaltyStage.standoff || s == LoyaltyStage.seceded) {
+      s = LoyaltyStage.defiant;
+    }
+    if (s == LoyaltyStage.loyal && level < t.restlessBelow) s = LoyaltyStage.restless;
+    if (s == LoyaltyStage.restless && level < t.defiantBelow) s = LoyaltyStage.defiant;
+    if (s == LoyaltyStage.defiant && level > t.defiantAbove) s = LoyaltyStage.restless;
+    if (s == LoyaltyStage.restless && level > t.restlessAbove) s = LoyaltyStage.loyal;
+    stage = s;
+    if (level >= t.charterLevel) {
+      charterSinceS ??= colonyTimeS;
+      if (!charterOffered && charterReady) {
+        charterOffered = true;
+        _notice(LoyaltyNoticeKind.charterReady,
+            'The colony has earned its charter back: restore it, and your '
+            'garrison comes home.');
+      }
+    } else {
+      charterSinceS = null;
+      charterOffered = false;
+    }
+  }
+
+  void _endOccupation() {
+    allegiance = Allegiance.colonial;
+    charterSinceS = null;
+    charterOffered = false;
+    garrisonHoldsColony = false;
+  }
+
+  /// The colony is taken (combat.md §7A), modelled on rejoining: loyalty at
+  /// [CityLoyaltyTuning.occupiedLevel] (Defiant), its revolts and its
+  /// independence forgotten, any petition or terms gone — but the grievance
+  /// kept, with [dead] more war dead, because it is what the colony states if
+  /// it breaks away again. Taking it is an act of governance: the neglect
+  /// clock restarts. The colony's own council log is the host's to clear.
+  void occupy({int dead = 0}) {
+    final t = tuning;
+    allegiance = Allegiance.occupied;
+    level = t.occupiedLevel;
+    stage = level > t.restlessAbove
+        ? LoyaltyStage.loyal
+        : (level > t.defiantAbove ? LoyaltyStage.restless : LoyaltyStage.defiant);
+    revolts.clear();
+    independentAtS = null;
+    independenceCauses = null;
+    portSeized = false;
+    impoundPending = false;
+    forceUsed = true;
+    warDead += dead;
+    charterSinceS = null;
+    charterOffered = false;
+    garrisonHoldsColony = true;
+    final r = reclaim;
+    r.grievance = (r.grievance ?? Grievance(warDead: warDead - dead)).withWarDead(dead);
+    r.petition = null;
+    r.pressure = 0;
+    r.dependentS = 0;
+    r.terms = null;
+    r.termsUntilS = 0;
+    attend();
+    _notice(LoyaltyNoticeKind.occupied,
+        'Your troopers hold the colony. It takes your orders under guard.');
+  }
+
+  /// Restore the charter of an occupied colony that has earned it: colonial
+  /// again, the grievance settled. False, and nothing changes, before then.
+  /// The garrison's going home is the war state's.
+  bool restoreCharter() {
+    if (!charterReady) return false;
+    _endOccupation();
+    reclaim.grievance = null;
+    attend();
+    _notice(LoyaltyNoticeKind.charterRestored,
+        "The colony's charter is restored: it is yours again, and your "
+        'troopers come home.');
+    return true;
+  }
+
+  /// Bring the garrison home early: loyalty pays for it, and the colony takes
+  /// the plain colonial rules — it secedes if it can feed itself, or stands
+  /// off and seizes its port if it cannot.
+  void withdrawOccupation() {
+    if (!occupied) return;
+    level = (level - tuning.withdrawCost).clamp(0.0, 1.0);
+    _endOccupation();
+    _notice(LoyaltyNoticeKind.occupationEnded,
+        'Your garrison has left. The colony takes the ordinary rules again, '
+        'and remembers.');
+  }
+
+  /// An independent colony beat the player's troopers off.
+  void onAssaultRepulsed() {
+    forceUsed = true;
+    _notice(LoyaltyNoticeKind.assaultRepulsed,
+        'Your troopers failed to take the colony: it is the harder for it.');
+  }
+
   /// Force was used on this colony. Kept for the grievance it states if it
   /// later breaks away (combat.md §7.6).
   bool forceUsed = false;
@@ -706,6 +895,7 @@ class CityLoyalty {
       rebellion: revolts.isNotEmpty ? 1.0 : i.rebellion,
       revolts: revolts.length,
       desperation: desperation,
+      warDead: warDead,
     ));
     allegiance = Allegiance.independent;
     stage = LoyaltyStage.seceded;
@@ -743,6 +933,9 @@ class CityLoyalty {
         if (independentAtS != null) 'independentAt': independentAtS,
         if (independenceCauses != null) 'independentWhy': independenceCauses,
         if (forceUsed) 'forceUsed': true,
+        if (warDead != 0) 'warDead': warDead,
+        if (charterSinceS != null) 'charterSince': charterSinceS,
+        if (charterOffered) 'charterOffered': true,
         'reclaim': ?reclaim.toJson(),
       };
 
@@ -790,6 +983,10 @@ class CityLoyalty {
     final why = json['independentWhy'];
     independenceCauses = why is String ? why : null;
     forceUsed = json['forceUsed'] == true;
+    warDead = (json['warDead'] is num) ? (json['warDead'] as num).toInt() : 0;
+    final cs = json['charterSince'];
+    charterSinceS = cs is num ? cs.toDouble() : null;
+    charterOffered = json['charterOffered'] == true;
     reclaim.restore(json['reclaim']);
     reclaim.recoverGrievance(this);
   }
@@ -865,6 +1062,7 @@ extension CityLoyaltySim on CitySim {
       sufficiency: localSufficiency(localNet),
       hasSpaceport: hasSpaceport,
       starving: starved,
+      suppression: suppression,
       causes: () => loyaltyCauses().join('; '),
     ));
     // The ways back (§6): terms running out, petitions building.
@@ -964,6 +1162,16 @@ extension CityLoyaltySim on CitySim {
           days == null
               ? 'Independent — takes no orders'
               : 'Independent for $days days — takes no orders'));
+    }
+    if (l.occupied) {
+      final n = occupationTroopers;
+      out.add(LoyaltyWarning(
+          'occupied',
+          LoyaltySeverity.warn,
+          'Occupied — $n trooper${n == 1 ? '' : 's'} hold it; loyalty '
+          '${(l.level * 100).round()}% '
+          '(its charter comes back at ${(l.tuning.charterLevel * 100).round()}% '
+          'held ${l.tuning.charterDays.round()} days)'));
     }
     if (reclaimWarning() case final w?) out.add(w);
     if (l.portSeized) {

@@ -40,6 +40,8 @@ class ReclaimTuning {
     this.misruleWeight = 0.3,
     this.revoltWeight = 0.25,
     this.desperationWeight = 0.15,
+    this.warDeadWeight = 0.2,
+    this.warDeadFull = 20,
     this.mildTaxCap = 0.25,
     this.harshTaxCap = 0.05,
     this.lawsFrom = 0.3,
@@ -76,6 +78,12 @@ class ReclaimTuning {
   final double misruleWeight;
   final double revoltWeight;
   final double desperationWeight;
+
+  /// Its people the player's troopers killed (combat.md §7A): an additive
+  /// grievance, the whole of [warDeadWeight] at [warDeadFull] dead. The
+  /// other weights sum to 1, so it raises a severity the clamp then caps.
+  final double warDeadWeight;
+  final double warDeadFull;
 
   /// The tax cap at severity 0 and at severity 1.
   final double mildTaxCap;
@@ -132,6 +140,7 @@ class Grievance {
     this.rebellion = 0,
     this.revolts = 0,
     this.desperation = 0,
+    this.warDead = 0,
   });
 
   /// Days without orders at the declaration.
@@ -146,6 +155,18 @@ class Grievance {
   /// Desperation at the declaration (§3.4).
   final double desperation;
 
+  /// Its people killed by the player's troopers, defenders and townsfolk.
+  final int warDead;
+
+  /// The same grievance with [n] more war dead.
+  Grievance withWarDead(int n) => Grievance(
+        neglectDays: neglectDays,
+        rebellion: rebellion,
+        revolts: revolts,
+        desperation: desperation,
+        warDead: warDead + n,
+      );
+
   /// How badly the colony was run, 0..1.
   double severity(ReclaimTuning t, {int revoltsToSecede = 3}) {
     double share(double v) => v.isFinite ? v.clamp(0.0, 1.0) : 0.0;
@@ -155,7 +176,8 @@ class Grievance {
                     math.max(1e-6, t.misruleFull - t.misruleFrom)) +
             t.revoltWeight *
                 share(revolts / math.max(1, revoltsToSecede)) +
-            t.desperationWeight * share(desperation))
+            t.desperationWeight * share(desperation) +
+            t.warDeadWeight * share(warDead / math.max(1e-6, t.warDeadFull)))
         .clamp(0.0, 1.0);
   }
 
@@ -164,6 +186,7 @@ class Grievance {
         if (rebellion != 0) 'rebellion': rebellion,
         if (revolts != 0) 'revolts': revolts,
         if (desperation != 0) 'desperation': desperation,
+        if (warDead != 0) 'warDead': warDead,
       };
 
   static Grievance fromJson(Map json) {
@@ -173,6 +196,7 @@ class Grievance {
       rebellion: n(json['rebellion']),
       revolts: n(json['revolts']).round(),
       desperation: n(json['desperation']).clamp(0.0, 1.0),
+      warDead: n(json['warDead']).round(),
     );
   }
 }

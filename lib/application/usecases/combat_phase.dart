@@ -91,6 +91,8 @@ class CombatPhase {
         registry.byId(c.operationId)?.withdraw();
       case WithdrawGarrisonCommand():
         _find(cities, c.colonyId)?.war.inbox.add(const GarrisonWithdrawWrite());
+      case RestoreCharterCommand():
+        _find(cities, c.colonyId)?.war.inbox.add(const RestoreCharterWrite());
     }
   }
 
@@ -122,15 +124,28 @@ class CombatPhase {
       }
       sources.add(s.sourceSnapshot());
     }
-    final planned = planPortRetake(
-      operationId: registry.nextOperationId,
-      target: target.launchSnapshot(),
-      sources: sources,
-      draws: [for (final d in c.draws) TrooperDraw(d.colonyId, d.siteId, d.count)],
-      kitDays: c.kitDays,
-      garrison: c.garrison,
-      tuning: tuning,
-    );
+    final draws = [for (final d in c.draws) TrooperDraw(d.colonyId, d.siteId, d.count)];
+    final snap = target.launchSnapshot();
+    final planned = snap.independent
+        ? planColonyAssault(
+            operationId: registry.nextOperationId,
+            target: snap,
+            sources: sources,
+            draws: draws,
+            kitDays: c.kitDays,
+            garrison: c.garrison,
+            roe: Roe.values.where((r) => r.name == c.roe).firstOrNull ?? Roe.restrained,
+            tuning: tuning,
+          )
+        : planPortRetake(
+            operationId: registry.nextOperationId,
+            target: snap,
+            sources: sources,
+            draws: draws,
+            kitDays: c.kitDays,
+            garrison: c.garrison,
+            tuning: tuning,
+          );
     final op = planned.operation;
     if (op == null) {
       registry.lastRefusal = planned.refusal;
@@ -154,13 +169,22 @@ class CombatPhase {
       case StageChangedEvent():
         for (final op in registry.operations) {
           if (op.resolved) continue;
-          if (op.targetColonyId == city.id &&
-              (e.allegiance != Allegiance.colonial || e.stage != LoyaltyStage.standoff)) {
-            // Independence, or the rebels stood down: either way the port is
-            // not there to retake (combat.md §7.6).
-            op.endFromOutside(OperationOutcome.overtaken);
+          if (op.targetColonyId == city.id) {
+            if (op.kind == OperationKind.colonyAssault) {
+              // It rejoined while the troopers were on their way (a petition
+              // or terms accepted): nothing left to take.
+              if (e.allegiance != Allegiance.independent) {
+                op.endFromOutside(OperationOutcome.rejoined);
+              }
+            } else if (e.allegiance != Allegiance.colonial ||
+                e.stage != LoyaltyStage.standoff) {
+              // Independence, or the rebels stood down: either way the port
+              // is not there to retake (combat.md §7.6).
+              op.endFromOutside(OperationOutcome.overtaken);
+            }
+          } else if (e.allegiance == Allegiance.independent) {
+            _desert(op, city);
           }
-          if (e.allegiance != Allegiance.colonial) _desert(op, city);
         }
       case SiteLostEvent():
         for (final op in registry.operations) {
@@ -247,6 +271,7 @@ class CombatPhase {
           count: garrisonN,
           perTrooperDay: upkeep,
           stock: {for (final k in kWarCommodities) if (upkeep[k] != null) k: upkeep[k]! * garrisonN * kitLeft},
+          occupation: op.kind == OperationKind.colonyAssault,
         );
         // The first run leaves now: the garrison holds with whatever kit the
         // fight left it, often well under a day, and a first run three days
@@ -260,12 +285,23 @@ class CombatPhase {
           nextRunUs: registry.clockUs,
         ));
       }
-      target.war.inbox.add(PortRetakenWrite(g));
+      if (op.kind == OperationKind.colonyAssault) {
+        // The dead first, so the grievance it is occupied with counts them.
+        final dead = op.defenderDead + op.civilianDead;
+        if (dead > 0) target.war.inbox.add(WarDeadWrite(dead));
+        if (g != null) target.war.inbox.add(OccupyWrite(g));
+      } else {
+        target.war.inbox.add(PortRetakenWrite(g));
+      }
     } else if (op.outcome == OperationOutcome.lost && target != null) {
-      target.war.inbox.add(const PortRepulsedWrite());
+      target.war.inbox.add(op.kind == OperationKind.colonyAssault
+          ? const AssaultRepulsedWrite()
+          : const PortRepulsedWrite());
     }
-    if (target != null && op.defenderDead > 0) {
-      target.war.inbox.add(WarDeadWrite(op.defenderDead));
+    final won = op.outcome == OperationOutcome.won;
+    if (target != null && !(won && op.kind == OperationKind.colonyAssault)) {
+      final dead = op.defenderDead + op.civilianDead;
+      if (dead > 0) target.war.inbox.add(WarDeadWrite(dead));
     }
     for (final h in homes) {
       final keep = h.home == garrisonFrom ? garrisonN : 0;

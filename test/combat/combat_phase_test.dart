@@ -15,6 +15,7 @@ import 'package:acro_space_simulator/application/usecases/advance_simulation_tic
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_loyalty.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_reclaim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_war.dart';
@@ -266,6 +267,95 @@ void main() {
     }
 
     expect(run(0.1), run(0.5));
+  });
+
+  /// An independent Earth colony: it feeds itself, so it can stay gone.
+  CitySim rebels() {
+    final c = quiet(CityStarterKit.found(
+      bodies: fixtureBodies,
+      config: const CityConfig(bodyId: 'earth', gridSize: 20),
+      id: 'tgt',
+      name: 'Free Town',
+    ))
+      ..population = 80;
+    c.loyalty
+      ..allegiance = Allegiance.independent
+      ..stage = LoyaltyStage.seceded
+      ..independentAtS = 0
+      ..reclaim.grievance = const Grievance(rebellion: 0.9, revolts: 3);
+    return c;
+  }
+
+  test('an assault on an independent colony, through the tick, ends in an '
+      'occupation — and the charter, restored, brings the garrison home', () {
+    final src = source(3), tgt = rebels();
+    final w = world([src, tgt]);
+    w.tick.execute(w.clock);
+    final sources = src.trooperSources();
+    w.ops.inbox.enqueue(LaunchOperationCommand(player, 0,
+        targetColonyId: 'tgt',
+        draws: [
+          for (final s in sources)
+            if (s.ready) (colonyId: src.id, siteId: s.siteId, count: s.available)
+        ],
+        kitDays: 6,
+        garrison: 4));
+    w.tick.execute(w.clock);
+    expect(w.ops.operations, hasLength(1), reason: w.ops.lastRefusal);
+    final op = w.ops.operations.single;
+    expect(op.kind, OperationKind.colonyAssault);
+    expect(op.goalId, 'seat');
+    runUntilReported(w, maxTicks: 40000);
+    // ignore: avoid_print
+    print('assault: ${op.attackerRaised} troopers vs ${op.defenderRaised} -> '
+        '${op.outcome} (${op.band}); ${op.attackerDead} dead, rebels dead '
+        '${op.defenderDead}; ${tgt.loyalty.allegiance}');
+    expect(op.resolved, isTrue);
+    if (op.outcome != OperationOutcome.won) {
+      expect(tgt.loyalty.allegiance, Allegiance.independent);
+      expect(tgt.war.resolveBoostUntilS, greaterThan(0));
+      return;
+    }
+    expect(tgt.loyalty.allegiance, Allegiance.occupied);
+    expect(tgt.war.garrison!.occupation, isTrue);
+    expect(tgt.war.garrison!.count, 4);
+    expect(w.ops.garrisons.single.targetColonyId, 'tgt');
+    expect(src.troopersAway, 4, reason: 'the garrison is still away');
+    expect(tgt.loyalty.warDead, op.defenderDead);
+
+    // Governed back to the line for ten days, its charter is restored.
+    tgt.loyalty
+      ..level = 0.7
+      ..charterSinceS = tgt.loyalty.colonyTimeS - 11 * 120;
+    w.ops.inbox.enqueue(const RestoreCharterCommand(player, 0, 'tgt'));
+    for (var i = 0; i < 4; i++) {
+      w.tick.execute(w.clock);
+    }
+    expect(tgt.loyalty.allegiance, Allegiance.colonial);
+    expect(tgt.war.garrison, isNull);
+    expect(src.troopersAway, 0, reason: 'home');
+    expect(w.ops.garrisons, isEmpty);
+  });
+
+  test('an assault ends Rejoined when the colony comes back on its own', () {
+    final src = source(2), tgt = rebels();
+    final w = world([src, tgt]);
+    w.tick.execute(w.clock);
+    final sources = src.trooperSources();
+    w.ops.inbox.enqueue(LaunchOperationCommand(player, 0,
+        targetColonyId: 'tgt',
+        draws: [
+          for (final s in sources)
+            if (s.ready) (colonyId: src.id, siteId: s.siteId, count: s.available)
+        ],
+        garrison: 2));
+    w.tick.execute(w.clock);
+    w.tick.execute(w.clock);
+    expect(tgt.acceptNegotiation(), isTrue);
+    runUntilReported(w);
+    expect(w.ops.operations.single.outcome, OperationOutcome.rejoined);
+    expect(src.troopersAway, 0);
+    expect(tgt.loyalty.allegiance, Allegiance.colonial);
   });
 
   test('a v2 save loads with no operations, and the registry forgets the session', () {
