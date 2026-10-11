@@ -31,6 +31,7 @@ import 'app_theme.dart';
 import 'city_control_ui.dart';
 import 'city_loyalty_ui.dart';
 import 'city_reclaim_ui.dart';
+import 'combat/occupation_panel.dart';
 import 'traffic_lane_speed_overlay.dart' show TrafficLaneSpeedOverlay;
 
 /// Which drawer is open under the top bar.
@@ -158,6 +159,12 @@ class _CityGameHudState extends State<CityGameHud> {
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
                     child: IndependencePanel(city: city, compact: true),
+                  ),
+                // A colony held by force (combat.md §7A).
+                if (city.loyalty.occupied)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: OccupationPanel(city: city, compact: true),
                   ),
                 // The terms it rejoined under, while they run (§6.1).
                 if (city.reclaim.terms != null)
@@ -745,9 +752,11 @@ class _CityGameHudState extends State<CityGameHud> {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4),
           child: InkWell(
-            onTap: () => l.allegiance == Allegiance.independent
-                ? showIndependence(context, city)
-                : explainLoyalty(context, city),
+            onTap: () => switch (l.allegiance) {
+              Allegiance.independent => showIndependence(context, city),
+              Allegiance.occupied => showOccupation(context, city),
+              Allegiance.colonial => explainLoyalty(context, city),
+            },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
               decoration: BoxDecoration(
@@ -759,9 +768,11 @@ class _CityGameHudState extends State<CityGameHud> {
                 Icon(loyaltyIcon(worst.key), size: 14, color: colour),
                 const SizedBox(width: 5),
                 Text(
-                    l.allegiance == Allegiance.independent
-                        ? 'Independent'
-                        : '${l.stage.label} ${(l.level * 100).round()}%',
+                    switch (l.allegiance) {
+                      Allegiance.independent => 'Independent',
+                      Allegiance.occupied => 'Occupied ${(l.level * 100).round()}%',
+                      Allegiance.colonial => '${l.stage.label} ${(l.level * 100).round()}%',
+                    },
                     style: AppTheme.mono.copyWith(fontSize: 11, color: colour)),
               ]),
             ),
@@ -775,6 +786,9 @@ class _CityGameHudState extends State<CityGameHud> {
     final good = n.kind == LoyaltyNoticeKind.recovered ||
         n.kind == LoyaltyNoticeKind.portReleased ||
         n.kind == LoyaltyNoticeKind.portRetaken ||
+        n.kind == LoyaltyNoticeKind.occupied ||
+        n.kind == LoyaltyNoticeKind.charterReady ||
+        n.kind == LoyaltyNoticeKind.charterRestored ||
         n.kind == LoyaltyNoticeKind.petition ||
         n.kind == LoyaltyNoticeKind.rejoined ||
         n.kind == LoyaltyNoticeKind.termsExpired;

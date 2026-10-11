@@ -33,7 +33,7 @@ import '../../domain/autonomy/pilot_input.dart';
 import '../../domain/autonomy/landing_target.dart';
 import '../../domain/colony/city/city_building_spec.dart';
 import '../../domain/colony/city/city_config.dart';
-import '../../domain/colony/city/city_reclaim.dart' show PetitionWatch;
+import '../../domain/colony/city/city_reclaim.dart' show Grievance, PetitionWatch;
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/city/traffic/vehicle_inspection.dart';
@@ -46,12 +46,16 @@ import 'screens/city_edit_overlay.dart';
 import 'screens/city_game_hud.dart';
 import 'screens/app_theme.dart';
 import 'screens/city_site_actions.dart';
+import 'screens/city_control_ui.dart' show showIndependence;
+import 'screens/combat/combat_hooks.dart';
+import 'screens/combat/occupation_panel.dart';
 import 'screens/combat/operation_planner_sheet.dart';
 import '../../domain/colony/city/city_loyalty.dart';
 import '../../domain/colony/city/city_starter_kit.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/colony/city/commodity.dart';
 import '../../domain/combat/formation.dart';
+import '../../domain/combat/objective.dart';
 import '../../domain/combat/operation.dart';
 import '../../domain/combat/operation_registry.dart';
 import '../../domain/multiplayer/player.dart';
@@ -514,6 +518,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   void _registerControl() {
     final c = SimViewControl.instance;
     c.combat = (params) => mounted ? _combatHook(params) : const {};
+    _installCombatHooks();
     c.orbit = ({double? azimuth, double? elevation, double? roll}) {
       if (!mounted) return;
       setState(() {
@@ -2286,6 +2291,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     SceneSync.simWarp = 1;
     _disposeCityRoadTool();
     SimViewControl.instance.clear();
+    CombatHooks.clear();
     final timingsCb = _timingsCb;
     if (timingsCb != null) {
       SchedulerBinding.instance.removeTimingsCallback(timingsCb);

@@ -5,7 +5,7 @@
 
 /// The ways back on screen (docs/plans/colony-secession.md §6): the
 /// independence panel's Reclaim section — negotiate, the petitions, the
-/// player's standing, and force's empty slot — and the card that shows the
+/// player's standing, and force — and the card that shows the
 /// terms a colony rejoined under while they run.
 ///
 /// A thin read over `CityReclaimSim` in the domain: the colony states its
@@ -21,6 +21,7 @@ import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import 'app_theme.dart';
+import 'combat/combat_hooks.dart';
 
 String _pct(double v) => '${(v * 100).round()}%';
 
@@ -106,11 +107,29 @@ class _ReclaimSectionState extends State<ReclaimSection> {
             style: AppTheme.dim,
           ),
         ),
-        // Force (§6.3) — its place kept, and honest that it is empty.
-        _row(Icons.shield, 'Force', 'Not available yet.', AppTheme.textDim,
-            null,
-            key: const ValueKey('reclaim-force')),
+        // Force (§6.3; combat.md §7A): live where the host runs a war, and
+        // honest that it is not where none can be fought.
+        _forceRow(),
       ],
+    );
+  }
+
+  Widget _forceRow() {
+    final open = CombatHooks.openForce;
+    if (open == null) {
+      return _row(Icons.shield, 'Force', 'Not available here.', AppTheme.textDim, null,
+          key: const ValueKey('reclaim-force'));
+    }
+    final running = CombatHooks.forceStatus?.call(city);
+    return _row(
+      Icons.shield,
+      running == null ? 'Force' : 'Force — operation under way',
+      running ??
+          'Take it with troopers from your other colonies, and hold it under '
+              'guard. Every death is a grievance it keeps.',
+      AppTheme.warn,
+      () => open(context, city),
+      key: const ValueKey('reclaim-force'),
     );
   }
 

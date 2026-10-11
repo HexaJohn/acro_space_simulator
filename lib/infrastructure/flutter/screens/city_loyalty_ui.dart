@@ -29,6 +29,7 @@ IconData loyaltyIcon(String key) => switch (key) {
       'revolt' => Icons.local_fire_department,
       'petition' => Icons.handshake,
       'terms' => Icons.gavel,
+      'occupied' => Icons.shield,
       _ => Icons.sentiment_dissatisfied,
     };
 

@@ -96,6 +96,48 @@ void main() {
     expect(launch.onPressed, isNull);
   });
 
+  testWidgets('against an independent colony: take it, ROE, a garrison of one at '
+      'least, and the command carries the ROE', (t) async {
+    t.view.physicalSize = const Size(1200, 2000);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final launched = <LaunchOperationCommand>[];
+    final rebels = moon('tgt')..population = 80;
+    rebels.loyalty
+      ..allegiance = Allegiance.independent
+      ..stage = LoyaltyStage.seceded
+      ..independentAtS = 0;
+    await t.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: OperationPlannerSheet(
+          target: rebels,
+          sources: [source()],
+          registry: OperationRegistry(),
+          onLaunch: launched.add,
+        ),
+      ),
+    ));
+    expect(find.text('Take Rebel Port by force'), findsOneWidget);
+    expect(find.text('Garrison to hold the colony'), findsOneWidget);
+    expect(find.textContaining('A win occupies it'), findsOneWidget);
+    await t.tap(find.byKey(const Key('planner-roe-standard')));
+    await t.pump();
+    expect(find.textContaining('kill townsfolk'), findsOneWidget);
+    for (var i = 0; i < 300; i++) {
+      await t.pump(const Duration(milliseconds: 16));
+    }
+    expect(find.textContaining('You lose'), findsOneWidget);
+    expect(find.textContaining('; its defenders'), findsOneWidget);
+    await t.ensureVisible(find.byKey(const Key('planner-launch')));
+    await t.pump();
+    await t.tap(find.byKey(const Key('planner-launch')));
+    await t.pump();
+    final cmd = launched.single;
+    expect(cmd.roe, 'standard');
+    expect(cmd.kitDays, 6);
+    expect(cmd.garrison, greaterThanOrEqualTo(1));
+  });
+
   test('sources are every other colony that takes orders', () {
     final a = moon('a'), b = moon('b'), t0 = moon('t');
     b.loyalty.allegiance = Allegiance.independent;

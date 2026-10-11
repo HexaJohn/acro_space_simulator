@@ -3,7 +3,8 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
-/// The planner for retaking a seized spaceport (docs/plans/combat.md §7.9).
+/// The force planner (docs/plans/combat.md §7.9, §7A): retaking a seized
+/// spaceport, or taking an independent colony and holding it.
 ///
 /// It shows what the player can send and from where, and what it will likely
 /// cost — a spread of outcomes from the same resolver the battle runs, never
@@ -74,6 +75,10 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
   final Map<String, int> _counts = {};
   double _kitDays = 3;
   int _garrison = 2;
+  Roe _roe = Roe.restrained;
+
+  /// An independent colony: taken and occupied, not a port retaken.
+  bool get _assault => _target.independent;
 
   OperationPreview? _preview;
   String? _refusal;
@@ -89,6 +94,9 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
         if (t.ready) _counts[_key(s.colonyId, t.siteId)] = t.available;
       }
     }
+    // An assault fights over two objectives or more: three days of kit is
+    // one port's worth.
+    if (_assault) _kitDays = 6;
     _garrison = _defaultGarrison();
     _replan();
   }
@@ -108,7 +116,10 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
   }
 
   int _defaultGarrison() {
-    final want = (_target.population * 0.01).ceil().clamp(2, 1 << 20);
+    // A port: a few to hold the pads. A colony: enough to sit on all of it,
+    // full suppression at 4% of its people (city_occupation.dart).
+    final share = _assault ? 0.04 : 0.01;
+    final want = (_target.population * share).ceil().clamp(2, 1 << 20);
     return want > _total ? _total : want;
   }
 
@@ -123,14 +134,24 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
   /// the one the launch would take, so the preview is of this decision.
   void _replan() {
     _ticker?.cancel();
-    final planned = planPortRetake(
-      operationId: widget.registry.nextOperationId,
-      target: _target,
-      sources: _sources,
-      draws: _draws,
-      kitDays: _kitDays,
-      garrison: _garrison,
-    );
+    final planned = _assault
+        ? planColonyAssault(
+            operationId: widget.registry.nextOperationId,
+            target: _target,
+            sources: _sources,
+            draws: _draws,
+            kitDays: _kitDays,
+            garrison: _garrison,
+            roe: _roe,
+          )
+        : planPortRetake(
+            operationId: widget.registry.nextOperationId,
+            target: _target,
+            sources: _sources,
+            draws: _draws,
+            kitDays: _kitDays,
+            garrison: _garrison,
+          );
     _refusal = planned.refusal;
     final op = planned.operation;
     _preview = op == null ? null : OperationPreview(op);
@@ -152,6 +173,7 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
       draws: [for (final d in _draws) (colonyId: d.colonyId, siteId: d.siteId, count: d.count)],
       kitDays: _kitDays,
       garrison: _garrison,
+      roe: _roe.name,
     ));
     Navigator.of(context).maybePop();
   }
@@ -167,29 +189,39 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Retake the spaceport by force', style: AppTheme.heading),
+              Text(_assault ? 'Take ${widget.target.name} by force' : 'Retake the spaceport by force',
+                  style: AppTheme.heading),
               const SizedBox(height: 4),
               Text(
-                  'Rebels hold ${widget.target.name}\'s spaceport. Troopers from your '
-                  'other colonies can take it back.',
+                  _assault
+                      ? '${widget.target.name} is independent and takes no orders. '
+                          'Troopers from your other colonies can take its seat, and '
+                          'whatever stands in the way.'
+                      : 'Rebels hold ${widget.target.name}\'s spaceport. Troopers from your '
+                          'other colonies can take it back.',
                   style: AppTheme.dim),
               const SizedBox(height: 12),
               if (_sources.isEmpty || !readyAnywhere) _noSources(),
               for (final s in _sources) ..._sourceRows(s),
               if (_total > 0) ...[
-                _sliderRow('Days of supplies', '${_kitDays.round()}', _kitDays, 1, 6, 5,
+                _sliderRow('Days of supplies', '${_kitDays.round()}', _kitDays, 1, 10, 9,
                     (v) => setState(() {
                           _kitDays = v.roundToDouble();
                           _replan();
                         })),
                 _sliderRow(
-                    'Garrison to hold the port', '$_garrison', _garrison.toDouble(), 0,
-                    _total.toDouble(), _total, (v) {
+                    _assault ? 'Garrison to hold the colony' : 'Garrison to hold the port',
+                    '$_garrison',
+                    _garrison.toDouble(),
+                    _assault ? 1 : 0,
+                    _total.toDouble(),
+                    _assault ? _total - 1 : _total, (v) {
                   setState(() {
                     _garrison = v.round();
                     _replan();
                   });
                 }),
+                if (_assault) _roeRow(),
               ],
               const SizedBox(height: 8),
               _previewBox(),
@@ -219,6 +251,30 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
       ),
     );
   }
+
+  Widget _roeRow() => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(children: [
+          const SizedBox(width: 170, child: Text('Rules of engagement', style: AppTheme.body)),
+          Expanded(
+            child: Wrap(spacing: 6, children: [
+              for (final (roe, label) in const [
+                (Roe.restrained, 'Restrained'),
+                (Roe.standard, 'Standard'),
+              ])
+                ChoiceChip(
+                  key: Key('planner-roe-${roe.name}'),
+                  label: Text(label),
+                  selected: _roe == roe,
+                  onSelected: (_) => setState(() {
+                    _roe = roe;
+                    _replan();
+                  }),
+                ),
+            ]),
+          ),
+        ]),
+      );
 
   Widget _noSources() => Padding(
         padding: const EdgeInsets.only(bottom: 8),
@@ -327,7 +383,7 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
           const SizedBox(height: 6),
           Text(
               'You lose ${_span(p, (r) => r.attackerLost, 'no')} troopers, killed or wounded; '
-              'the rebels ${_span(p, (r) => r.defenderLost, 'none')}. Usually decided in about '
+              '${_assault ? 'its defenders' : 'the rebels'} ${_span(p, (r) => r.defenderLost, 'none')}. Usually decided in about '
               '${(p.quantile((r) => r.seconds, 0.5) / 120).toStringAsFixed(1)} days.',
               style: AppTheme.dim),
         ],
@@ -335,13 +391,26 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
     );
   }
 
-  List<Widget> _costs() => [
-        for (final line in const [
+  List<String> get _costLines => _assault
+      ? [
+          'Troopers are your colonists: the dead are lost to their home colony.',
+          'Its defenders are its colonists too: every one killed is a grievance it '
+              'keeps.',
+          'A win occupies it: it takes your orders under guard and must still be '
+              'governed. Its charter comes back only when its loyalty does.',
+          if (_roe == Roe.standard)
+            'Standard rules of engagement hit harder, and kill townsfolk alongside '
+                'its defenders — fewer where shelters hold them.',
+        ]
+      : const [
           'Troopers are your colonists: the dead are lost to their home colony.',
           'Force wins no loyalty. Retaking the port costs some.',
           'Retaking the port reopens it: settlers who cannot be fed will leave. '
               'Only governing the colony ends the standoff.',
-        ])
+        ];
+
+  List<Widget> _costs() => [
+        for (final line in _costLines)
           Padding(
             padding: const EdgeInsets.only(bottom: 3),
             child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [

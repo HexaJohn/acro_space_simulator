@@ -18,6 +18,7 @@ import 'package:acro_space_simulator/infrastructure/flutter/screens/city_control
 import 'package:acro_space_simulator/infrastructure/flutter/screens/city_edit_overlay.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/city_game_hud.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/city_site_actions.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/combat/combat_hooks.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -789,6 +790,34 @@ void main() {
 
   // ---- The ways back on screen (§6) -----------------------------------------
 
+  testWidgets('force: live where the host runs a war, and it opens the planner',
+      (t) async {
+    t.view.physicalSize = const Size(1600, 1400);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    addTearDown(CombatHooks.clear);
+    final city = independent();
+    CitySim? opened;
+    CombatHooks.openForce = (_, c) => opened = c;
+    await t.pumpWidget(
+        MaterialApp(home: Scaffold(body: CityGameHud(city: city))));
+    await t.pump();
+    await t.tap(find.text('Independent'));
+    await t.pumpAndSettle();
+    final force = t.widget<InkWell>(find.byKey(const ValueKey('reclaim-force')));
+    expect(force.onTap, isNotNull);
+    await t.tap(find.byKey(const ValueKey('reclaim-force')));
+    await t.pump();
+    expect(opened, same(city));
+    // With an operation already under way, the row says so.
+    CombatHooks.forceStatus = (_) => 'Fighting for it · day 1.2';
+    await t.tap(find.text('CLOSE'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Independent'));
+    await t.pumpAndSettle();
+    expect(find.text('Fighting for it · day 1.2'), findsOneWidget);
+  });
+
   testWidgets('negotiate: hear the terms, decline, then accept', (t) async {
     t.view.physicalSize = const Size(1600, 1400);
     t.view.devicePixelRatio = 1.0;
@@ -800,10 +829,12 @@ void main() {
     await t.pump();
     await t.tap(find.text('Independent'));
     await t.pumpAndSettle();
+    // Force (combat.md §7A): unavailable in a host with no war to fight —
+    // this HUD on its own — and live where one sets the hook.
     final force =
         t.widget<InkWell>(find.byKey(const ValueKey('reclaim-force')));
-    expect(force.onTap, isNull, reason: 'force is not available yet');
-    expect(find.text('Not available yet.'), findsOneWidget);
+    expect(force.onTap, isNull, reason: 'no host runs a war here');
+    expect(find.text('Not available here.'), findsOneWidget);
     expect(find.byKey(const ValueKey('reclaim-reputation')), findsOneWidget);
 
     final terms = city.negotiatedTerms();
