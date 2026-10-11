@@ -74,6 +74,9 @@ class _CombatViewState {
   /// Dev only: aim at the nearest defender and hold the trigger.
   bool devAutofire = false;
 
+  /// The cannon's blasts as smoke sites, this frame.
+  List<CombatFxSite> blastSites = const [];
+
   /// Spike S item 4 (§7F): 48 soldiers and a full load of tracers drawn in
   /// front of the walker, to price the renderer.
   bool devStress = false;
@@ -379,6 +382,7 @@ extension _SimulationViewCombat on _SimulationViewState {
         if (o.contested)
           CombatFxSite('${hit.op.id}:${o.id}', hit.city.body.id.value,
               hit.city.localToBodyFixed(Vec2(o.e, o.n), bodyRadiusM: groundAt(o.e, o.n)), o.heat),
+      ..._combatState.blastSites,
       // A strike's dust and smoke, for a while after it lands.
       for (final s in frame.strikes)
         if (!s.incoming && s.ageS < 12)
@@ -807,7 +811,10 @@ extension _SimulationViewCombat on _SimulationViewState {
   Formation? _squadAtLz(Operation op, {int? prefer}) {
     Formation? best;
     for (final f in op.formations) {
-      if (f.side != CombatSide.attacker || f.kind == FormationKind.emplacement) continue;
+      // A trooper's squad: not a turret's crew, not an APC's.
+      if (f.side != CombatSide.attacker || f.kind == FormationKind.emplacement || f.kind == FormationKind.armour) {
+        continue;
+      }
       if (!f.alive || f.at == FormationAt.transit) continue;
       if (f.id == prefer) return f;
       best ??= f;
@@ -898,6 +905,27 @@ extension _SimulationViewCombat on _SimulationViewState {
     st.commandOp = null;
     // Your squad is the bubble's while you fight with it (§7H).
     _operations.inbox.enqueue(LiveSquadCommand(const PlayerId('player'), 0, op.id, squad.id));
+  }
+
+  /// F: into the nearest of your APCs within reach, or out of the one you
+  /// drive (§7L).
+  void _boardOrAlight() {
+    final st = _combatState;
+    final live = st.live;
+    final op = live == null ? null : _operations.byId(live.opId);
+    final city = op == null ? null : _cityById(op.targetColonyId);
+    final r = op == null ? null : _rasterFor(op);
+    final body = city == null ? null : _universe.current().body(city.body.id);
+    if (live == null || city == null || r == null || body == null) return;
+    if (live.driving != null) {
+      final at = live.alight();
+      if (at != null) {
+        final dir = city.localToBodyFixed(Vec2(at.$1, at.$2), bodyRadiusM: body.radius).normalized;
+        _freecamRelLocal = dir * ((r.radiusAt(at.$1, at.$2) ?? body.radius) + walkEyeHeight);
+      }
+      return;
+    }
+    live.board(st.lastEye.$1, st.lastEye.$2);
   }
 
   /// A squad order from the number keys (§7H): 1 follow, 2 hold, 3 take the
@@ -994,6 +1022,17 @@ extension _SimulationViewCombat on _SimulationViewState {
       return;
     }
     _localFrame(op, city, body.radius);
+    // Driving: the keys drive the APC and the eye rides its turret (§7L).
+    final car = live.driving;
+    if (car != null) {
+      double key(LogicalKeyboardKey k) => _keysDown.contains(k) ? 1.0 : 0.0;
+      live.drive(frameDt.clamp(0.0, 0.1), key(LogicalKeyboardKey.keyW) - key(LogicalKeyboardKey.keyS),
+          key(LogicalKeyboardKey.keyA) - key(LogicalKeyboardKey.keyD));
+      final dir = city.localToBodyFixed(Vec2(car.e, car.n), bodyRadiusM: body.radius).normalized;
+      _freecamRelLocal = dir * ((r.radiusAt(car.e, car.n) ?? body.radius) + 2.8);
+      _walkVertVel = 0;
+      _walkGrounded = true;
+    }
     if (st.faceObjective != null && --st.faceInFrames <= 0) {
       _faceToward(op, city, st.faceObjective!);
       st.faceObjective = null;
@@ -1035,6 +1074,10 @@ extension _SimulationViewCombat on _SimulationViewState {
     st
       ..lastEye = (e, n, h)
       ..lastAim = aim;
+    if (live.driving != null && trigger) {
+      live.fireCannon(aim);
+      trigger = false;
+    }
     live.step(frameDt.clamp(0.0, 0.1),
         eye: (e, n, h),
         aim: aim,
@@ -1074,7 +1117,8 @@ extension _SimulationViewCombat on _SimulationViewState {
           _liveBF(city, r, body.radius, u.e, u.n, 0),
           attacker: u.side == CombatSide.attacker,
           emplacement: u.kind == FormationKind.emplacement,
-          moving: (u.te - u.e).abs() + (u.tn - u.n).abs() > 0.3,
+          moving: (u.te - u.e).abs() + (u.tn - u.n).abs() > 0.3 || u.formationId == live.drivingFormation,
+          vehicleForwardBF: u.vehicle ? st.frameE * math.cos(u.heading) + st.frameN * math.sin(u.heading) : null,
         ),
     ];
     CombatUnitState.tracers = [
@@ -1082,6 +1126,15 @@ extension _SimulationViewCombat on _SimulationViewState {
         CombatTracerMark(bodyId, _liveBF(city, r, body.radius, t.fromE, t.fromN, t.fromH + st.drawnOffset),
             _liveBF(city, r, body.radius, t.toE, t.toN, t.toH + st.drawnOffset),
             attacker: t.side == CombatSide.attacker),
+      for (final c in live.rounds)
+        CombatTracerMark(bodyId, _liveBF(city, r, body.radius, c.e - c.de * 6, c.n - c.dn * 6, c.h - c.dh * 6),
+            _liveBF(city, r, body.radius, c.e, c.n, c.h),
+            attacker: c.side == CombatSide.attacker),
+    ];
+    st.blastSites = [
+      for (final b in live.blasts)
+        CombatFxSite('blast:${b.$1.round()}:${b.$2.round()}', bodyId, _liveBF(city, r, body.radius, b.$1, b.$2, 0),
+            (1 - b.$3 / 1.2).clamp(0.3, 1.0)),
     ];
     if (st.devStress) {
       // Ahead of the walker along its heading: a 6 × 8 block 15–50 m out.
@@ -1154,8 +1207,11 @@ extension _SimulationViewCombat on _SimulationViewState {
                   ),
                 ),
                 const SizedBox(height: 6),
-                Text(live.reloadS > 0 ? 'Reloading…' : 'Rifle ${live.magazine} / $kRifleMagazine',
-                    style: AppTheme.mono),
+                if (live.driving case final car?)
+                  Text('Driving the APC · hull ${car.hp.round()} · F steps out', style: AppTheme.mono)
+                else
+                  Text(live.reloadS > 0 ? 'Reloading…' : 'Rifle ${live.magazine} / $kRifleMagazine',
+                      style: AppTheme.mono),
                 Text('${live.kills} down · ${squad == null ? '' : '${squad.count} in your squad'}',
                     style: AppTheme.dim),
                 Text(
@@ -2046,6 +2102,31 @@ extension _SimulationViewCombat on _SimulationViewState {
       did['possess'] = possess;
     }
     if (p['stress'] != null) _combatState.devStress = p['stress'] == '1';
+    // The APC (§7L): board=1 boards or steps out; apc=1 puts one at the LZ
+    // (a dev shortcut past the Fortress and its bay).
+    if (p['board'] != null && _liveJoined) {
+      _boardOrAlight();
+      did['board'] = _combatState.live?.drivingFormation;
+    }
+    if (p['apc'] != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      if (running != null) {
+        running.addAttacker(Formation(
+          id: running.nextFormationId,
+          side: CombatSide.attacker,
+          faction: Factions.player,
+          kind: FormationKind.armour,
+          counterClass: CounterClass.arm,
+          count: 3,
+          quality: 1,
+          morale: 0.9,
+          kitDays: 3,
+          at: running.lzId,
+          arriveStep: running.clock.steps,
+        ));
+        did['apc'] = running.nextFormationId - 1;
+      }
+    }
     final squadOrder = p['squad'];
     if (squadOrder != null && _combatState.live != null) {
       final i = squadOrder.indexOf(':');
@@ -2142,6 +2223,8 @@ extension _SimulationViewCombat on _SimulationViewState {
           'order': l.order.name,
           'attack': l.attackTarget,
           'squadUnits': l.units.where((u) => u.squad).length,
+          'driving': l.drivingFormation,
+          'vehicles': [for (final u in l.units) if (u.vehicle) [u.formationId, u.e.round(), u.n.round(), u.hp.round()]],
           'fieldsBuilt': l.nav?.built,
           // Why nobody fires: defenders in range of the player, those with
           // sight, and those with sight over the ground alone (no walls).

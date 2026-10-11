@@ -1400,6 +1400,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         return KeyEventResult.handled;
       }
 
+      // In a battle, F boards an APC or steps out of it (combat.md §7L).
+      if (e.logicalKey == LogicalKeyboardKey.keyF && _liveJoined) {
+        _boardOrAlight();
+        return KeyEventResult.handled;
+      }
       // F is the head lamp. Lives on the terrain material, not the scene:
       // the engine has one directional light and it belongs to the sun.
       if (e.logicalKey == LogicalKeyboardKey.keyF) {
@@ -2004,7 +2009,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           _stepEva(fwd, strafe, frameDt);
         } else {
           // Down in a battle, the body lies where it fell.
-          _stepWalk(_liveDead ? 0 : fwd, _liveDead ? 0 : strafe, frameDt);
+          final still = _liveDead || (_combatState.live?.driving != null);
+          _stepWalk(still ? 0 : fwd, still ? 0 : strafe, frameDt);
         }
         _stepDrill(frameDt);
         _syncWalkerBody();

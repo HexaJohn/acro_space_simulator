@@ -33,7 +33,7 @@ import 'coord_convert.dart';
 
 class CombatUnitMark {
   const CombatUnitMark(this.key, this.bodyId, this.feetBF,
-      {required this.attacker, this.emplacement = false, this.moving = false});
+      {required this.attacker, this.emplacement = false, this.moving = false, this.vehicleForwardBF});
 
   /// Stable while the unit lives: `<formation>:<member>`.
   final String key;
@@ -44,6 +44,10 @@ class CombatUnitMark {
 
   /// Walking this frame: drawn from the per-frame batch.
   final bool moving;
+
+  /// An APC, and which way it points (body-fixed unit vector); null for a
+  /// soldier or a gun.
+  final Vector3? vehicleForwardBF;
 }
 
 class CombatTracerMark {
@@ -177,6 +181,7 @@ class CombatUnitNodes {
       if (u.moving || u.bodyId != bodyId) continue;
       buf
         ..write(u.key)
+        ..write(u.vehicleForwardBF == null ? '' : '>${(u.vehicleForwardBF!.x * 50).round()},${(u.vehicleForwardBF!.y * 50).round()}')
         ..write('@')
         ..write((u.feetBF.x * 4).round())
         ..write(',')
@@ -258,9 +263,28 @@ class CombatUnitNodes {
     final fx = u.feetBF.x - anchor.x, fy = u.feetBF.y - anchor.y, fz = u.feetBF.z - anchor.z;
     final l = u.feetBF.length;
     final z = [u.feetBF.x / l, u.feetBF.y / l, u.feetBF.z / l];
-    final (x, y) = _basis(z);
+    var (x, y) = _basis(z);
+    final fwd = u.vehicleForwardBF;
+    if (fwd != null) {
+      // Along its heading: y forward, x to its right.
+      final f = [fwd.x, fwd.y, fwd.z];
+      final d = f[0] * z[0] + f[1] * z[1] + f[2] * z[2];
+      var yy = [f[0] - z[0] * d, f[1] - z[1] * d, f[2] - z[2] * d];
+      final yl = math.sqrt(yy[0] * yy[0] + yy[1] * yy[1] + yy[2] * yy[2]);
+      if (yl > 1e-6) {
+        yy = [yy[0] / yl, yy[1] / yl, yy[2] / yl];
+        y = yy;
+        x = [yy[1] * z[2] - yy[2] * z[1], yy[2] * z[0] - yy[0] * z[2], yy[0] * z[1] - yy[1] * z[0]];
+      }
+    }
     void at(double h, double hx, double hy, double hz, {double fwd = 0}) =>
         b.box(fx + z[0] * h + y[0] * fwd, fy + z[1] * h + y[1] * fwd, fz + z[2] * h + y[2] * fwd, x, y, z, hx, hy, hz);
+    if (fwd != null) {
+      at(0.9, 1.3, 2.6, 0.7); // hull
+      at(1.85, 0.7, 0.9, 0.3); // turret
+      at(1.9, 0.08, 1.4, 0.08, fwd: 1.6); // gun
+      return;
+    }
     if (u.emplacement) {
       at(0.45, 0.8, 0.8, 0.45);
       at(1.05, 0.35, 0.35, 0.18);

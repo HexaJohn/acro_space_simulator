@@ -61,6 +61,36 @@ abstract final class LiveTuning {
   static double defenderAccuracy = 1.0;
 }
 
+/// The APC (§7L): its cannon, its pace, and what small arms do to it.
+const double kCannonReloadS = 2.0;
+const double kCannonRoundMps = 200;
+const double kCannonRangeM = 350;
+const double kCannonBlastM = 4;
+const double kCannonDamage = 100;
+const double kApcTopMps = 9;
+const double kApcTurnRadPerS = 1.0;
+const double kApcBoardM = 6;
+
+/// Damage against armour by who fires: small arms barely scratch it, the
+/// HMG a little more, the AT gun is built for it.
+double armourDamageScale(FormationKind shooter, {bool at = false}) => at
+    ? 1.6
+    : switch (shooter) {
+        FormationKind.emplacement => 0.6,
+        FormationKind.armour => 1.0,
+        _ => 0.25,
+      };
+
+/// A cannon round in flight: where it is, its direction (unit, flat frame),
+/// and how far it has left to go.
+class CannonRound {
+  CannonRound(this.e, this.n, this.h, this.de, this.dn, this.dh, this.side, {this.left = kCannonRangeM});
+  double e, n, h;
+  final double de, dn, dh;
+  final CombatSide side;
+  double left;
+}
+
 /// A soldier's pace across the battle, m/s (§7H).
 const double kLiveWalkMps = 2.5;
 
@@ -101,6 +131,16 @@ class LiveUnit {
 
   /// 1.0 trained, 0.5 armed militia, 0.3 improvised: how well it shoots.
   double quality = 1;
+
+  /// An emplacement of class EMP-AT (§7L).
+  bool antiArmour = false;
+
+  /// An APC: its heading (radians from east), speed, and crew already
+  /// lost off the battle.
+  double heading = 0;
+  double speed = 0;
+  int crewLost = 0;
+  bool get vehicle => kind == FormationKind.armour;
 
   /// Its formation's count when last mirrored: a kill is pending until the
   /// count falls below it.
@@ -158,6 +198,17 @@ class LiveBattle {
 
   final List<LiveUnit> units = [];
   final List<Tracer> tracers = [];
+  final List<CannonRound> rounds = [];
+
+  /// Blasts this step, for the renderer: (east, north, age s).
+  final List<(double, double, double)> blasts = [];
+
+  /// The APC the player is driving, by its formation; null on foot.
+  int? drivingFormation;
+  LiveUnit? get driving => drivingFormation == null
+      ? null
+      : units.where((u) => u.formationId == drivingFormation && u.vehicle).firstOrNull;
+  double _cannonS = 0;
 
   double hp = 100;
   int magazine = kRifleMagazine;
@@ -234,7 +285,9 @@ class LiveBattle {
       // Broken, a squad falls back out of the fight, as the resolver's do.
       if (mine.broken && !(!playerless && id == playerFormationId)) continue;
       final isPlayers = !playerless && id == playerFormationId;
-      final count = mine.count - _pendingFor(mine) - (isPlayers && !dead ? 1 : 0);
+      final count = mine.kind == FormationKind.armour
+          ? 1
+          : mine.count - _pendingFor(mine) - (isPlayers && !dead ? 1 : 0);
       final at = op.graph.byId(mine.at);
       for (var m = 0; m < count && room[mine.side]! > 0; m++) {
         room[mine.side] = room[mine.side]! - 1;
@@ -242,6 +295,7 @@ class LiveBattle {
         final (se, sn) = isPlayers || at == null ? (pe - 3 - m * 1.5, pn - 2 + (m % 3) * 1.5) : _slot(op, at, mine, m);
         final u = have ??
             (LiveUnit(mine.id, m, mine.side, mine.kind, mine.at, se, sn)
+              ..hp = mine.kind == FormationKind.armour ? 100.0 * mine.count : 100
               ..cooldownS = 1 + 2 * combatUnit(seed, mine.id, m));
         want.add(u
           ..squad = true
@@ -255,9 +309,11 @@ class LiveBattle {
         if (owned.contains(f.id)) continue;
         final marching = f.at == o.id && t < f.arriveStep && f.fromAt != null;
         if (!f.presentAt(o.id, t) && !marching) continue;
-        final count = f.count - _pendingFor(f);
-        for (var m = 0; m < count && room[f.side]! > 0; m++) {
-          room[f.side] = room[f.side]! - 1;
+        final count = f.kind == FormationKind.armour ? (f.alive ? 1 : 0) : f.count - _pendingFor(f);
+        // Vehicles stand outside the soldiers' cap: an APC is one row.
+        final capped = f.kind != FormationKind.armour;
+        for (var m = 0; m < count && (!capped || room[f.side]! > 0); m++) {
+          if (capped) room[f.side] = room[f.side]! - 1;
           final (se, sn) = _slot(op, o, f, m);
           final cover = f.side == CombatSide.defender ? o.fDef + (o.dugIn ? kDigInFortification : 0) : 1.0;
           final have = _unit(f.id, m);
@@ -277,6 +333,8 @@ class LiveBattle {
           final from = marching ? op.graph.byId(f.fromAt!) : null;
           final (be, bn) = from != null && raster.contains(from.e, from.n) ? _slot(op, from, f, m) : (se, sn);
           want.add(LiveUnit(f.id, m, f.side, f.kind, o.id, be, bn)
+            ..hp = f.kind == FormationKind.armour ? 100.0 * f.count : 100
+            ..antiArmour = f.counterClass == CounterClass.empAt
             ..cover = cover
             ..oe = o.e
             ..on = o.n
@@ -340,8 +398,14 @@ class LiveBattle {
       tr.ageS += dt;
     }
     tracers.removeWhere((tr) => tr.ageS > 0.25);
+    for (var i = 0; i < blasts.length; i++) {
+      blasts[i] = (blasts[i].$1, blasts[i].$2, blasts[i].$3 + dt);
+    }
+    blasts.removeWhere((b) => b.$3 > 1.2);
     _squadTargets();
     _move(dt);
+    _rounds(dt);
+    _armourFire(dt);
     _defend(dt, eye);
     _squadFire(dt);
     _squadArrival();
@@ -390,7 +454,7 @@ class LiveBattle {
     final reach = kLiveWalkMps * dt;
     final g = nav;
     for (final u in units) {
-      if (u.kind == FormationKind.emplacement) continue;
+      if (u.kind == FormationKind.emplacement || u.formationId == drivingFormation) continue;
       final de = u.te - u.e, dn = u.tn - u.n;
       final d = math.sqrt(de * de + dn * dn);
       if (d < 0.3) continue;
@@ -430,7 +494,7 @@ class LiveBattle {
       var d = double.infinity;
       LiveUnit? other;
       var atPlayer = false;
-      if (!dead) {
+      if (!dead && drivingFormation == null) {
         final dp = math.sqrt((eye.$1 - u.e) * (eye.$1 - u.e) + (eye.$2 - u.n) * (eye.$2 - u.n));
         if (dp <= kDefenderRangeM && _sees(from, eye)) {
           d = dp;
@@ -464,7 +528,12 @@ class LiveBattle {
       }
       final a = other!;
       tracers.add(Tracer(u.e, u.n, 1.4, a.e + miss, a.n - miss * 0.5, 1.2, CombatSide.defender));
-      if (hit && a.squad) _wound(a, kDefenderDamage);
+      if (!hit) continue;
+      if (a.vehicle && (a.squad || a.formationId == drivingFormation)) {
+        _wound(a, kDefenderDamage * armourDamageScale(u.kind, at: u.antiArmour));
+      } else if (a.squad) {
+        _wound(a, kDefenderDamage);
+      }
     }
   }
 
@@ -501,6 +570,23 @@ class LiveBattle {
   /// the member.
   void _wound(LiveUnit u, double damage) {
     u.hp -= damage;
+    if (u.vehicle) {
+      // A crew member off the battle for every 100 lost; the vehicle burns
+      // with the last.
+      final lost = ((u.formationCount * 100 - u.hp) / 100).floor().clamp(0, u.formationCount);
+      while (u.crewLost < lost) {
+        u.crewLost++;
+        casualties.add(u.formationId);
+      }
+      if (u.hp > 0) return;
+      if (u.formationId == drivingFormation) {
+        drivingFormation = null;
+        hp = math.min(hp, 50); // thrown clear, hurt
+      }
+      units.remove(u);
+      _pending.add((u.formationId, u.formationCount));
+      return;
+    }
     if (u.hp > 0) return;
     if (u.side == CombatSide.defender) kills++;
     casualties.add(u.formationId);
@@ -586,6 +672,126 @@ class LiveBattle {
       if (best == null || t < best.$2) best = (u, t);
     }
     return best;
+  }
+
+  /// Boards the nearest of your APCs within [kApcBoardM] of ([e], [n]):
+  /// true when aboard.
+  bool board(double e, double n) {
+    LiveUnit? best;
+    var bd = kApcBoardM * kApcBoardM;
+    for (final u in units) {
+      if (!u.vehicle || u.side != CombatSide.attacker) continue;
+      final d = (u.e - e) * (u.e - e) + (u.n - n) * (u.n - n);
+      if (d <= bd) {
+        bd = d;
+        best = u;
+      }
+    }
+    if (best == null) return false;
+    drivingFormation = best.formationId;
+    return true;
+  }
+
+  /// Steps out; where to stand (beside the vehicle), or null on foot.
+  (double, double)? alight() {
+    final v = driving;
+    drivingFormation = null;
+    if (v == null) return null;
+    v
+      ..te = v.e
+      ..tn = v.n
+      ..speed = 0;
+    return (v.e - 3 * math.sin(v.heading), v.n + 3 * math.cos(v.heading));
+  }
+
+  /// One frame of driving: [throttle] −1..1, [steer] −1..1 (positive left).
+  void drive(double dt, double throttle, double steer) {
+    final v = driving;
+    if (v == null) return;
+    v.heading += steer * kApcTurnRadPerS * dt;
+    final want = throttle * kApcTopMps;
+    v.speed += (want - v.speed).clamp(-6 * dt, 6 * dt);
+    final ne = v.e + math.cos(v.heading) * v.speed * dt, nn = v.n + math.sin(v.heading) * v.speed * dt;
+    final g = nav;
+    final k = g?.cellOf(ne, nn);
+    if (g != null && k != null && g.blocked[k] == 1) {
+      v.speed = 0; // a wall
+      return;
+    }
+    v
+      ..e = ne
+      ..n = nn
+      ..te = ne
+      ..tn = nn;
+  }
+
+  /// The driven APC's cannon along [aim] from its turret: true if it fired.
+  bool fireCannon((double, double, double) aim) {
+    final v = driving;
+    if (v == null || _cannonS > 0) return false;
+    _cannonS = kCannonReloadS;
+    rounds.add(CannonRound(v.e + aim.$1 * 3, v.n + aim.$2 * 3, 2.4, aim.$1, aim.$2, aim.$3, CombatSide.attacker));
+    return true;
+  }
+
+  /// Rounds fly; one that reaches a unit or the ground bursts.
+  void _rounds(double dt) {
+    _cannonS = math.max(0, _cannonS - dt);
+    for (final r in [...rounds]) {
+      final step = kCannonRoundMps * dt;
+      var burst = false;
+      // Half-metre steps: a soldier is 0.8 m across.
+      for (var s = 0.0; s < step && !burst; s += 0.5) {
+        r
+          ..e += r.de * 0.5
+          ..n += r.dn * 0.5
+          ..h += r.dh * 0.5
+          ..left -= 0.5;
+        if (r.h <= 0 || r.left <= 0) burst = true;
+        for (final u in units) {
+          if (u.side == r.side) continue;
+          final reach = u.vehicle || u.kind == FormationKind.emplacement ? 1.8 : 0.8;
+          if ((u.e - r.e) * (u.e - r.e) + (u.n - r.n) * (u.n - r.n) < reach * reach && r.h < 2.5) burst = true;
+        }
+      }
+      if (!burst) continue;
+      rounds.remove(r);
+      blasts.add((r.e, r.n, 0));
+      for (final u in [...units]) {
+        if (u.side == r.side || !units.contains(u)) continue;
+        final d = math.sqrt((u.e - r.e) * (u.e - r.e) + (u.n - r.n) * (u.n - r.n));
+        if (d > kCannonBlastM) continue;
+        final dmg = (d < kCannonBlastM / 2 ? kCannonDamage : kCannonDamage * 0.4) *
+            (u.kind == FormationKind.emplacement ? 1.2 : 1.0);
+        _wound(u, u.vehicle ? dmg * armourDamageScale(FormationKind.armour) : dmg);
+      }
+    }
+  }
+
+  /// The APCs nobody drives fire their cannon at the nearest defender they
+  /// see, every reload.
+  void _armourFire(double dt) {
+    for (final u in units) {
+      if (!u.vehicle || u.side != CombatSide.attacker || u.formationId == drivingFormation) continue;
+      if (!(u.squad || drivingFormation != null)) continue; // only the bubble's own fight
+      u.cooldownS -= dt;
+      if (u.cooldownS > 0) continue;
+      u.cooldownS = kCannonReloadS + combatUnit(seed, u.formationId * 64, 6000 + u.shots);
+      LiveUnit? t;
+      var d = double.infinity;
+      for (final v in units) {
+        if (v.side != CombatSide.defender) continue;
+        final dv = math.sqrt((v.e - u.e) * (v.e - u.e) + (v.n - u.n) * (v.n - u.n));
+        if (dv < d && dv <= kCannonRangeM && _sees((u.e, u.n, 2.4), (v.e, v.n, 1.0))) {
+          d = dv;
+          t = v;
+        }
+      }
+      if (t == null) continue;
+      u.shots++;
+      final l = math.max(1e-6, d);
+      rounds.add(CannonRound(u.e, u.n, 2.4, (t.e - u.e) / l, (t.n - u.n) / l, (1.0 - 2.4) / l, CombatSide.attacker));
+    }
   }
 
   /// Back on your feet as a trooper of [formationId].
