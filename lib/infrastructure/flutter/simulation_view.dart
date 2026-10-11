@@ -57,6 +57,8 @@ import '../../domain/colony/city/city_starter_kit.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/colony/city/commodity.dart';
 import '../../application/usecases/force_landers.dart';
+import '../../domain/combat/base/base_modules.dart';
+import '../../domain/combat/base/forward_base.dart';
 import '../../domain/combat/combat_frame.dart';
 import '../../domain/combat/formation.dart';
 import '../../domain/combat/lander.dart';

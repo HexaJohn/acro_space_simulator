@@ -138,6 +138,34 @@ void main() {
     expect(cmd.garrison, greaterThanOrEqualTo(1));
   });
 
+  testWidgets('a forward base by default where the lead source can ship one, and a light '
+      'operation at the flick of a switch', (t) async {
+    t.view.physicalSize = const Size(1200, 2200);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final launched = <LaunchOperationCommand>[];
+    final src = source()..stock[Commodity.ore] = 500;
+    await pump(t, [src], launched: launched);
+    expect(find.text('Forward base'), findsOneWidget);
+    expect(find.text('Materiel (ore)'), findsOneWidget);
+    expect(find.textContaining('The base ships 300 ore'), findsOneWidget);
+    await t.ensureVisible(find.byKey(const Key('planner-launch')));
+    await t.tap(find.byKey(const Key('planner-launch')));
+    await t.pump();
+    expect(launched.single.baseMateriel, 300);
+    expect(launched.single.baseSupport, greaterThanOrEqualTo(2));
+    launched.clear();
+    await pump(t, [src], launched: launched);
+    await t.ensureVisible(find.byKey(const Key('planner-base')));
+    await t.tap(find.byKey(const Key('planner-base')));
+    await t.pump();
+    expect(find.textContaining('A light operation'), findsOneWidget);
+    await t.ensureVisible(find.byKey(const Key('planner-launch')));
+    await t.tap(find.byKey(const Key('planner-launch')));
+    await t.pump();
+    expect(launched.single.withBase, isFalse);
+  });
+
   test('sources are every other colony that takes orders', () {
     final a = moon('a'), b = moon('b'), t0 = moon('t');
     b.loyalty.allegiance = Allegiance.independent;

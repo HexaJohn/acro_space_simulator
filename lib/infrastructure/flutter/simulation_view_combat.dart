@@ -380,6 +380,121 @@ extension _SimulationViewCombat on _SimulationViewState {
     });
   }
 
+  void _baseOrder(Operation op, String action, {ModuleKind? kind, SocketKind? ring, int? socket}) =>
+      _operations.inbox.enqueue(BaseOrderCommand(const PlayerId('player'), 0, op.id, action,
+          module: kind?.name, ring: ring?.name, socket: socket));
+
+  /// The drawer's Base section (combat.md §7C): what it has, what it is
+  /// building, and a button for each module an empty socket can take.
+  List<Widget> _baseRows(
+      Operation op, ForwardBase b, BuildContext ctx, Widget Function(String, String) line) {
+    String units(int c) => (c / 100).floor().toString();
+    final status = b.overrun
+        ? 'Overrun'
+        : b.lost
+            ? 'Core lost with its lander'
+            : !b.deployed
+                ? (b.deployAtStep < 0
+                    ? 'Deploys once the squads are down'
+                    : 'Deploying · ${(b.deployAtStep - op.clock.steps).clamp(0, 999)} s')
+                : 'Firebase · ${b.modules.length} built';
+    final rows = <Widget>[
+      const SizedBox(height: 10),
+      Text('Forward base', style: AppTheme.dim),
+      line('Status', status),
+      if (b.deployed && b.standing) ...[
+        line('Materiel', '${units(b.materielC)} (+${(b.unpackC / 100).toStringAsFixed(1)}/s) · '
+            '${units(b.palletsC)} on pallets'),
+        line('Power', '${b.powerDemand.round()}/${b.powerSupply.round()} kW'),
+        line('Personnel', '${b.crewAssigned} crew · ${b.reserve} spare · '
+            '${b.supportDead} dead · ${b.supportWounded} wounded'),
+        line('Stock', 'rations ${units(b.stockOf('rations'))} · ammo ${units(b.stockOf('ammo'))} · '
+            'guns ${units(b.stockOf('guns'))}'),
+        line('Next supply run',
+            b.runs.any((r) => r.arriveStep >= 0) ? 'landing soon' : 'in ${(b.nextRunStep - op.clock.steps).clamp(0, 99999)} s'),
+        if (b.job case final j?)
+          Row(children: [
+            Expanded(
+                child: Text('  Building ${moduleSpec(j.kind).label} · ${j.remainingS} s',
+                    style: AppTheme.body)),
+            TextButton(
+              key: const Key('base-cancel'),
+              onPressed: () {
+                _baseOrder(op, 'cancel');
+                Navigator.of(ctx).maybePop();
+              },
+              child: const Text('Cancel (half back)'),
+            ),
+          ]),
+        for (final ring in SocketKind.values)
+          for (var i = 0; i < b.socketsOf(ring); i++) _socketRow(op, b, ring, i, ctx),
+        if (b.podOnline)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: const Key('base-form-squad'),
+              onPressed: b.reserve > 0 && b.stockOf('guns') >= 100
+                  ? () {
+                      _baseOrder(op, 'formSquad');
+                      Navigator.of(ctx).maybePop();
+                    }
+                  : null,
+              child: Text('Form a squad from the spare (${b.reserve})'),
+            ),
+          ),
+      ],
+    ];
+    return rows;
+  }
+
+  Widget _socketRow(Operation op, ForwardBase b, SocketKind ring, int i, BuildContext ctx) {
+    BaseModule? here;
+    for (final m in b.modules) {
+      if (m.spec.socket == ring && m.socket == i) here = m;
+    }
+    final label = ForwardBase.socketLabel(ring, i);
+    if (here != null) {
+      return Row(children: [
+        Expanded(
+            child: Text('  $label: ${here.spec.label}${here.crewed ? '' : ' (no crew)'}',
+                style: AppTheme.body)),
+        if (!(ring == SocketKind.turret && i == 0))
+          TextButton(
+            key: Key('base-demolish-${ring.name}-$i'),
+            onPressed: () {
+              _baseOrder(op, 'demolish', ring: ring, socket: i);
+              Navigator.of(ctx).maybePop();
+            },
+            child: const Text('Demolish'),
+          ),
+      ]);
+    }
+    if (b.job != null && b.job!.socket == i && moduleSpec(b.job!.kind).socket == ring) {
+      return Text('  $label: building', style: AppTheme.dim);
+    }
+    final options = [
+      for (final s in kBaseModules)
+        if (s.socket == ring) s,
+    ];
+    return Wrap(crossAxisAlignment: WrapCrossAlignment.center, spacing: 4, children: [
+      Text('  $label: empty', style: AppTheme.dim),
+      for (final s in options)
+        Tooltip(
+          message: b.whyNot(s.kind, i) ?? '${s.materiel} Materiel · ${s.buildS} s · ${s.crew} crew · ${s.powerKw.round()} kW',
+          child: TextButton(
+            key: Key('base-build-${s.kind.name}-$i'),
+            onPressed: b.whyNot(s.kind, i) == null
+                ? () {
+                    _baseOrder(op, 'build', kind: s.kind, ring: ring, socket: i);
+                    Navigator.of(ctx).maybePop();
+                  }
+                : null,
+            child: Text('${s.label} (${s.materiel})'),
+          ),
+        ),
+    ]);
+  }
+
   void _order(Operation op, String order, {String? target}) => _operations.inbox.enqueue(
       OrderOperationCommand(const PlayerId('player'), 0, op.id, order, target: target));
 
@@ -461,6 +576,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                   if (f.alive)
                     line('  ${f.count} ${f.kind.name} · ${where(f)}',
                         'morale ${(f.morale * 100).round()}%'),
+                if (op.base case final b?) ..._baseRows(op, b, ctx, line),
                 if (!op.resolved && op.phase == OperationPhase.engaged) ...[
                   const SizedBox(height: 10),
                   Text('Orders', style: AppTheme.dim),
@@ -552,7 +668,7 @@ extension _SimulationViewCombat on _SimulationViewState {
   ///                               founded beside it
   ///   fixture=independent         the open colony has seceded (three revolts),
   ///                               with the same source beside it
-  ///   launch=1[&garrison=N][&kit=D][&roe=standard]
+  ///   launch=1[&garrison=N][&kit=D][&roe=standard][&base=MATERIEL,SUPPORT]
   ///                               launch every ready trooper at the open colony
   ///   panel=independence|occupation  open the colony's panel
   ///   watch=ID[&at=OBJ]           frame the camera on an operation's battle
@@ -591,6 +707,8 @@ extension _SimulationViewCombat on _SimulationViewState {
           kitDays: double.tryParse(p['kit'] ?? '') ??
               (target.loyalty.allegiance == Allegiance.independent ? 6 : 3),
           roe: p['roe'] ?? 'restrained',
+          baseMateriel: int.tryParse((p['base'] ?? '').split(',').first) ?? 0,
+          baseSupport: int.tryParse((p['base'] ?? '').split(',').last) ?? 0,
           garrison: int.tryParse(p['garrison'] ?? '') ?? 2));
       did['launch'] = {'troopers': draws.fold<int>(0, (a, d) => a + d.count)};
     }
@@ -664,6 +782,17 @@ extension _SimulationViewCombat on _SimulationViewState {
             'control': op.graph.byId(op.goalId)?.control,
             'attackers': {'alive': op.attackerAlive, 'wounded': op.attackerWounded, 'dead': op.attackerDead},
             'raised': op.attackerRaised,
+            if (op.base case final b?)
+              'base': {
+                'deployed': b.deployed,
+                'standing': b.standing,
+                'modules': [for (final m in b.modules) m.kind.name],
+                'job': b.job?.kind.name,
+                'materiel': b.materielC ~/ 100,
+                'pallets': b.palletsC ~/ 100,
+                'reserve': b.reserve,
+                'runs': b.runs.length,
+              },
             'order': op.order.name,
             'landers': [for (final l in op.landers) l.state.name],
             'objectives': {
@@ -735,6 +864,7 @@ extension _SimulationViewCombat on _SimulationViewState {
     src.stock[Commodity.rations] = 400;
     src.stock[Commodity.guns] = 80;
     src.stock[Commodity.ammo] = 400;
+    src.stock[Commodity.ore] = 700; // a forward base's Materiel
     src.population = 300;
     return {'target': target.id, 'source': src.id};
   }

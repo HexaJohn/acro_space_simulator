@@ -13,6 +13,7 @@
 library;
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -77,6 +78,15 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
   int _garrison = 2;
   Roe _roe = Roe.restrained;
 
+  /// The forward base (combat.md §7C): on by default where a source can
+  /// ship one; off is a light operation.
+  bool _base = true;
+  int _baseMateriel = 300;
+  int _baseSupport = 10;
+
+  BaseManifest? get _manifest =>
+      _base ? BaseManifest(materiel: _baseMateriel, support: _baseSupport) : null;
+
   /// An independent colony: taken and occupied, not a port retaken.
   bool get _assault => _target.independent;
 
@@ -98,6 +108,15 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
     // one port's worth.
     if (_assault) _kitDays = 6;
     _garrison = _defaultGarrison();
+    // Size the base to what the richest source can give.
+    var ore = 0.0, support = 0;
+    for (final s in _sources) {
+      ore = math.max(ore, s.stock['ore'] ?? 0);
+      support = math.max(support, s.supportAvailable);
+    }
+    _baseMateriel = math.min(300, (ore ~/ 50) * 50);
+    _baseSupport = math.min(10, support);
+    _base = _baseMateriel >= 50 && _baseSupport >= 2;
     _replan();
   }
 
@@ -143,6 +162,7 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
             kitDays: _kitDays,
             garrison: _garrison,
             roe: _roe,
+            base: _manifest,
           )
         : planPortRetake(
             operationId: widget.registry.nextOperationId,
@@ -151,6 +171,7 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
             draws: _draws,
             kitDays: _kitDays,
             garrison: _garrison,
+            base: _manifest,
           );
     _refusal = planned.refusal;
     final op = planned.operation;
@@ -174,6 +195,8 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
       kitDays: _kitDays,
       garrison: _garrison,
       roe: _roe.name,
+      baseMateriel: _base ? _baseMateriel : 0,
+      baseSupport: _base ? _baseSupport : 0,
     ));
     Navigator.of(context).maybePop();
   }
@@ -222,6 +245,8 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
                   });
                 }),
                 if (_assault) _roeRow(),
+                const SizedBox(height: 4),
+                _baseSection(),
               ],
               const SizedBox(height: 8),
               _previewBox(),
@@ -250,6 +275,52 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
         ),
       ),
     );
+  }
+
+  Widget _baseSection() {
+    var ore = 0.0, support = 0;
+    for (final s in _sources) {
+      ore = math.max(ore, s.stock['ore'] ?? 0);
+      support = math.max(support, s.supportAvailable);
+    }
+    final maxM = math.max(50, math.min(800, (ore ~/ 50) * 50));
+    final maxS = math.max(2, math.min(24, support));
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const SizedBox(width: 170, child: Text('Forward base', style: AppTheme.body)),
+        Switch(
+          key: const Key('planner-base'),
+          value: _base,
+          onChanged: (v) => setState(() {
+            _base = v;
+            _replan();
+          }),
+        ),
+        Expanded(
+          child: Text(
+              _base
+                  ? 'A core, a landing turret and Materiel to build with.'
+                  : 'A light operation: no base, nothing to build.',
+              style: AppTheme.dim),
+        ),
+      ]),
+      if (_base) ...[
+        _sliderRow('Materiel (ore)', '$_baseMateriel', _baseMateriel.toDouble(), 50,
+            maxM.toDouble(), (maxM - 50) ~/ 50, (v) {
+          setState(() {
+            _baseMateriel = (v / 50).round() * 50;
+            _replan();
+          });
+        }),
+        _sliderRow('Support staff', '$_baseSupport', _baseSupport.toDouble(), 2, maxS.toDouble(),
+            maxS - 2, (v) {
+          setState(() {
+            _baseSupport = v.round();
+            _replan();
+          });
+        }),
+      ],
+    ]);
   }
 
   Widget _roeRow() => Padding(
@@ -391,7 +462,15 @@ class _OperationPlannerSheetState extends State<OperationPlannerSheet> {
     );
   }
 
-  List<String> get _costLines => _assault
+  List<String> get _costLines => [
+        ..._costLinesCore,
+        if (_base)
+          'The base ships $_baseMateriel ore and $_baseSupport support staff from your '
+              'lead colony; what is left comes home with them. Overrun, half of it is '
+              "the rebels'.",
+      ];
+
+  List<String> get _costLinesCore => _assault
       ? [
           'Troopers are your colonists: the dead are lost to their home colony.',
           'Its defenders are its colonists too: every one killed is a grievance it '

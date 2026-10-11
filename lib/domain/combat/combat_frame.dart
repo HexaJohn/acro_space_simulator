@@ -16,6 +16,7 @@ library;
 
 import 'dart:math' as math;
 
+import 'base/base_modules.dart';
 import 'formation.dart';
 import 'lander.dart';
 import 'objective.dart';
@@ -79,6 +80,17 @@ class SquadMark {
   bool get marching => toE != null;
 }
 
+/// A base module as drawn: round the LZ, in its ring (1b-i has no layout, so
+/// a socket's place is its index on the ring).
+class BaseMark {
+  const BaseMark(this.kind, this.e, this.n, {this.building = false});
+  final ModuleKind? kind; // null: the core
+  final double e, n;
+
+  /// Still on the line.
+  final bool building;
+}
+
 /// A lander as drawn: where it is coming down, and whether it is down yet.
 class LanderMark {
   const LanderMark(this.e, this.n, this.state);
@@ -94,6 +106,7 @@ class CombatFrame {
     required this.objectives,
     required this.squads,
     required this.landers,
+    this.base = const [],
   });
 
   final int opId;
@@ -102,6 +115,9 @@ class CombatFrame {
   final List<ObjectiveMark> objectives;
   final List<SquadMark> squads;
   final List<LanderMark> landers;
+
+  /// The forward base, core first; empty with none standing.
+  final List<BaseMark> base;
 
   /// Squads stand this far round their objective, m.
   static const double ringM = 24;
@@ -198,11 +214,33 @@ class CombatFrame {
       squads.add(_mark(f, p.$1, p.$2));
     }
 
+    final base = <BaseMark>[];
+    final b = op.base;
+    if (b != null && b.standing && lz != null) {
+      (double, double) ring(SocketKind s, int i) {
+        final r = s == SocketKind.module ? 45.0 : 75.0;
+        final n = s == SocketKind.module ? kFirebaseModuleSockets : kFirebaseTurretSockets;
+        final a = 2 * math.pi * i / n + (s == SocketKind.module ? math.pi / 2 : 0);
+        return (lz.e + r * math.cos(a), lz.n + r * math.sin(a));
+      }
+
+      base.add(BaseMark(null, lz.e, lz.n));
+      for (final m in b.modules) {
+        final p = ring(m.spec.socket, m.socket);
+        base.add(BaseMark(m.kind, p.$1, p.$2));
+      }
+      final j = b.job;
+      if (j != null) {
+        final p = ring(moduleSpec(j.kind).socket, j.socket);
+        base.add(BaseMark(j.kind, p.$1, p.$2, building: true));
+      }
+    }
     return CombatFrame(
       opId: op.id,
       targetColonyId: op.targetColonyId,
       phase: op.phase,
       objectives: marks,
+      base: base,
       squads: squads,
       landers: [
         if (lz != null)

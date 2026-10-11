@@ -19,6 +19,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../../../domain/combat/base/base_modules.dart';
 import '../../../../domain/combat/combat_frame.dart';
 import '../../../../domain/combat/formation.dart';
 import '../../../../domain/combat/lander.dart';
@@ -83,6 +84,44 @@ class BattleOverlayPainter extends CustomPainter {
     }
     for (final l in frame.landers) {
       _lander(canvas, l);
+    }
+    for (final m in frame.base) {
+      _module(canvas, m);
+    }
+  }
+
+  void _module(Canvas canvas, BaseMark m) {
+    final at = project(m.e, m.n);
+    if (at == null) return;
+    final c = kAttackerColour.withValues(alpha: m.building ? 0.35 : 0.9);
+    final side = m.kind == null ? 14.0 : (m.kind == ModuleKind.turret ? 8.0 : 10.0);
+    final rect = Rect.fromCenter(center: at, width: side, height: side);
+    if (m.kind == ModuleKind.turret) {
+      final p = Path()
+        ..moveTo(at.dx, at.dy - side / 2)
+        ..lineTo(at.dx + side / 2, at.dy + side / 2)
+        ..lineTo(at.dx - side / 2, at.dy + side / 2)
+        ..close();
+      canvas.drawPath(p, Paint()..color = c);
+    } else {
+      canvas.drawRect(rect, Paint()..color = m.building ? c : c.withValues(alpha: 0.75));
+      canvas.drawRect(
+          rect,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = m.kind == null ? 2 : 1
+            ..color = Colors.black54);
+    }
+    if (m.kind == null) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: 'Base',
+          style: AppTheme.mono.copyWith(
+              fontSize: 10, color: Colors.white, shadows: const [Shadow(blurRadius: 3)]),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, at + Offset(-tp.width / 2, side / 2 + 2));
     }
   }
 
