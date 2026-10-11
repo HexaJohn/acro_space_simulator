@@ -3497,10 +3497,14 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // Combat operations: a chip per running operation and per
                 // result not yet seen, under the HUD's top bar, both modes
                 // (combat.md §7.9).
-                if (_combatChips() case final chips?)
+                // In city mode the HUD stacks the colony's own cards top
+                // right (independent, occupied, terms): the chips go under
+                // the time controls instead, where nothing else lives.
+                if (_combatChips(alignLeft: widget.cityMode) case final chips?)
                   Positioned(
-                    top: widget.cityMode ? 64 : 12,
-                    right: 12,
+                    top: widget.cityMode ? 150 : 12,
+                    left: widget.cityMode ? 12 : null,
+                    right: widget.cityMode ? null : 12,
                     child: SafeArea(child: chips),
                   ),
                 // A captured mouse has no cursor. Topmost, so whatever the pin

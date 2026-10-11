@@ -120,7 +120,7 @@ extension _SimulationViewCombat on _SimulationViewState {
   }
 
   /// The operation chips: every running operation, and results not yet seen.
-  Widget? _combatChips() {
+  Widget? _combatChips({bool alignLeft = false}) {
     final ops = _operations.operations;
     if (ops.isEmpty) return null;
     final shown = [
@@ -129,7 +129,7 @@ extension _SimulationViewCombat on _SimulationViewState {
     ];
     if (shown.isEmpty) return null;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
+      crossAxisAlignment: alignLeft ? CrossAxisAlignment.start : CrossAxisAlignment.end,
       mainAxisSize: MainAxisSize.min,
       children: [
         for (final op in shown)
