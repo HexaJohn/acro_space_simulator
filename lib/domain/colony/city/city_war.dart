@@ -540,13 +540,11 @@ extension CityWar on CitySim {
     final independent = loyalty.allegiance == Allegiance.independent;
     // What a base's sockets must keep clear of, and the pads an LZ keeps its
     // distance from (combat.md §7D).
-    final obstacles = <(double, double, double)>[];
+    final obstacles = <List<(double, double)>>[];
     final pads = <(double, double)>[];
     for (final (p, s) in _sitesInOrder()) {
-      final c = p.centroid;
-      final r = math.sqrt(p.area) * 0.75;
-      obstacles.add((c.e, c.n, r));
-      if (s.siteKind == SiteKind.pad) pads.add((c.e, c.n));
+      obstacles.add([for (final v in p.polygon) (v.e, v.n)]);
+      if (s.siteKind == SiteKind.pad) pads.add((p.centroid.e, p.centroid.n));
     }
     var regulars = 0;
     final guns = <EmplacementSite>[];

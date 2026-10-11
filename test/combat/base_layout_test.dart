@@ -17,9 +17,12 @@ void main() {
     expect(l.facing, closeTo(math.pi, 1e-9), reason: 'it faces back toward the anchor');
   });
 
+  List<(double, double)> square(double e, double n, double half) =>
+      [(e - half, n - half), (e + half, n - half), (e + half, n + half), (e - half, n + half)];
+
   test('a building on the straight-out ground turns the LZ to clear ground', () {
     final l = layoutBase(
-        anchorE: 100, anchorN: 0, distanceM: 450, obstacles: const [(550, 0, 60)], pads: const []);
+        anchorE: 100, anchorN: 0, distanceM: 450, obstacles: [square(550, 0, 60)], pads: const []);
     expect(l.free, kLayoutModuleSockets + kLayoutTurretSockets);
     expect((l.e - 550).abs() + l.n.abs(), greaterThan(100));
   });
@@ -33,16 +36,20 @@ void main() {
   test('ground crowded all round: the best bearing, with its blocked sockets named', () {
     final obstacles = [
       for (var k = 0; k < 8; k++)
-        (100 + 450 * math.cos(k * math.pi / 4) + 40, 450 * math.sin(k * math.pi / 4), 20.0)
+        square(100 + 450 * math.cos(k * math.pi / 4) + 40, 450 * math.sin(k * math.pi / 4), 15)
     ];
     final l = layoutBase(anchorE: 100, anchorN: 0, distanceM: 450, obstacles: obstacles, pads: const []);
     expect(l.blockedModules.length + l.blockedTurrets.length, greaterThan(0));
     final ring = socketRing(l.e, l.n, l.facing, turrets: false);
     for (final i in l.blockedModules) {
-      expect(obstacles.any((o) {
-        final d = math.sqrt(math.pow(o.$1 - ring[i].$1, 2) + math.pow(o.$2 - ring[i].$2, 2));
-        return d < o.$3 + kModuleHalfM;
-      }), isTrue);
+      expect(obstacles.any((o) => touches(o, ring[i].$1, ring[i].$2, kModuleHalfM)), isTrue);
     }
+  });
+
+  test('touches: inside, near an edge, or clear', () {
+    final sq = square(0, 0, 10);
+    expect(touches(sq, 0, 0, 1), isTrue);
+    expect(touches(sq, 15, 0, 6), isTrue);
+    expect(touches(sq, 15, 0, 4), isFalse);
   });
 }

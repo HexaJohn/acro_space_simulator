@@ -10,7 +10,8 @@
 /// bearings, starting from straight out from the colony centre, it takes the
 /// one whose socket rings have the most free ground and which keeps 400 m
 /// from every pad; a tie keeps the earlier bearing, so a colony with nothing
-/// in the way lands where it always did. Sockets on a building are blocked.
+/// in the way lands where it always did. A socket whose box would touch a
+/// building lot is blocked.
 library;
 
 import 'dart:math' as math;
@@ -67,7 +68,7 @@ BaseLayout layoutBase({
   required double anchorE,
   required double anchorN,
   required double distanceM,
-  required List<(double, double, double)> obstacles,
+  required List<List<(double, double)>> obstacles,
   required List<(double, double)> pads,
 }) {
   var outE = anchorE, outN = anchorN;
@@ -90,7 +91,7 @@ BaseLayout layoutBase({
       final ring = socketRing(e, n, facing, turrets: turrets);
       return [
         for (var i = 0; i < ring.length; i++)
-          if (obstacles.any((o) => _d(o.$1, o.$2, ring[i].$1, ring[i].$2) < o.$3 + half)) i
+          if (obstacles.any((o) => touches(o, ring[i].$1, ring[i].$2, half))) i
       ];
     }
 
@@ -105,3 +106,24 @@ BaseLayout layoutBase({
 
 double _d(double a, double b, double c, double d) =>
     math.sqrt((a - c) * (a - c) + (b - d) * (b - d));
+
+/// Whether a box of half-width [half] centred on ([e], [n]) touches [poly]:
+/// inside it, or nearer than [half] to an edge.
+bool touches(List<(double, double)> poly, double e, double n, double half) {
+  if (poly.length < 3) return false;
+  var inside = false;
+  for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    final (xi, yi) = poly[i];
+    final (xj, yj) = poly[j];
+    if ((yi > n) != (yj > n) && e < (xj - xi) * (n - yi) / (yj - yi) + xi) inside = !inside;
+    if (_segD(e, n, xj, yj, xi, yi) < half) return true;
+  }
+  return inside;
+}
+
+double _segD(double px, double py, double ax, double ay, double bx, double by) {
+  final dx = bx - ax, dy = by - ay;
+  final l2 = dx * dx + dy * dy;
+  final t = l2 <= 0 ? 0.0 : (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0);
+  return _d(px, py, ax + t * dx, ay + t * dy);
+}
