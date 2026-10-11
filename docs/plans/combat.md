@@ -567,8 +567,9 @@ suppression while two of the garrison can crew it *(default)*.
 **Out of scope:** the vehicle bay and airpad (phases 6–7), AT/AA turrets, orbital and silo powers (3b, 7), fog (with
 the battle view), the depth-tested 3D base (4a's renderer).
 
-**Built** ae4f96e, 9fafb97, 748853c, 67304d2; verified live on the Moon (Station, charge, supply drop, the post kept
-one turret and its crew; found live: lot-sized obstacles blocked every socket, now building footprints).
+**Built** ae4f96e, 9fafb97, 748853c, 67304d2, ad4ed50; verified live on the Moon (Station, Stores, charge, supply
+drop, the post kept one turret and its crew). Found live: lot-sized obstacles blocked every socket (now building
+footprints), and a spaceport's apron reaches past 450 m (the LZ now tries 600, 800 and 1,000 m too).
 
 ## 7E. Phase 3b spec: Orbital support
 
