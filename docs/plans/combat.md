@@ -660,6 +660,32 @@ here); health, ammo, crosshair, squad and REDEPLOY on the HUD.
 buildings), the domain walker and `AvatarInputCommand` (the bubble is a presenter whose effects are commands),
 the input rebind layer, saving the raster, live modules, charges and jump jets, the battle menu.
 
+## 7H. Phase 4b spec: Squads that move
+
+Specified 2026-10-11; defaults *(default)* for review.
+
+**Ships:** fight beside your squad, give it orders with the number keys, call in reinforcements with X.
+
+**Navigation (`live/nav_grid.dart`):** the raster's cells, shut under a building (its footprint plus half a cell)
+and up slopes over 0.7; a flow field per destination (Dijkstra, built on first use, kept); units walk it at 2.5 m/s.
+**Sight:** over the raster every 4 m and round buildings as 8 m cylinders. Fire needs sight, the player's included.
+
+**Units move:** every live unit walks to its slot; a formation the resolver marches walks with its march; a
+defender re-slots where its formation goes.
+
+**Your squad is live** while you are joined: the resolver neither fights it nor moves it (`Operation.liveOwned`, not
+saved), its members fight in the bubble — firing like defenders, taking real hits — and it takes an objective by
+standing on it with none there. Orders: **1** follow me, **2** hold here, **3** take the objective under the
+crosshair (the battle learns where it is through `LiveSquadCommand` as it arrives). Leaving hands it back.
+
+**X** calls every ready trooper in as reinforcements (the hot-drop's stand-in until a hot-drop power exists).
+
+**Spike S item 2** is measured here: 4 squads, 3 objectives, 20 seeds on a settled town's raster; stuck = no
+progress for 30 s.
+
+**Cut *(default)*:** cover and suppression, grenades, the defender's live AI beyond re-slotting, formations of
+other squads following orders live, crouch.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

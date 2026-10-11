@@ -4,6 +4,7 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:acro_space_simulator/adapters/repositories/in_memory_world_repositories.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
@@ -13,8 +14,12 @@ import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_terrain_shaper.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_war.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart' show Vec2;
+import 'package:acro_space_simulator/domain/combat/combat_rng.dart';
 import 'package:acro_space_simulator/domain/combat/launch/base_layout.dart';
+import 'package:acro_space_simulator/domain/combat/live/battle_raster.dart';
+import 'package:acro_space_simulator/domain/combat/live/nav_grid.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
+import 'package:acro_space_simulator/domain/terrain/ground_sample_pool.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/infrastructure/sample_world.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -92,6 +97,98 @@ void main() {
     }
     // ignore: avoid_print
     print('Spike S item 6:\n  ${lines.join('\n  ')}');
+  });
+
+  test('item 2: squads walk to their objectives on a real town; at most 1 stuck in 20 runs', () {
+    final t = town('moon');
+    final s = t.city.launchSnapshot();
+    final field = t.body.terrainFieldWith(t.edits.forBody(t.body.id))!;
+    final port = s.objectives.where((o) => o.kind == 'port').firstOrNull ?? s.objectives.first;
+    final l = layoutBase(anchorE: port.e, anchorN: port.n, obstacles: s.obstacles, pads: s.pads);
+    final (ce, cn) = BattleRaster.centreFor(l.e, l.n, port.e, port.n);
+    final raster = BattleRaster(ce, cn);
+    final dirs = Float64List(raster.radii.length * 3);
+    for (var k = 0; k < raster.radii.length; k++) {
+      final (e, n) = raster.cellCentre(k);
+      final bf = t.city.localToBodyFixed(Vec2(e, n), bodyRadiusM: t.body.radius);
+      dirs[3 * k] = bf.x;
+      dirs[3 * k + 1] = bf.y;
+      dirs[3 * k + 2] = bf.z;
+    }
+    final radii = sampleGround(field, dirs);
+    for (var k = 0; k < radii.length; k++) {
+      raster.put(k, radii[k]);
+    }
+    final nav = NavGrid(raster, s.walls);
+    // Three objectives in the square: the town's own that fall inside, made
+    // up to three with open ground in its far corners.
+    final goals = <(double, double)>[
+      for (final o in s.objectives)
+        if (raster.contains(o.e, o.n)) (o.e, o.n),
+    ];
+    for (final (fx, fy) in const [(-0.35, 0.35), (0.35, -0.35), (-0.35, -0.35)]) {
+      if (goals.length >= 3) break;
+      final k = nav.cellOf(ce + fx * raster.sideM, cn + fy * raster.sideM);
+      if (k != null && nav.blocked[k] == 0) goals.add(raster.cellCentre(k));
+    }
+    expect(goals.length, 3);
+    var stuck = 0, runs = 0;
+    for (var seed = 0; seed < 20; seed++) {
+      for (var q = 0; q < 4; q++) {
+        runs++;
+        final goal = goals[(seed + q) % goals.length];
+        final fieldTo = nav.flowTo('g${goal.$1},${goal.$2}', goal.$1, goal.$2);
+        // Six soldiers within 60 m of the LZ, on open ground.
+        final squad = <(double, double)>[];
+        for (var m = 0; squad.length < 6 && m < 60; m++) {
+          final e = l.e + 120 * (combatUnit(seed, q * 64 + m, 1) - 0.5);
+          final n = l.n + 120 * (combatUnit(seed, q * 64 + m, 2) - 0.5);
+          final k = nav.cellOf(e, n);
+          if (k != null && nav.blocked[k] == 0) squad.add((e, n));
+        }
+        double left() {
+          var sum = 0.0;
+          for (final p in squad) {
+            final k = nav.cellOf(p.$1, p.$2);
+            final d = k == null ? double.infinity : fieldTo[k];
+            sum += d.isFinite ? d : 2000;
+          }
+          return sum / squad.length;
+        }
+
+        var best = left();
+        var sinceProgress = 0.0;
+        var arrived = false;
+        for (var step = 0; step < 1200; step++) {
+          for (var i = 0; i < squad.length; i++) {
+            final p = squad[i];
+            final d = math.sqrt(math.pow(goal.$1 - p.$1, 2) + math.pow(goal.$2 - p.$2, 2));
+            if (d < 15) continue;
+            final next = d > 20 && !nav.lineOfSight((p.$1, p.$2, 1.0), (goal.$1, goal.$2, 1.0))
+                ? nav.step(fieldTo, p.$1, p.$2, 2.5 * 0.25, goal)
+                : NavGrid.straight(p.$1, p.$2, goal.$1, goal.$2, 2.5 * 0.25);
+            if (next != null) squad[i] = next;
+          }
+          final now = left();
+          if (now < 25) {
+            arrived = true;
+            break;
+          }
+          if (now < best - 1) {
+            best = now;
+            sinceProgress = 0;
+          } else {
+            sinceProgress += 0.25;
+            if (sinceProgress >= 30) break;
+          }
+        }
+        if (!arrived && sinceProgress >= 30) stuck++;
+      }
+    }
+    // ignore: avoid_print
+    print('Spike S item 2: $stuck stuck of $runs squad walks (20 seeds × 4 squads), '
+        '${nav.built} flow fields built');
+    expect(stuck, lessThanOrEqualTo(1));
   });
 
   test('item 1: the raster\'s per-cell query over a 1.2 km square at 8 m', () {

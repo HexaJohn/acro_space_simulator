@@ -74,6 +74,15 @@ class _CombatViewState {
   /// Dev only: aim at the nearest defender and hold the trigger.
   bool devAutofire = false;
 
+  /// Spike S item 4 (§7F): 48 soldiers and a full load of tracers drawn in
+  /// front of the walker, to price the renderer.
+  bool devStress = false;
+
+  /// The player's eye and aim as the last step saw them (local frame), for
+  /// the squad's "take the objective under the crosshair".
+  (double, double, double) lastEye = (0, 0, 1.7);
+  (double, double, double) lastAim = (1, 0, 0);
+
   /// Turn to face this objective a few frames after joining (the walker's
   /// gravity frame settles first).
   String? faceObjective;
@@ -832,7 +841,8 @@ extension _SimulationViewCombat on _SimulationViewState {
     final body = city == null ? null : _universe.current().body(city.body.id);
     if (city == null || r == null || squad == null || body == null) return;
     final st = _combatState
-      ..live = LiveBattle(opId: op.id, seed: op.seed ^ 0x5eed, playerFormationId: squad.id)
+      ..live = (LiveBattle(opId: op.id, seed: op.seed ^ 0x5eed, playerFormationId: squad.id)
+        ..nav = NavGrid(r, op.orbital.walls))
       ..unitGround.clear()
       ..drawnOffset = 0
       ..trigger = false;
@@ -849,6 +859,48 @@ extension _SimulationViewCombat on _SimulationViewState {
     if (!_walkMode) _toggleWalk();
     _thirdPerson = false;
     _standAtLz(op, city, r, body.radius);
+    // Your squad is the bubble's while you fight with it (§7H).
+    _operations.inbox.enqueue(LiveSquadCommand(const PlayerId('player'), 0, op.id, squad.id));
+  }
+
+  /// A squad order from the number keys (§7H): 1 follow, 2 hold, 3 take the
+  /// objective nearest the crosshair's line.
+  void _squadOrder(SquadOrder o) {
+    final live = _combatState.live;
+    final op = live == null ? null : _operations.byId(live.opId);
+    if (live == null || op == null) return;
+    if (o != SquadOrder.attack) {
+      live.command(o);
+      return;
+    }
+    final (ee, en, _) = _combatState.lastEye;
+    final (ae, an, _) = _combatState.lastAim;
+    final al = math.max(1e-6, math.sqrt(ae * ae + an * an));
+    String? best;
+    var bestCos = 0.9;
+    for (final ob in op.graph.objectives) {
+      if (ob.kind == ObjectiveKind.lz) continue;
+      final de = ob.e - ee, dn = ob.n - en;
+      final dl = math.sqrt(de * de + dn * dn);
+      if (dl < 1 || dl > 1200) continue;
+      final c = (de * ae + dn * an) / (dl * al);
+      if (c > bestCos) {
+        bestCos = c;
+        best = ob.id;
+      }
+    }
+    if (best != null) live.command(SquadOrder.attack, objectiveId: best);
+  }
+
+  /// X: every ready trooper in as reinforcements (§7H).
+  void _callReinforcements() {
+    final live = _combatState.live;
+    final op = live == null ? null : _operations.byId(live.opId);
+    if (op == null) return;
+    final draws = _readyDraws(op.targetColonyId);
+    if (draws.isEmpty) return;
+    _operations.inbox.enqueue(ReinforceOperationCommand(const PlayerId('player'), 0, op.id,
+        draws: draws, kitDays: op.kind == OperationKind.colonyAssault ? 6 : 3));
   }
 
   void _leaveFight() {
@@ -858,6 +910,9 @@ extension _SimulationViewCombat on _SimulationViewState {
     if (left.isNotEmpty) {
       _operations.inbox.enqueue(LiveCasualtiesCommand(const PlayerId('player'), 0, st.live!.opId, [...left]));
     }
+    _operations.inbox.enqueue(LiveSquadCommand(
+        const PlayerId('player'), 0, st.live!.opId, st.live!.playerFormationId,
+        own: false));
     st
       ..live = null
       ..trigger = false
@@ -940,8 +995,16 @@ extension _SimulationViewCombat on _SimulationViewState {
         trigger = true;
       }
     }
+    st
+      ..lastEye = (e, n, h)
+      ..lastAim = aim;
     live.step(frameDt.clamp(0.0, 0.1),
         eye: (e, n, h), aim: aim, trigger: trigger, reload: _keysDown.contains(LogicalKeyboardKey.keyR));
+    if (live.squadArrived case final at?) {
+      _operations.inbox.enqueue(
+          LiveSquadCommand(const PlayerId('player'), 0, op.id, live.playerFormationId, at: at));
+      live.squadArrived = null;
+    }
     if (live.casualties.isNotEmpty) {
       _operations.inbox.enqueue(LiveCasualtiesCommand(const PlayerId('player'), 0, op.id, [...live.casualties]));
       live.casualties.clear();
@@ -951,6 +1014,11 @@ extension _SimulationViewCombat on _SimulationViewState {
       if (next == null) {
         _leaveFight();
         return;
+      }
+      if (next.id != live.playerFormationId) {
+        _operations.inbox.enqueue(LiveSquadCommand(const PlayerId('player'), 0, op.id, live.playerFormationId,
+            own: false));
+        _operations.inbox.enqueue(LiveSquadCommand(const PlayerId('player'), 0, op.id, next.id));
       }
       live.redeploy(next.id);
       _standAtLz(op, city, r, body.radius);
@@ -976,6 +1044,33 @@ extension _SimulationViewCombat on _SimulationViewState {
             _liveBF(city, r, body.radius, t.toE, t.toN, t.toH + st.drawnOffset),
             attacker: t.side == CombatSide.attacker),
     ];
+    if (st.devStress) {
+      // Ahead of the walker along its heading: a 6 × 8 block 15–50 m out.
+      final fe = aim.$1, fn = aim.$2;
+      final fl = math.max(1e-6, math.sqrt(fe * fe + fn * fn));
+      final ue = fe / fl, un = fn / fl;
+      (double, double) at(double fwd, double side) => (e + ue * fwd - un * side, n + un * fwd + ue * side);
+      CombatUnitState.units = [
+        ...CombatUnitState.units,
+        for (var i = 0; i < 48; i++)
+          () {
+            final (pe, pn) = at(15 + 5.0 * (i ~/ 6), -12.5 + 5.0 * (i % 6));
+            return CombatUnitMark('stress:$i', bodyId, _liveBF(city, r, body.radius, pe, pn, st.drawnOffset),
+                attacker: i.isEven);
+          }(),
+      ];
+      final tick = (_clock.epoch.seconds * 10).floor();
+      CombatUnitState.tracers = [
+        for (var i = 0; i < CombatUnitNodes.maxTracers; i++)
+          () {
+            final (ae, an) = at(15 + 5.0 * (i % 8), -12.5 + 3.0 * ((i + tick) % 9));
+            final (be, bn) = at(60 + 5.0 * (i % 5), 12.0 - 3.0 * ((i * 7 + tick) % 9));
+            return CombatTracerMark(bodyId, _liveBF(city, r, body.radius, ae, an, 1.4 + st.drawnOffset),
+                _liveBF(city, r, body.radius, be, bn, 1.2 + st.drawnOffset),
+                attacker: i.isEven);
+          }(),
+      ];
+    }
   }
 
   /// The soldier's HUD: crosshair, health, ammo, and the death screen.
@@ -1024,7 +1119,15 @@ extension _SimulationViewCombat on _SimulationViewState {
                     style: AppTheme.mono),
                 Text('${live.kills} down · ${squad == null ? '' : '${squad.count} in your squad'}',
                     style: AppTheme.dim),
-                Text('LMB fire · R reload · L leave', style: AppTheme.dim),
+                Text(
+                    'Squad: ${switch (live.order) {
+                      SquadOrder.follow => 'following you',
+                      SquadOrder.hold => 'holding',
+                      SquadOrder.attack => 'taking the ${live.attackTarget ?? ''}',
+                    }}',
+                    style: AppTheme.body),
+                Text('LMB fire · R reload · 1 follow · 2 hold · 3 take · X reinforce · L leave',
+                    style: AppTheme.dim),
               ]),
             ),
           ),
@@ -1587,6 +1690,18 @@ extension _SimulationViewCombat on _SimulationViewState {
       }
     }
     if (p['autofire'] != null) _combatState.devAutofire = p['autofire'] == '1';
+    if (p['stress'] != null) _combatState.devStress = p['stress'] == '1';
+    final squadOrder = p['squad'];
+    if (squadOrder != null && _combatState.live != null) {
+      final i = squadOrder.indexOf(':');
+      final kind = SquadOrder.values.where((o) => o.name == (i < 0 ? squadOrder : squadOrder.substring(0, i))).firstOrNull;
+      if (kind == SquadOrder.attack && i > 0) {
+        _combatState.live!.command(kind!, objectiveId: squadOrder.substring(i + 1));
+      } else if (kind != null) {
+        _squadOrder(kind);
+      }
+      did['squad'] = squadOrder;
+    }
     final walkTo = p['walkTo'];
     final liveNow = _combatState.live;
     if (walkTo != null && liveNow != null) {
@@ -1661,6 +1776,10 @@ extension _SimulationViewCombat on _SimulationViewState {
           'tracers': l.tracers.length,
           'squad': l.playerFormationId,
           'unitsMs': CombatUnitState.lastUpdateMs,
+          'order': l.order.name,
+          'attack': l.attackTarget,
+          'squadUnits': l.units.where((u) => u.squad).length,
+          'fieldsBuilt': l.nav?.built,
           'drawnOffset': _combatState.drawnOffset,
         },
       'rasters': {

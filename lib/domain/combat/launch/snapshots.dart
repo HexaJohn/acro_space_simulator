@@ -142,6 +142,7 @@ class LaunchSnapshot {
     this.airless = false,
     this.obstacles = const [],
     this.pads = const [],
+    this.walls = const [],
   });
 
   final String colonyId;
@@ -195,4 +196,8 @@ class LaunchSnapshot {
 
   /// Its landing pads' centres: an LZ keeps 400 m from every one.
   final List<(double, double)> pads;
+
+  /// Its buildings that stop a walk or a shot: [obstacles] less the pads and
+  /// aprons, which are open ground (§7H; a spaceport's apron reaches 545 m).
+  final List<(double, double, double)> walls;
 }

@@ -65,6 +65,9 @@ sealed class CombatCommand extends SimCommand {
       case 'live':
         return LiveCasualtiesCommand(by, tick, (j['op'] as num).toInt(),
             [for (final v in (j['f'] as List? ?? const [])) (v as num).toInt()]);
+      case 'liveSquad':
+        return LiveSquadCommand(by, tick, (j['op'] as num).toInt(), (j['f'] as num).toInt(),
+            own: j['own'] != false, at: j['at'] as String?);
       case 'assignOrbital':
         return AssignOrbitalSupportCommand(
             by, tick, (j['op'] as num).toInt(), j['vessel'] as String, assign: j['on'] != false);
@@ -314,6 +317,31 @@ class LiveCasualtiesCommand extends CombatCommand {
         'tick': tick,
         'op': operationId,
         'f': List<int>.of(formationIds),
+      };
+}
+
+/// The joined player's squad (docs/plans/combat.md §7H): handed to the
+/// bubble or back, and where it has got to.
+class LiveSquadCommand extends CombatCommand {
+  const LiveSquadCommand(super.issuedBy, super.tick, this.operationId, this.formationId,
+      {this.own = true, this.at});
+  final int operationId;
+  final int formationId;
+  final bool own;
+  final String? at;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'liveSquad',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'f': formationId,
+        if (!own) 'own': false,
+        if (at != null) 'at': at,
       };
 }
 

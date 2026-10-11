@@ -138,6 +138,8 @@ class CombatPhase {
         for (final id in c.formationIds) {
           op?.liveCasualty(id);
         }
+      case LiveSquadCommand():
+        registry.byId(c.operationId)?.liveSquad(c.formationId, own: c.own, at: c.at);
       case AssignOrbitalSupportCommand():
         registry.lastRefusal = _assign(c, cities);
       case ArmVesselCommand():
@@ -273,6 +275,14 @@ class CombatPhase {
         return dx * dx + dy * dy < (300 + f.$3) * (300 + f.$3);
       });
       if (near) op.orbital.footprints.add(f);
+    }
+    // The square is 1.2 km: walls within 900 m of an objective cover it.
+    for (final f in snap.walls) {
+      final near = objs.any((o) {
+        final dx = o.e - f.$1, dy = o.n - f.$2;
+        return dx * dx + dy * dy < (900 + f.$3) * (900 + f.$3);
+      });
+      if (near) op.orbital.walls.add(f);
     }
   }
 

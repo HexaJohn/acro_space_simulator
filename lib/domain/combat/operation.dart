@@ -432,6 +432,29 @@ class Operation {
     orbital.notices.add('Strike on ${obj.id}: $what (${cep.round()} m scatter).');
   }
 
+  /// The squad the joined player fights in (§7H): live, so the resolver
+  /// neither fights it nor marches it. Not saved — a load has no bubble.
+  final List<int> liveOwned = [];
+
+  /// Hands [formationId] to the bubble ([own]) or back to the resolver; with
+  /// [at], the bubble's squad has reached that objective.
+  void liveSquad(int formationId, {required bool own, String? at}) {
+    final f = formationById(formationId);
+    if (f == null || f.side != CombatSide.attacker) return;
+    if (own) {
+      if (!liveOwned.contains(formationId)) liveOwned.add(formationId);
+    } else {
+      liveOwned.remove(formationId);
+    }
+    final o = at == null ? null : graph.byId(at);
+    if (o != null && f.at != o.id) {
+      f
+        ..fromAt = null
+        ..at = o.id
+        ..arriveStep = clock.steps;
+    }
+  }
+
   /// A member of [formationId] fell in the live bubble (§7G): off its
   /// formation, killed or wounded half and half, and its squad shaken as by
   /// any loss.
@@ -660,12 +683,25 @@ class Operation {
 
   void _fight(Objective o, int t, List<bool> inContact) {
     final att = <int>[], def = <int>[];
+    var liveHere = false;
     for (var i = 0; i < formations.length; i++) {
       final f = formations[i];
       if (!f.presentAt(o.id, t)) continue;
+      if (liveOwned.contains(f.id)) {
+        // The player's squad fights in the bubble, not here (§7H).
+        liveHere = true;
+        continue;
+      }
       (f.side == CombatSide.attacker ? att : def).add(i);
     }
     const dt = kCombatStepS;
+    if (att.isEmpty && liveHere) {
+      // Only the live squad is here: it takes the objective once nobody
+      // holds it against them, and holds the line while they do.
+      if (def.isEmpty) o.control = (o.control + tuning.kappa * dt).clamp(-1.0, 1.0);
+      _holdClock(o);
+      return;
+    }
     if (att.isEmpty && def.isEmpty) {
       _holdClock(o);
       return;
@@ -941,7 +977,7 @@ class Operation {
       case OrderKind.fallBack:
         for (final f in formations) {
           if (f.side != CombatSide.attacker || !f.alive || f.broken) continue;
-          if (f.kind == FormationKind.emplacement) continue;
+          if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id)) continue;
           if (f.at == lzId || graph.byId(f.at) == null) continue;
           f.marchTo(lzId, t, graph.marchS(f.at, lzId));
         }
@@ -958,7 +994,7 @@ class Operation {
         }
         for (final f in formations) {
           if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
-          if (f.kind == FormationKind.emplacement) continue;
+          if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id)) continue;
           if (f.at == target.id || graph.byId(f.at) == null || !f.presentAt(f.at, t)) {
             continue;
           }
@@ -981,8 +1017,9 @@ class Operation {
     final movers = <Formation>[];
     for (final f in formations) {
       if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
-      // A turret stands where it was built.
-      if (f.kind == FormationKind.emplacement) continue;
+      // A turret stands where it was built; the live squad goes where the
+      // player sends it.
+      if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id)) continue;
       var there = false;
       for (final id in behind) {
         if (f.presentAt(id, t)) there = true;

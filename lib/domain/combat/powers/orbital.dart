@@ -149,11 +149,13 @@ class OrbitalSupport {
     this.craterM = 13,
     this.centreBF,
     List<(double, double, double)>? footprints,
+    List<(double, double, double)>? walls,
   })  : assigned = assigned ?? [],
         inFlight = inFlight ?? [],
         craters = craters ?? [],
         pinned = pinned ?? [],
-        footprints = footprints ?? [];
+        footprints = footprints ?? [],
+        walls = walls ?? [];
 
   /// In id order.
   final List<AssignedVessel> assigned;
@@ -188,6 +190,11 @@ class OrbitalSupport {
   /// Buildings near the objectives (east, north, radius m): a crater that
   /// touches one leaves no world brush.
   final List<(double, double, double)> footprints;
+
+  /// The buildings in the battle square that stop a walk or a shot (§7H):
+  /// the footprints less pads and aprons. Kept here, beside the footprints,
+  /// because both are the launch's one look at the town's buildings.
+  final List<(double, double, double)> walls;
 
   /// Rounds aboard each assigned vessel, handed in by the combat phase
   /// before each tick's steps; not saved.
@@ -240,6 +247,7 @@ class OrbitalSupport {
         'craterM': craterM,
         if (centreBF case final c?) 'centre': [c.x, c.y, c.z],
         if (footprints.isNotEmpty) 'feet': [for (final f in footprints) [f.$1, f.$2, f.$3]],
+        if (walls.isNotEmpty) 'walls': [for (final f in walls) [f.$1, f.$2, f.$3]],
       };
 
   factory OrbitalSupport.fromJson(Map<String, dynamic>? j) {
@@ -270,6 +278,14 @@ class OrbitalSupport {
           : Vector3((c[0] as num).toDouble(), (c[1] as num).toDouble(), (c[2] as num).toDouble()),
       footprints: [
         for (final f in (j['feet'] as List? ?? const []))
+          (
+            ((f as List)[0] as num).toDouble(),
+            (f[1] as num).toDouble(),
+            (f[2] as num).toDouble()
+          )
+      ],
+      walls: [
+        for (final f in (j['walls'] as List? ?? const []))
           (
             ((f as List)[0] as num).toDouble(),
             (f[1] as num).toDouble(),

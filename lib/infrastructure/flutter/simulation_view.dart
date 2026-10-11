@@ -72,6 +72,7 @@ import '../../domain/combat/live/battle_raster.dart';
 import '../../domain/terrain/terrain_field.dart';
 import '../../domain/terrain/ground_sample_pool.dart';
 import '../../domain/combat/live/live_battle.dart';
+import '../../domain/combat/live/nav_grid.dart';
 import '../../domain/combat/powers/orbital.dart';
 import '../../domain/combat/powers/strike_window.dart';
 import '../../domain/multiplayer/player.dart';
@@ -1270,6 +1271,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // The joined soldier's reload and leave (combat.md §7G).
     LogicalKeyboardKey.keyR,
     LogicalKeyboardKey.keyL,
+    LogicalKeyboardKey.keyX,
+    LogicalKeyboardKey.digit1,
+    LogicalKeyboardKey.digit2,
+    LogicalKeyboardKey.digit3,
     LogicalKeyboardKey.escape,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
@@ -1333,10 +1338,27 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
         setState(_releaseMouseLook);
         return KeyEventResult.handled;
       }
-      // L leaves a battle the player joined.
+      // L leaves a battle the player joined; 1/2/3 order the squad; X calls
+      // in reinforcements (combat.md §7H).
       if (e.logicalKey == LogicalKeyboardKey.keyL && _liveJoined) {
         _leaveFight();
         return KeyEventResult.handled;
+      }
+      if (_liveJoined) {
+        final order = switch (e.logicalKey) {
+          LogicalKeyboardKey.digit1 => SquadOrder.follow,
+          LogicalKeyboardKey.digit2 => SquadOrder.hold,
+          LogicalKeyboardKey.digit3 => SquadOrder.attack,
+          _ => null,
+        };
+        if (order != null) {
+          _squadOrder(order);
+          return KeyEventResult.handled;
+        }
+        if (e.logicalKey == LogicalKeyboardKey.keyX) {
+          _callReinforcements();
+          return KeyEventResult.handled;
+        }
       }
       // G gets out and walks (and back in again) — but not out of a battle.
       if (e.logicalKey == LogicalKeyboardKey.keyG && _liveJoined) {

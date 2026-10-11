@@ -560,11 +560,17 @@ extension CityWar on CitySim {
     // distance from (combat.md §7D).
     final obstacles = <(double, double, double)>[];
     final pads = <(double, double)>[];
+    final walls = <(double, double, double)>[];
     for (final (p, s) in _sitesInOrder()) {
       final c = p.centroid;
       final f = buildingFootprint(p, s);
-      obstacles.add((c.e, c.n, 0.5 * math.sqrt(f.width * f.width + f.depth * f.depth)));
-      if (s.siteKind == SiteKind.pad) pads.add((c.e, c.n));
+      final circle = (c.e, c.n, 0.5 * math.sqrt(f.width * f.width + f.depth * f.depth));
+      obstacles.add(circle);
+      if (s.siteKind == SiteKind.pad) {
+        pads.add((c.e, c.n));
+      } else {
+        walls.add(circle);
+      }
     }
     var regulars = 0;
     final guns = <EmplacementSite>[];
@@ -602,6 +608,7 @@ extension CityWar on CitySim {
       airless: !body.hasAtmosphere,
       obstacles: obstacles,
       pads: pads,
+      walls: walls,
     );
   }
 
