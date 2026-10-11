@@ -1829,7 +1829,11 @@ extension _SimulationViewCombat on _SimulationViewState {
               ObjectiveKind.airfield => 'the airfield',
               null => at,
             };
-        int pct(String id) => (((op.graph.byId(id)?.control ?? -1) + 1) * 50).round();
+        // The player's hold: of what they attack, or of what they defend.
+        int pct(String id) {
+          final c = op.graph.byId(id)?.control ?? -1;
+          return ((op.defensive ? 1 - c : c + 1) * 50).round();
+        }
         // A marching squad is already booked at where it is going.
         String where(Formation f) => f.broken
             ? 'broken'
@@ -1845,7 +1849,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                 const SizedBox(height: 8),
                 if (op.phase == OperationPhase.engaged || op.resolved)
                   for (final id in _assault(op) ? op.path.skip(1) : [op.goalId])
-                    line('Control of ${place(id)}', '${pct(id)}%'),
+                    line('${op.defensive ? 'Your hold on' : 'Control of'} ${place(id)}', '${pct(id)}%'),
                 if (op.defensive) ..._defenceRows(op, line, where) else ...[
                 line('Your troopers', '${op.attackerAlive} fit · ${op.attackerWounded} wounded · ${op.attackerDead} dead'),
                 line(_assault(op) ? 'Defenders' : 'Rebels', '${op.defenderRemoved} fallen of ${op.defenderRaised} · '
@@ -1991,7 +1995,8 @@ extension _SimulationViewCombat on _SimulationViewState {
     final raider = op.raiderId;
     return [
       line(rising ? 'Your garrison' : 'Its people',
-          '${op.defenderRemoved} fallen of ${op.defenderRaised} · ${op.militia.total} still at home'),
+          '${op.defenderRemoved} fallen of ${op.defenderRaised}'
+          '${rising ? '' : ' · ${op.militia.total} still at home'}'),
       line(rising ? 'Rebels' : 'Raiders from ${raider == null ? '?' : _colonyName(raider)}',
           '${op.attackerAlive} fit · ${op.attackerRemoved} fallen of ${op.attackerRaised}'),
       if (op.defenderSurrendered > 0) line('Laid down their arms', '${op.defenderSurrendered}'),
@@ -2022,6 +2027,7 @@ extension _SimulationViewCombat on _SimulationViewState {
   ///   order=auto|hold|fallBack|attack:OBJ   the running operation's order
   ///   reinforce=1                 send every ready trooper as reinforcements
   ///   charter=ready               an occupied colony has held the line 11 days
+  ///   pop=N                       the open colony's population
   ///   rise=1                      the open colony, occupied, rises (§7N)
   ///   raidDay=1                   the clock to just before a rival's raid day
   ///   step=S                      run S seconds of world ticks now
@@ -2035,6 +2041,12 @@ extension _SimulationViewCombat on _SimulationViewState {
     }
     if (p['fixture'] == 'independent' && target != null) {
       did['fixture'] = _combatFixture(target, independent: true);
+    }
+    // pop=N: the open colony's population, for a fight of a given size.
+    final pop = double.tryParse(p['pop'] ?? '');
+    if (pop != null && target != null) {
+      target.population = pop;
+      did['pop'] = target.population;
     }
     // rise=1: the open colony, occupied, rises against its garrison (§7N).
     if (p['rise'] != null && target != null && target.loyalty.occupied) {

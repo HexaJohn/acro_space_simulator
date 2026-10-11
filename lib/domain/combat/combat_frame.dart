@@ -39,7 +39,8 @@ class ObjectiveMark {
   final ObjectiveKind kind;
   final double e, n;
 
-  /// −1 the defender's … +1 the attacker's.
+  /// −1 the other side's … +1 the player's: the attacker's, or in a fight
+  /// the player defends (§7N) the defender's.
   final double control;
 
   /// Both sides are there and fighting.
@@ -67,6 +68,9 @@ class SquadMark {
     this.toN,
   });
   final int id;
+
+  /// [CombatSide.attacker] for the player's side, as drawn: in a fight the
+  /// player defends (§7N) the sides are drawn the other way round.
   final CombatSide side;
   final FormationKind kind;
   final int count;
@@ -186,7 +190,7 @@ class CombatFrame {
         kind: o.kind,
         e: o.e,
         n: o.n,
-        control: o.control,
+        control: op.defensive ? -o.control : o.control,
         contested: contested,
         heat: contested ? (math.min(att, def) / math.max(1e-9, o.width)).clamp(0.0, 1.0) : 0,
         isGoal: o.id == op.goalId,
@@ -222,7 +226,7 @@ class CombatFrame {
         // in the air is its lander's.
         if (f.broken && f.side == CombatSide.attacker && lz != null) {
           final p = standAt(lz, f);
-          squads.add(_mark(f, p.$1, p.$2));
+          squads.add(_mark(f, p.$1, p.$2, flip: op.defensive));
         }
         continue;
       }
@@ -232,11 +236,11 @@ class CombatFrame {
         final dest = standAt(to, f);
         final orig = (from.e, from.n);
         squads.add(_mark(f, orig.$1 + (dest.$1 - orig.$1) * p, orig.$2 + (dest.$2 - orig.$2) * p,
-            toE: dest.$1, toN: dest.$2));
+            toE: dest.$1, toN: dest.$2, flip: op.defensive));
         continue;
       }
       final p = standAt(to, f);
-      squads.add(_mark(f, p.$1, p.$2));
+      squads.add(_mark(f, p.$1, p.$2, flip: op.defensive));
     }
 
     final base = <BaseMark>[];
@@ -290,10 +294,13 @@ class CombatFrame {
     );
   }
 
-  static SquadMark _mark(Formation f, double e, double n, {double? toE, double? toN}) =>
+  static SquadMark _mark(Formation f, double e, double n,
+          {double? toE, double? toN, bool flip = false}) =>
       SquadMark(
         id: f.id,
-        side: f.side,
+        side: !flip
+            ? f.side
+            : (f.side == CombatSide.attacker ? CombatSide.defender : CombatSide.attacker),
         kind: f.kind,
         count: f.count,
         morale: f.morale,

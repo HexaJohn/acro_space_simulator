@@ -7,6 +7,7 @@ import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/combat/combat_frame.dart';
 import 'package:acro_space_simulator/domain/combat/formation.dart';
+import 'package:acro_space_simulator/domain/combat/objective.dart';
 import 'package:acro_space_simulator/domain/combat/operation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -63,6 +64,39 @@ void main() {
     ];
     final spots = {for (final s in there) '${s.e.round()},${s.n.round()}'};
     expect(spots.length, there.length);
+  });
+
+  test('a fight the player defends is drawn the player\'s way round (§7N)', () {
+    Formation squad(int id, CombatSide side, String at) => Formation(
+        id: id,
+        side: side,
+        faction: side == CombatSide.attacker ? 'colony:x' : Factions.player,
+        kind: FormationKind.infantry,
+        count: 4,
+        quality: 1,
+        morale: 0.8,
+        at: at);
+    final op = Operation(
+      id: 1,
+      targetColonyId: 'x',
+      goalId: 'seat',
+      lzId: 'lz',
+      kind: OperationKind.uprising,
+      graph: ObjectiveGraph([
+        Objective(id: 'seat', kind: ObjectiveKind.seat, value: 12, width: 20, control: -1, e: 0, n: 0),
+        Objective(id: 'lz', kind: ObjectiveKind.lz, value: 2, width: 24, control: 1, e: 150, n: 0),
+      ], [
+        ObjectiveLink('lz', 'seat', 107),
+      ]),
+      formations: [squad(0, CombatSide.attacker, 'lz'), squad(1, CombatSide.defender, 'seat')],
+      militia: MilitiaPool(),
+      defenderFaction: Factions.player,
+    );
+    final frame = CombatFrame.of(op);
+    final seat = frame.objectives.firstWhere((o) => o.id == 'seat');
+    expect(seat.control, 1, reason: 'the garrison holds it: the player\'s');
+    expect(frame.squads.firstWhere((s) => s.id == 1).side, CombatSide.attacker, reason: 'the garrison');
+    expect(frame.squads.firstWhere((s) => s.id == 0).side, CombatSide.defender, reason: 'the rebels');
   });
 
   test('bounds take in every objective', () {
