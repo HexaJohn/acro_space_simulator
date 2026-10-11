@@ -14,6 +14,14 @@ part of 'simulation_view.dart';
 class _CombatViewState {
   /// Operations whose result the player has been told.
   final Set<int> announced = {};
+
+  /// Each operation's ground radius under its target, m: sampled once (a
+  /// terrain query is ~16 ms in a graded town), never per frame.
+  final Map<int, double> groundR = {};
+
+  /// Operations the player has dismissed from the map (resolved ones fade
+  /// on their own).
+  final Set<int> hidden = {};
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -178,6 +186,124 @@ extension _SimulationViewCombat on _SimulationViewState {
     );
   }
 
+  /// The operation to draw over the view, if any: the one against the colony
+  /// in front of the camera — the open colony in city mode, otherwise any
+  /// colony within 30 km of the focus — running, or resolved less than a
+  /// minute of operation time ago.
+  ({Operation op, CitySim city})? _battleInView(WorldSnapshot snap) {
+    final focus = _focusWorldForPick(snap);
+    for (final op in _operations.operations.reversed) {
+      if (_combatState.hidden.contains(op.id)) continue;
+      if (op.resolved && op.seconds - op.resolvedAtStep > 60) continue;
+      if (op.phase == OperationPhase.mustering) continue;
+      CitySim? city;
+      for (final c in _cities.all()) {
+        if (c.id == op.targetColonyId) city = c;
+      }
+      if (city == null) continue;
+      if (widget.cityMode) {
+        if (city.id == _editingCity?.id) return (op: op, city: city);
+        continue;
+      }
+      final body = snap.bodies[city.body.id.value];
+      if (body == null || focus == null) continue;
+      final site = Vector3(body.px, body.py, body.pz) +
+          Quaternion(body.qw, body.qx, body.qy, body.qz).rotate(city.localToBodyFixed(
+              const Vec2(0, 0),
+              bodyRadiusM: _universe.current().body(city.body.id)?.radius ?? 0));
+      if ((site - focus).length < 30000) return (op: op, city: city);
+    }
+    return null;
+  }
+
+  double _battleGround(Operation op, CitySim city) => _combatState.groundR[op.id] ??= () {
+        final body = _universe.current().body(city.body.id);
+        if (body == null) return 0.0;
+        final lat = city.cityLat * math.pi / 180.0;
+        final lon = city.cityLon * math.pi / 180.0;
+        final dir = Vector3(math.cos(lat) * math.cos(lon),
+            math.cos(lat) * math.sin(lon), math.sin(lat));
+        final field = body.terrainFieldWith(_terrainEdits.forBody(body.id));
+        return field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
+      }();
+
+  /// The battle overlay over [snap], or null with no battle in view.
+  Widget? _battleOverlay(WorldSnapshot? snap) {
+    if (snap == null) return null;
+    final hit = _battleInView(snap);
+    if (hit == null) return null;
+    final body = snap.bodies[hit.city.body.id.value];
+    final focus = _focusWorldForPick(snap);
+    if (body == null || focus == null) return null;
+    final bodyWorld = Vector3(body.px, body.py, body.pz);
+    final q = Quaternion(body.qw, body.qx, body.qy, body.qz);
+    // A few metres up, so a ring on a slope is not under the slope.
+    final r = _battleGround(hit.op, hit.city) + 3;
+    final cam = _camera;
+    Vector3 rel(double e, double n) =>
+        bodyWorld + q.rotate(hit.city.localToBodyFixed(Vec2(e, n), bodyRadiusM: r)) - focus;
+    Offset? project(double e, double n) {
+      final p = cam.projectPx(rel(e, n));
+      if (p == null) return null;
+      return Offset(_screenW / 2 + p.x, _screenH / 2 - p.y);
+    }
+
+    double scale(double e, double n) => cam.radiusPx(rel(e, n), 1.0);
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: CustomPaint(
+          key: Key('battle-overlay-${hit.op.id}'),
+          painter: BattleOverlayPainter(
+            frame: CombatFrame.of(hit.op),
+            project: project,
+            scale: scale,
+            timeS: _clock.epoch.seconds,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Frames the camera on [op]'s battle: the city rig's freecam anchor,
+  /// parked over the battle's centre, backed off to take all of it in.
+  void _watchBattle(Operation op) {
+    CitySim? city;
+    for (final c in _cities.all()) {
+      if (c.id == op.targetColonyId) city = c;
+    }
+    if (city == null) return;
+    final b = CombatFrame.of(op).bounds;
+    _combatState.hidden.remove(op.id);
+    rebuild(() {
+      _freecamRef = city!.body.id;
+      _freecamRelLocal = city.localToBodyFixed(Vec2(b.e, b.n),
+          bodyRadiusM: _battleGround(op, city));
+      _freecam = true;
+      _craftCam = false;
+      _walkMode = false;
+      _upMode = CameraUpMode.gravity;
+      _view = _view.copyWith(elevation: 0.9, roll: 0);
+      _range = (b.radius * 3.2).clamp(700.0, 8000.0);
+    });
+  }
+
+  void _order(Operation op, String order, {String? target}) => _operations.inbox.enqueue(
+      OrderOperationCommand(const PlayerId('player'), 0, op.id, order, target: target));
+
+  /// Every ready trooper the other colonies can send, as reinforcements.
+  List<({String colonyId, String siteId, int count})> _readyDraws(String targetId) {
+    CitySim? target;
+    for (final c in _cities.all()) {
+      if (c.id == targetId) target = c;
+    }
+    if (target == null) return const [];
+    return [
+      for (final s in forceSourcesFor(target, _cities.all()))
+        for (final t in s.trooperSources())
+          if (t.ready) (colonyId: s.id, siteId: t.siteId, count: t.available),
+    ];
+  }
+
   void _openOperationDrawer(Operation op) {
     // Only a result is seen by opening it: a look at the fight mid-way must
     // not hide the chip that will say how it ended.
@@ -238,8 +364,67 @@ extension _SimulationViewCombat on _SimulationViewState {
                   if (f.alive)
                     line('  ${f.count} ${f.kind.name} · ${where(f)}',
                         'morale ${(f.morale * 100).round()}%'),
+                if (!op.resolved && op.phase == OperationPhase.engaged) ...[
+                  const SizedBox(height: 10),
+                  Text('Orders', style: AppTheme.dim),
+                  const SizedBox(height: 4),
+                  Wrap(spacing: 6, runSpacing: 4, children: [
+                    for (final (kind, label) in const [
+                      (OrderKind.auto, 'Follow the plan'),
+                      (OrderKind.hold, 'Hold'),
+                      (OrderKind.fallBack, 'Fall back to the LZ'),
+                    ])
+                      ChoiceChip(
+                        key: Key('combat-order-${kind.name}'),
+                        label: Text(label),
+                        selected: op.order == kind,
+                        onSelected: (_) {
+                          _order(op, kind.name);
+                          Navigator.of(ctx).maybePop();
+                        },
+                      ),
+                    for (final o in op.graph.objectives)
+                      if (o.kind != ObjectiveKind.lz && o.control < 0.5)
+                        ChoiceChip(
+                          key: Key('combat-attack-${o.id}'),
+                          label: Text('Attack ${place(o.id).replaceFirst('the ', '')}'),
+                          selected: op.order == OrderKind.attack && op.orderTarget == o.id,
+                          onSelected: (_) {
+                            _order(op, 'attack', target: o.id);
+                            Navigator.of(ctx).maybePop();
+                          },
+                        ),
+                  ]),
+                ],
                 const SizedBox(height: 12),
                 Row(children: [
+                  if (!op.resolved && op.phase != OperationPhase.mustering)
+                    TextButton(
+                      key: const Key('combat-watch'),
+                      onPressed: () {
+                        Navigator.of(ctx).maybePop();
+                        _watchBattle(op);
+                      },
+                      child: Text('Watch', style: AppTheme.body.copyWith(color: AppTheme.accent)),
+                    ),
+                  if (!op.resolved)
+                    Builder(builder: (_) {
+                      final draws = _readyDraws(op.targetColonyId);
+                      final n = draws.fold<int>(0, (a, d) => a + d.count);
+                      return TextButton(
+                        key: const Key('combat-reinforce'),
+                        onPressed: n == 0
+                            ? null
+                            : () {
+                                _operations.inbox.enqueue(ReinforceOperationCommand(
+                                    const PlayerId('player'), 0, op.id,
+                                    draws: draws,
+                                    kitDays: op.kind == OperationKind.colonyAssault ? 6 : 3));
+                                Navigator.of(ctx).maybePop();
+                              },
+                        child: Text(n == 0 ? 'No reinforcements ready' : 'Reinforce ($n)'),
+                      );
+                    }),
                   const Spacer(),
                   if (!op.resolved)
                     TextButton(
@@ -273,6 +458,9 @@ extension _SimulationViewCombat on _SimulationViewState {
   ///   launch=1[&garrison=N][&kit=D][&roe=standard]
   ///                               launch every ready trooper at the open colony
   ///   panel=independence|occupation  open the colony's panel
+  ///   watch=ID                    frame the camera on an operation's battle
+  ///   order=auto|hold|fallBack|attack:OBJ   the running operation's order
+  ///   reinforce=1                 send every ready trooper as reinforcements
   ///   charter=ready               an occupied colony has held the line 11 days
   ///   step=S                      run S seconds of world ticks now
   ///   planner=open | drawer=ID    open the planner, or an operation's drawer
@@ -320,6 +508,33 @@ extension _SimulationViewCombat on _SimulationViewState {
       did['step'] = n;
       if (mounted) rebuild(() {});
     }
+    final watch = int.tryParse(p['watch'] ?? '');
+    if (watch != null) {
+      final op = _operations.byId(watch);
+      if (op != null) _watchBattle(op);
+    }
+    final ordered = p['order'];
+    if (ordered != null) {
+      final running = target == null ? null : _operations.runningAgainst(target.id);
+      if (running != null) {
+        final i = ordered.indexOf(':');
+        if (i < 0) {
+          _order(running, ordered);
+        } else {
+          _order(running, ordered.substring(0, i), target: ordered.substring(i + 1));
+        }
+        did['order'] = ordered;
+      }
+    }
+    if (p['reinforce'] != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      if (running != null) {
+        final draws = _readyDraws(target.id);
+        _operations.inbox.enqueue(ReinforceOperationCommand(const PlayerId('player'), 0, running.id,
+            draws: draws, kitDays: running.kind == OperationKind.colonyAssault ? 6 : 3));
+        did['reinforce'] = draws.fold<int>(0, (a, d) => a + d.count);
+      }
+    }
     if (p['dismiss'] != null) Navigator.of(context).maybePop();
     if (p['planner'] == 'open' && target != null) _openForcePlanner(target);
     if (p['panel'] == 'independence' && target != null) showIndependence(context, target);
@@ -343,6 +558,12 @@ extension _SimulationViewCombat on _SimulationViewState {
             'seconds': op.seconds,
             'control': op.graph.byId(op.goalId)?.control,
             'attackers': {'alive': op.attackerAlive, 'wounded': op.attackerWounded, 'dead': op.attackerDead},
+            'raised': op.attackerRaised,
+            'order': op.order.name,
+            'landers': [for (final l in op.landers) l.state.name],
+            'objectives': {
+              for (final o in op.graph.objectives) o.id: double.parse(o.control.toStringAsFixed(2)),
+            },
             'defenders': {'raised': op.defenderRaised, 'removed': op.defenderRemoved, 'surrendered': op.defenderSurrendered},
           },
       ],

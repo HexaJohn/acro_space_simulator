@@ -47,6 +47,7 @@ import 'screens/city_game_hud.dart';
 import 'screens/app_theme.dart';
 import 'screens/city_site_actions.dart';
 import 'screens/city_control_ui.dart' show showIndependence;
+import 'screens/combat/battle_overlay.dart';
 import 'screens/combat/combat_hooks.dart';
 import 'screens/combat/occupation_panel.dart';
 import 'screens/combat/operation_planner_sheet.dart';
@@ -55,6 +56,7 @@ import '../../domain/colony/city/city_starter_kit.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/colony/city/commodity.dart';
 import '../../application/usecases/force_landers.dart';
+import '../../domain/combat/combat_frame.dart';
 import '../../domain/combat/formation.dart';
 import '../../domain/combat/lander.dart';
 import '../../domain/combat/objective.dart';
@@ -3216,6 +3218,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         ),
                       ),
                     ),
+                  // The battle over the colony (combat.md §7B): a command
+                  // overlay projected from the operation's ground.
+                  if (_battleOverlay(_sceneWorld) case final battle?) battle,
                   // Reflection-capture debug overlay (bottom-left, above the
                   // build stamp) — the equirect the craft's IBL reflects.
                   if (PlanetEnvironmentBaker.showDebug)
