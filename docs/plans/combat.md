@@ -615,6 +615,49 @@ not per objective (under 1 km apart, against 100 km and more of slant).
 slant), the strike fired at once, flew 50 s, spent its round, rested 60 s and cratered the power plant (Standard ROE;
 no defenders there).
 
+## 7F. Spike S: results (2026-10-11)
+
+Measured on the Moon dev colony (profile, Windows) and on settled starter towns (headless, `test/combat/spike_s_test.dart`;
+in-app through `ext.acro.combat?spike=ground` and `spikeFrames=start|report`).
+
+| # | Result | Pass line | Verdict and what follows *(default)* |
+|---|---|---|---|
+| 1 | `surfaceRadiusAt` 0.42 ms a cell AOT (p95 0.49), 100% of cells under a brush: 9.5 s on one thread, 2.4 s on 4 workers | pool bakes 1.2 km within 90 s, ≤ 1 ms a frame on the main thread | **Pass** on a pool; a main-thread bake at 1 ms a frame would take 160 s, so the worker pool is 4a's first deliverable. 1.2 km stays |
+| 2 | — | ≤ 1 stuck squad in 20 runs | Measured in 4b, which it gates |
+| 3 | Drawn mesh vs field, 200 points: p50 0.0002 m, **p95 0.60 m**; hulls not built yet | terrain ≤ 0.3 m p95; hulls ≤ 0.5 m p95 | **Miss** (terrain). The plan's fallback: the sim stays on the raster, the camera and the nearest units take a smoothed (drawn − raster) offset. Hulls measured when 4a builds them |
+| 4 | — | draws ≤ 0.6 ms, FX ≤ 0.5 ms | Measured in 4a with the unit renderer, before the rest of 4a leans on it |
+| 5 | Frame span p75 **19.5 ms** static at the colony, 21.8 ms over the battle (p50 15.1 / 21.0, p95 26.2 / 24.6) | ≥ 1.5 ms headroom under 16.7 ms p75 | **Miss**: the flight view is over budget before any soldier. The plan's fallback: 4a starts by moving the walker onto the raster (no field sample while joined), and every 4a draw is A/B'd |
+| 6 | Starter towns on the Moon, Mars, Earth: LZ 800 m out (past the spaceport apron), 7/7 module and 4/4 turret sockets free; fit at 1.2 km, not 800 m; outpost ground beside 3 of 3 objectives (`outpostGround`) | ≥ 5/7 and 4/4; fit at 1.2 km and 800 m; outposts at ≥ 2 | **Pass** but the 800 m fit, moot while item 1 keeps 1.2 km (800 m was only item 1's fallback; web has no live fighting) |
+
+## 7G. Phase 4a spec: The soldier, against a static defence
+
+Specified 2026-10-11 on Spike S's results; defaults *(default)* for review.
+
+**Ships:** "Launch and join." Step out at the LZ as one of your troopers, fight for an objective against defenders
+holding their positions, die and redeploy, or leave and let it auto-resolve.
+
+**The raster:** 1.2 km at 8 m, centred between the LZ and the goal, baked during transit by `GroundSamplePool`
+(persistent isolates holding the field once, the mesh pool's pattern; inline on web), objectives first. Bilinear
+height; never a field sample while joined. Not saved: re-baked after a load (seconds on the pool).
+
+**Join:** from the drawer once engaged and baked: you become a trooper of the lowest-id squad at the LZ, on foot
+there with a rifle; warp held at 1× while joined; Leave from the drawer or Esc. The walker's ground is the raster
+plus the smoothed drawn offset (Spike S item 3).
+
+**The bubble (`live/live_battle.dart`):** every formation member in the square, up to 24 a side, stands as a unit
+in a ring round its objective (holding, no navigation). The abstract fight goes on; a member the resolver removes
+leaves the bubble. Defenders in range fire at you every 1.5–2.5 s (seeded per unit, emplacements 3×), hit chance
+`0.5·min(1, 40 m / d)`, 20 damage. Your rifle: hitscan, 6 rounds a second, 30 a magazine, R reloads in 2 s, 40
+damage, 300 m. Each kill and your death reach the battle as `LiveKillCommand`s at the tick (one member removed);
+dead, a 5 s death camera, then REDEPLOY as the next trooper of a squad at the LZ, or out if none is left.
+
+**Render and HUD:** `CombatUnitNodes`, primitive instanced soldiers by side and tracers (Spike S item 4 measured
+here); health, ammo, crosshair, squad and REDEPLOY on the HUD.
+
+**Cut *(default)*:** navigation and live allies (4b), building hulls and line of sight (shots pass through
+buildings), the domain walker and `AvatarInputCommand` (the bubble is a presenter whose effects are commands),
+the input rebind layer, saving the raster, live modules, charges and jump jets, the battle menu.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.
