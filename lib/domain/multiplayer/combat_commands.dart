@@ -53,11 +53,16 @@ sealed class CombatCommand extends SimCommand {
       case 'order':
         return OrderOperationCommand(by, tick, (j['op'] as num).toInt(), j['order'] as String,
             target: j['target'] as String?);
+      case 'power':
+        return CommanderPowerCommand(by, tick, (j['op'] as num).toInt(), j['power'] as String,
+            target: j['target'] as String?);
       case 'base':
         return BaseOrderCommand(by, tick, (j['op'] as num).toInt(), j['action'] as String,
             module: j['module'] as String?,
             ring: j['ring'] as String?,
-            socket: (j['socket'] as num?)?.toInt());
+            socket: (j['socket'] as num?)?.toInt(),
+            site: (j['site'] as num?)?.toInt(),
+            value: j['value'] as String?);
       case 'reinforce':
         return ReinforceOperationCommand(
           by,
@@ -222,17 +227,21 @@ class ReinforceOperationCommand extends CombatCommand {
       };
 }
 
-/// An order to an operation's forward base (combat.md §7C): `build` a
-/// [module] in [ring] socket [socket], `cancel` the build under way,
-/// `demolish` what stands in a socket, or `formSquad` from the reserve.
+/// An order to an operation's forward base (combat.md §7C, §7D): `build` a
+/// [module] in [ring] socket [socket] of [site], `cancel` line [socket] of
+/// [site], `demolish` what stands in a socket, `formSquad` from the reserve,
+/// `upgrade` to tier [value], `outpost` beside objective [value],
+/// `doctrine` [value], or deploy the `spareCore` at objective [value].
 class BaseOrderCommand extends CombatCommand {
   const BaseOrderCommand(super.issuedBy, super.tick, this.operationId, this.action,
-      {this.module, this.ring, this.socket});
+      {this.module, this.ring, this.socket, this.site, this.value});
   final int operationId;
   final String action;
   final String? module;
   final String? ring;
   final int? socket;
+  final int? site;
+  final String? value;
 
   @override
   String get targetAssetId => 'operation:$operationId';
@@ -247,5 +256,30 @@ class BaseOrderCommand extends CombatCommand {
         if (module != null) 'module': module,
         if (ring != null) 'ring': ring,
         if (socket != null) 'socket': socket,
+        if (site != null) 'site': site,
+        if (value != null) 'value': value,
+      };
+}
+
+/// A commander power (combat.md §7D): `supplyDrop`, or `medevac` from
+/// objective [target].
+class CommanderPowerCommand extends CombatCommand {
+  const CommanderPowerCommand(super.issuedBy, super.tick, this.operationId, this.power,
+      {this.target});
+  final int operationId;
+  final String power;
+  final String? target;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'power',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'power': power,
+        if (target != null) 'target': target,
       };
 }

@@ -142,11 +142,32 @@ class ResolverTuning {
 /// only. Phase 1 is M ≡ 1: pinned by a test, so counters change nothing until
 /// the base and vehicles give them something to counter.
 class CounterTuning {
-  const CounterTuning.uniform() : _m = null;
-  const CounterTuning(List<List<double>> m) : _m = m;
+  const CounterTuning.uniform()
+      : _m = null,
+        name = 'uniform';
+  const CounterTuning(List<List<double>> m, {this.name = 'custom'}) : _m = m;
 
   final List<List<double>>? _m;
 
+  /// Saved with an operation, so a load fights on the table it launched on.
+  final String name;
+
   double factor(CounterClass dealer, CounterClass target) =>
       _m == null ? 1.0 : _m[dealer.index][target.index];
+
+  static CounterTuning byName(String? n) => n == kCounters.name ? kCounters : const CounterTuning.uniform();
 }
+
+/// The 1b-ii table (combat.md §7D), rows the dealer, columns the target, in
+/// [CounterClass] order (inf, empHmg, empAt, empAa, arm, air, structure): a
+/// heavy machine gun cuts infantry down, and infantry behind a gun's arc
+/// suffer it; everything else is even until armour and air arrive.
+const CounterTuning kCounters = CounterTuning([
+  [1, 0.8, 0.8, 0.8, 1, 1, 1],
+  [1.25, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+  [1, 1, 1, 1, 1, 1, 1],
+], name: 'halo1');

@@ -83,9 +83,12 @@ class SquadMark {
 /// A base module as drawn: round the LZ, in its ring (1b-i has no layout, so
 /// a socket's place is its index on the ring).
 class BaseMark {
-  const BaseMark(this.kind, this.e, this.n, {this.building = false});
-  final ModuleKind? kind; // null: the core
+  const BaseMark(this.kind, this.e, this.n, {this.building = false, this.outpost = false});
+  final ModuleKind? kind; // null: the core, or an outpost's marker
   final double e, n;
+
+  /// An outpost's marker (with [kind] null).
+  final bool outpost;
 
   /// Still on the line.
   final bool building;
@@ -216,23 +219,31 @@ class CombatFrame {
 
     final base = <BaseMark>[];
     final b = op.base;
-    if (b != null && b.standing && lz != null) {
-      (double, double) ring(SocketKind s, int i) {
-        final r = s == SocketKind.module ? 45.0 : 75.0;
-        final n = s == SocketKind.module ? kFirebaseModuleSockets : kFirebaseTurretSockets;
-        final a = 2 * math.pi * i / n + (s == SocketKind.module ? math.pi / 2 : 0);
-        return (lz.e + r * math.cos(a), lz.n + r * math.sin(a));
-      }
+    if (b != null && b.standing) {
+      for (final s in b.sites) {
+        if (s.razed) continue;
+        final o = nodes[s.objectiveId];
+        if (o == null) continue;
+        // An outpost stands beside its objective, the core on the LZ.
+        final isCore = identical(s, b.core) && !s.outpost;
+        final cx = isCore ? o.e : o.e + 55, cy = isCore ? o.n : o.n + 35;
+        (double, double) ring(SocketKind k, int i) {
+          final r = k == SocketKind.module ? (s.outpost ? 22.0 : 45.0) : (s.outpost ? 34.0 : 75.0);
+          final n = s.socketsOf(k);
+          final a = 2 * math.pi * i / (n == 0 ? 1 : n) + (k == SocketKind.module ? math.pi / 2 : 0);
+          return (cx + r * math.cos(a), cy + r * math.sin(a));
+        }
 
-      base.add(BaseMark(null, lz.e, lz.n));
-      for (final m in b.modules) {
-        final p = ring(m.spec.socket, m.socket);
-        base.add(BaseMark(m.kind, p.$1, p.$2));
-      }
-      final j = b.job;
-      if (j != null) {
-        final p = ring(moduleSpec(j.kind).socket, j.socket);
-        base.add(BaseMark(j.kind, p.$1, p.$2, building: true));
+        base.add(BaseMark(null, cx, cy, outpost: !isCore));
+        for (final m in s.modules) {
+          final p = ring(m.spec.socket, m.socket);
+          base.add(BaseMark(m.kind, p.$1, p.$2));
+        }
+        for (final j in s.lines) {
+          if (j == null || j.kind == null) continue;
+          final p = ring(moduleSpec(j.kind!).socket, j.socket);
+          base.add(BaseMark(j.kind, p.$1, p.$2, building: true));
+        }
       }
     }
     return CombatFrame(

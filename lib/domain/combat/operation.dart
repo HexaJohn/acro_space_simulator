@@ -136,6 +136,12 @@ class Operation {
     this.orderTarget,
     List<LanderRecord>? landers,
     this.base,
+    this.airless = false,
+    this.chargeAt,
+    this.chargeUntilStep = -1,
+    this.chargeReadyStep = 0,
+    this.supplyDropReadyStep = 0,
+    this.medevacReadyStep = 0,
     Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
@@ -223,6 +229,64 @@ class Operation {
 
   /// The forward base at the LZ (§7C), or null for a light operation.
   final ForwardBase? base;
+
+  /// The target's body has no air: jump jets work (§7D).
+  final bool airless;
+
+  /// A charge under way (§7D): the objective, and when it ends.
+  String? chargeAt;
+  int chargeUntilStep;
+
+  /// When the next charge, supply drop and Medevac may be ordered.
+  int chargeReadyStep;
+  int supplyDropReadyStep;
+  int medevacReadyStep;
+
+  /// How long a charge lasts, and its rest; and the powers' cooldowns.
+  static const int chargeS = 30;
+  static const double chargeFire = 1.5;
+  static const double chargeMoraleCost = 0.1;
+  int get chargeCooldownS => (tuning.daySec * 2).round();
+  int get supplyDropCooldownS => (tuning.daySec * 2).round();
+  int get medevacCooldownS => tuning.daySec.round();
+
+  /// Orders a charge at [objectiveId]: the squads there fight ×1.5 for 30 s,
+  /// then pay for it in morale. Null, or why not.
+  String? charge(String objectiveId) {
+    if (resolved || phase != OperationPhase.engaged) return 'Not now.';
+    final t = clock.steps;
+    if (t < chargeReadyStep) return 'The squads are still catching their breath.';
+    if (!formations.any((f) => f.side == CombatSide.attacker && f.presentAt(objectiveId, t))) {
+      return 'No squads are there.';
+    }
+    chargeAt = objectiveId;
+    chargeUntilStep = t + chargeS;
+    chargeReadyStep = t + chargeCooldownS;
+    return null;
+  }
+
+  /// A commander power (§7D): an emergency supply drop or a Medevac. Null, or
+  /// why not.
+  String? power(String name, {String? objectiveId}) {
+    final b = base;
+    if (resolved || b == null || !b.standing) return 'The base is not standing.';
+    final t = clock.steps;
+    switch (name) {
+      case 'supplyDrop':
+        if (t < supplyDropReadyStep) return 'The next supply drop is not ready.';
+        b.supplyDrop(this);
+        supplyDropReadyStep = t + supplyDropCooldownS;
+        return null;
+      case 'medevac':
+        if (t < medevacReadyStep) return 'The Medevac is not ready.';
+        if (!b.hospitalOnline) return 'Medevac needs a field hospital.';
+        if (objectiveId == null) return 'Medevac from where?';
+        b.medevac(this, objectiveId);
+        medevacReadyStep = t + medevacCooldownS;
+        return null;
+    }
+    return 'No such power.';
+  }
 
   Formation? formationById(int id) {
     for (final f in formations) {
@@ -403,6 +467,8 @@ class Operation {
           }
         }
         base?.step(this, t);
+        _chargeEnd(t);
+        _digIn(t);
         if ((t - engagedAtStep) % tuning.aiEveryS == 0) {
           _defenderAi(t);
           _attackerAi(t);
@@ -458,7 +524,8 @@ class Operation {
       final f = formations[i];
       if (f.engagedMembers == 0) f.engagedMembers = f.count;
     }
-    final fire = roe == Roe.standard ? tuning.standardFire : 1.0;
+    final charging = chargeAt == o.id && t < chargeUntilStep;
+    final fire = (roe == Roe.standard ? tuning.standardFire : 1.0) * (charging ? chargeFire : 1.0);
     final attS = [
       for (final i in att)
         formationStrength(formations[i], tuning,
@@ -476,7 +543,7 @@ class Operation {
       defS: defS,
       defC: [for (final i in def) formations[i].counterClass],
       width: o.width,
-      fDef: o.fDef,
+      fDef: o.fDef + (o.dugIn ? kDigInFortification : 0),
       fAtt: o.fAtt + (base?.fAttBonus(o.id, lzId) ?? 0),
       fuzz: fuzz,
       dt: dt,
@@ -498,6 +565,41 @@ class Operation {
       }
     }
     _holdClock(o);
+  }
+
+  /// A charge spent: the squads that made it pay in morale.
+  void _chargeEnd(int t) {
+    final at = chargeAt;
+    if (at == null || t < chargeUntilStep) return;
+    for (final f in formations) {
+      if (f.side == CombatSide.attacker && f.at == at && f.alive) {
+        f.morale = (f.morale - chargeMoraleCost).clamp(0.0, 1.0);
+      }
+    }
+    chargeAt = null;
+  }
+
+  /// Seconds unthreatened before a colony's defenders dig in at an objective.
+  static const int digInAfterS = 120;
+
+  /// Defenders of a colony dig in where nobody has come for them (§7D): an
+  /// objective no attacker is at or marching on for two minutes fights from
+  /// +0.3 until the attacker holds it. A colony assault's only: a port's
+  /// rebels hold what they seized and no more.
+  void _digIn(int t) {
+    if (kind != OperationKind.colonyAssault) return;
+    for (final o in graph.objectives) {
+      if (o.kind == ObjectiveKind.lz) continue;
+      if (o.control >= tuning.holdingControl) {
+        o.dugIn = false;
+        o.quietS = 0;
+        continue;
+      }
+      final threatened = formations.any((f) =>
+          f.side == CombatSide.attacker && f.alive && !f.broken && f.at == o.id);
+      o.quietS = threatened ? 0 : o.quietS + 1;
+      if (o.quietS >= digInAfterS) o.dugIn = true;
+    }
   }
 
   void _holdClock(Objective o) {
@@ -611,6 +713,12 @@ class Operation {
     }
   }
 
+  /// Jump jets: regulars cross airless ground 40% faster (§7D).
+  int _marchFor(Formation f, String from, String to) {
+    final s = graph.marchS(from, to);
+    return airless && f.kind == FormationKind.regular ? (s * 0.6).round() : s;
+  }
+
   List<String>? _pathCache;
 
   /// The shortest march from the LZ to the goal, by seconds, ties broken by
@@ -695,7 +803,7 @@ class Operation {
           if (f.at == target.id || graph.byId(f.at) == null || !f.presentAt(f.at, t)) {
             continue;
           }
-          f.marchTo(target.id, t, graph.marchS(f.at, target.id));
+          f.marchTo(target.id, t, _marchFor(f, f.at, target.id));
         }
         return;
       case OrderKind.auto:
@@ -739,7 +847,7 @@ class Operation {
     final d = held / target.fAtt;
     if (a < tuning.advanceRatio * d) return;
     for (final f in movers) {
-      f.marchTo(target.id, t, graph.marchS(f.at, target.id));
+      f.marchTo(target.id, t, _marchFor(f, f.at, target.id));
     }
   }
 
@@ -965,6 +1073,13 @@ class Operation {
         if (order != OrderKind.auto) 'order': order.name,
         if (landers.isNotEmpty) 'landers': [for (final l in landers) l.toJson()],
         if (base != null) 'base': base!.toJson(),
+        if (counters.name != 'uniform') 'counters': counters.name,
+        if (airless) 'airless': true,
+        if (chargeAt != null) 'chargeAt': chargeAt,
+        if (chargeUntilStep >= 0) 'chargeUntil': chargeUntilStep,
+        if (chargeReadyStep != 0) 'chargeReady': chargeReadyStep,
+        if (supplyDropReadyStep != 0) 'dropReady': supplyDropReadyStep,
+        if (medevacReadyStep != 0) 'medevacReady': medevacReadyStep,
         if (orderTarget != null) 'orderTarget': orderTarget,
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
@@ -1022,13 +1137,19 @@ class Operation {
         base: j['base'] == null
             ? null
             : ForwardBase.fromJson((j['base'] as Map).cast<String, dynamic>()),
+        airless: j['airless'] == true,
+        chargeAt: j['chargeAt'] as String?,
+        chargeUntilStep: (j['chargeUntil'] as num?)?.toInt() ?? -1,
+        chargeReadyStep: (j['chargeReady'] as num?)?.toInt() ?? 0,
+        supplyDropReadyStep: (j['dropReady'] as num?)?.toInt() ?? 0,
+        medevacReadyStep: (j['medevacReady'] as num?)?.toInt() ?? 0,
         garrisonKit: {
           for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
             if ((j['garrisonKit'] as Map?)?[k] is num)
               k: ((j['garrisonKit'] as Map)[k] as num).toDouble(),
         },
         tuning: tuning,
-        counters: counters,
+        counters: j['counters'] == null ? counters : CounterTuning.byName(j['counters'] as String),
       );
 
   /// An independent copy (the preview runs these).

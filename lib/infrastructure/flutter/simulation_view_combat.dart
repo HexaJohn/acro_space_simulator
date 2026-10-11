@@ -380,24 +380,27 @@ extension _SimulationViewCombat on _SimulationViewState {
     });
   }
 
-  void _baseOrder(Operation op, String action, {ModuleKind? kind, SocketKind? ring, int? socket}) =>
+  void _baseOrder(Operation op, String action,
+          {ModuleKind? kind, SocketKind? ring, int? socket, int? site, String? value}) =>
       _operations.inbox.enqueue(BaseOrderCommand(const PlayerId('player'), 0, op.id, action,
-          module: kind?.name, ring: ring?.name, socket: socket));
+          module: kind?.name, ring: ring?.name, socket: socket, site: site, value: value));
 
   /// The drawer's Base section (combat.md §7C): what it has, what it is
   /// building, and a button for each module an empty socket can take.
   List<Widget> _baseRows(
       Operation op, ForwardBase b, BuildContext ctx, Widget Function(String, String) line) {
     String units(int c) => (c / 100).floor().toString();
+    final c = b.core;
     final status = b.overrun
-        ? 'Overrun'
+        ? 'Overrun${b.spareCore ? ' · a spare core is aboard' : ''}'
         : b.lost
-            ? 'Core lost with its lander'
+            ? 'Core lost with its lander${b.spareCore ? ' · a spare core is aboard' : ''}'
             : !b.deployed
                 ? (b.deployAtStep < 0
                     ? 'Deploys once the squads are down'
                     : 'Deploying · ${(b.deployAtStep - op.clock.steps).clamp(0, 999)} s')
-                : 'Firebase · ${b.modules.length} built';
+                : '${c == null ? '' : (c.outpost ? 'Spare core (outpost-sized)' : tierSpec(c.tier).label)}'
+                    ' · ${b.modules.length} built';
     final rows = <Widget>[
       const SizedBox(height: 10),
       Text('Forward base', style: AppTheme.dim),
@@ -409,25 +412,77 @@ extension _SimulationViewCombat on _SimulationViewState {
         line('Personnel', '${b.crewAssigned} crew · ${b.reserve} spare · '
             '${b.supportDead} dead · ${b.supportWounded} wounded'),
         line('Stock', 'rations ${units(b.stockOf('rations'))} · ammo ${units(b.stockOf('ammo'))} · '
-            'guns ${units(b.stockOf('guns'))}'),
-        line('Next supply run',
-            b.runs.any((r) => r.arriveStep >= 0) ? 'landing soon' : 'in ${(b.nextRunStep - op.clock.steps).clamp(0, 99999)} s'),
-        if (b.job case final j?)
-          Row(children: [
-            Expanded(
-                child: Text('  Building ${moduleSpec(j.kind).label} · ${j.remainingS} s',
-                    style: AppTheme.body)),
-            TextButton(
-              key: const Key('base-cancel'),
-              onPressed: () {
-                _baseOrder(op, 'cancel');
+            'guns ${units(b.stockOf('guns'))} · fuel ${units(b.stockOf('fuel'))} · '
+            'medicine ${units(b.stockOf('medicine'))} · steel ${units(b.stockOf('steel'))}'),
+        if (b.recoveredTotal > 0) line('Recovered wounded', '${b.recoveredTotal} waiting for the pod'),
+        Wrap(spacing: 6, children: [
+          for (final d in Doctrine.values)
+            ChoiceChip(
+              key: Key('base-doctrine-${d.name}'),
+              label: Text(_doctrineLabel(d)),
+              selected: b.doctrine == d,
+              onSelected: (_) {
+                _baseOrder(op, 'doctrine', value: d.name);
                 Navigator.of(ctx).maybePop();
               },
-              child: const Text('Cancel (half back)'),
             ),
-          ]),
-        for (final ring in SocketKind.values)
-          for (var i = 0; i < b.socketsOf(ring); i++) _socketRow(op, b, ring, i, ctx),
+        ]),
+        line('Next supply run',
+            b.runs.any((r) => r.arriveStep >= 0) ? 'landing soon' : 'in ${(b.nextRunStep - op.clock.steps).clamp(0, 99999)} s'),
+        for (var si = 0; si < b.sites.length; si++)
+          if (!b.sites[si].razed) ...[
+            if (si > 0 || b.sites[si].outpost)
+              Text('  ${b.sites[si].outpost ? 'Outpost beside the ${b.sites[si].objectiveId}' : 'Core'}',
+                  style: AppTheme.dim),
+            for (var li = 0; li < b.sites[si].lines.length; li++)
+              if (b.sites[si].lines[li] case final j?)
+                Row(children: [
+                  Expanded(
+                      child: Text('  Line ${li + 1}: ${j.label} · ${j.remainingS} s',
+                          style: AppTheme.body)),
+                  TextButton(
+                    key: Key('base-cancel-$si-$li'),
+                    onPressed: () {
+                      _baseOrder(op, 'cancel', site: si, socket: li);
+                      Navigator.of(ctx).maybePop();
+                    },
+                    child: const Text('Cancel (half back)'),
+                  ),
+                ]),
+            for (final ring in SocketKind.values)
+              for (var i = 0; i < b.sites[si].socketsOf(ring); i++) _socketRow(op, b, ring, i, ctx, site: si),
+          ],
+        if (c != null && !c.outpost && c.tier != BaseTier.fortress)
+          Builder(builder: (_) {
+            final next = BaseTier.values[c.tier.index + 1];
+            final t = tierSpec(next);
+            final why = b.whyNotUpgrade(next);
+            return Tooltip(
+              message: why ?? '${t.materiel} Materiel${t.steel > 0 ? ' + ${t.steel} steel' : ''} · ${t.buildS} s',
+              child: TextButton(
+                key: const Key('base-upgrade'),
+                onPressed: why == null
+                    ? () {
+                        _baseOrder(op, 'upgrade', value: next.name);
+                        Navigator.of(ctx).maybePop();
+                      }
+                    : null,
+                child: Text('Upgrade to ${t.label} (${t.materiel})'),
+              ),
+            );
+          }),
+        Wrap(spacing: 4, children: [
+          for (final o in op.graph.objectives)
+            if (o.kind != ObjectiveKind.lz && b.whyNotOutpost(op, o.id) == null)
+              TextButton(
+                key: Key('base-outpost-${o.id}'),
+                onPressed: () {
+                  _baseOrder(op, 'outpost', value: o.id);
+                  Navigator.of(ctx).maybePop();
+                },
+                child: Text('Open an outpost beside the ${o.id} ($kOutpostMateriel)'),
+              ),
+        ]),
         if (b.podOnline)
           Align(
             alignment: Alignment.centerLeft,
@@ -447,9 +502,18 @@ extension _SimulationViewCombat on _SimulationViewState {
     return rows;
   }
 
-  Widget _socketRow(Operation op, ForwardBase b, SocketKind ring, int i, BuildContext ctx) {
+  static String _doctrineLabel(Doctrine d) => switch (d) {
+        Doctrine.balanced => 'Balanced',
+        Doctrine.hold => 'Hold',
+        Doctrine.push => 'Push',
+        Doctrine.manual => 'Manual',
+      };
+
+  Widget _socketRow(Operation op, ForwardBase b, SocketKind ring, int i, BuildContext ctx,
+      {int site = 0}) {
+    final s = b.sites[site];
     BaseModule? here;
-    for (final m in b.modules) {
+    for (final m in s.modules) {
       if (m.spec.socket == ring && m.socket == i) here = m;
     }
     final label = ForwardBase.socketLabel(ring, i);
@@ -458,18 +522,18 @@ extension _SimulationViewCombat on _SimulationViewState {
         Expanded(
             child: Text('  $label: ${here.spec.label}${here.crewed ? '' : ' (no crew)'}',
                 style: AppTheme.body)),
-        if (!(ring == SocketKind.turret && i == 0))
+        if (!(site == 0 && ring == SocketKind.turret && i == 0))
           TextButton(
-            key: Key('base-demolish-${ring.name}-$i'),
+            key: Key('base-demolish-$site-${ring.name}-$i'),
             onPressed: () {
-              _baseOrder(op, 'demolish', ring: ring, socket: i);
+              _baseOrder(op, 'demolish', ring: ring, socket: i, site: site);
               Navigator.of(ctx).maybePop();
             },
             child: const Text('Demolish'),
           ),
       ]);
     }
-    if (b.job != null && b.job!.socket == i && moduleSpec(b.job!.kind).socket == ring) {
+    if (s.lines.any((j) => j != null && j.kind != null && j.socket == i && moduleSpec(j.kind!).socket == ring)) {
       return Text('  $label: building', style: AppTheme.dim);
     }
     final options = [
@@ -480,12 +544,14 @@ extension _SimulationViewCombat on _SimulationViewState {
       Text('  $label: empty', style: AppTheme.dim),
       for (final s in options)
         Tooltip(
-          message: b.whyNot(s.kind, i) ?? '${s.materiel} Materiel · ${s.buildS} s · ${s.crew} crew · ${s.powerKw.round()} kW',
+          message: b.whyNot(s.kind, i, site: site) ??
+              '${s.materiel} Materiel${s.steel > 0 ? ' + ${s.steel} steel' : ''} · ${s.buildS} s · '
+                  '${s.crew} crew · ${s.powerKw < 0 ? '+${-s.powerKw.round()}' : s.powerKw.round()} kW',
           child: TextButton(
-            key: Key('base-build-${s.kind.name}-$i'),
-            onPressed: b.whyNot(s.kind, i) == null
+            key: Key('base-build-$site-${s.kind.name}-$i'),
+            onPressed: b.whyNot(s.kind, i, site: site) == null
                 ? () {
-                    _baseOrder(op, 'build', kind: s.kind, ring: ring, socket: i);
+                    _baseOrder(op, 'build', kind: s.kind, ring: ring, socket: i, site: site);
                     Navigator.of(ctx).maybePop();
                   }
                 : null,
@@ -787,7 +853,10 @@ extension _SimulationViewCombat on _SimulationViewState {
                 'deployed': b.deployed,
                 'standing': b.standing,
                 'modules': [for (final m in b.modules) m.kind.name],
-                'job': b.job?.kind.name,
+                'job': b.job?.label,
+                'tier': b.core?.tier.name,
+                'sites': b.sites.length,
+                'doctrine': b.doctrine.name,
                 'materiel': b.materielC ~/ 100,
                 'pallets': b.palletsC ~/ 100,
                 'reserve': b.reserve,

@@ -115,7 +115,7 @@ class BattleOverlayPainter extends CustomPainter {
     if (m.kind == null) {
       final tp = TextPainter(
         text: TextSpan(
-          text: 'Base',
+          text: m.outpost ? 'Outpost' : 'Base',
           style: AppTheme.mono.copyWith(
               fontSize: 10, color: Colors.white, shadows: const [Shadow(blurRadius: 3)]),
         ),

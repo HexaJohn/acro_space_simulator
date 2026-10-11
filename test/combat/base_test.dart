@@ -30,7 +30,7 @@ void main() {
       name: s.name,
       bodyId: s.bodyId,
       sources: s.sources,
-      stock: {...s.stock, 'ore': ore},
+      stock: {...s.stock, 'ore': ore, 'medicine': 50, 'steel': 100, 'electronics': 50},
       supportAvailable: 20,
       buildings: buildings,
     );
@@ -82,18 +82,146 @@ void main() {
     expect(b.reserve, 8);
   });
 
-  test('Balanced builds pad, pod, turret — paying up front, one line, within power', () {
-    final op = assault();
+  test('Balanced builds pad, pod, the Station, Stores, a turret — paying up front, '
+      'a generator first when power would run short', () {
+    final op = assault(base: const BaseManifest(materiel: 600));
     final b = op.base!;
-    until(op, () => b.modules.length >= 4 || op.resolved, max: 3000);
-    expect(b.modules.map((m) => m.kind).toList().sublist(0, 4),
-        [ModuleKind.turret, ModuleKind.supplyPad, ModuleKind.barracksPod, ModuleKind.turret]);
-    expect(b.powerDemand, lessThanOrEqualTo(kCorePowerKw));
-    // A second pad would push demand past the core's 20 kW: never built.
+    until(op, () => b.core?.tier == BaseTier.station && b.countOf(ModuleKind.turret) >= 2 || op.resolved,
+        max: 4000);
+    final kinds = [for (final m in b.modules) m.kind];
+    expect(kinds.sublist(0, 3), [ModuleKind.turret, ModuleKind.supplyPad, ModuleKind.barracksPod]);
+    expect(b.core!.tier, BaseTier.station);
+    expect(b.core!.lines, hasLength(2), reason: 'a Station works two lines');
+    expect(b.countOf(ModuleKind.stores), 1, reason: 'built or on a line');
+    // No Hospital in the source: no field hospital.
+    expect(kinds, isNot(contains(ModuleKind.fieldHospital)));
+    expect(b.powerDemand, lessThanOrEqualTo(b.powerSupply + 1e-9));
+  });
+
+  test('Hold builds turrets first; Manual builds nothing', () {
+    final hold = assault(base: const BaseManifest(materiel: 600, doctrine: Doctrine.hold));
+    until(hold, () => hold.base!.modules.length >= 2, max: 3000);
+    expect(hold.base!.modules[1].kind, ModuleKind.turret);
+    final manual = assault(base: const BaseManifest(doctrine: Doctrine.manual));
+    until(manual, () => manual.base!.deployed);
     for (var i = 0; i < 300; i++) {
+      manual.advance(1);
+    }
+    expect(manual.base!.modules, hasLength(1), reason: 'only the landing turret');
+  });
+
+  test('a field hospital recovers the wounded into the reserve, and the pod forms them '
+      'into a squad', () {
+    final op = assault(
+        buildings: const ['barracks', 'gunfactory', 'hospital', 'spaceport'],
+        base: const BaseManifest(materiel: 600));
+    final b = op.base!;
+    until(op, () => b.hospitalOnline && b.podOnline, max: 4000);
+    expect(b.hospitalOnline, isTrue);
+    final f = op.formations.firstWhere(
+        (f) => f.side == CombatSide.attacker && f.kind == FormationKind.infantry && f.alive);
+    f.wounded += 6;
+    final raised = op.attackerRaised;
+    until(op, () => b.recoveredTotal >= 6, max: 200);
+    expect(f.wounded, 0);
+    until(op, () => op.attackerRaised > raised, max: 200);
+    expect(op.attackerRaised, greaterThan(raised), reason: 'a squad formed from the recovered');
+  });
+
+  test('the Station upgrade, then the Fortress — only with a Military Base at home', () {
+    final op = assault(base: const BaseManifest(materiel: 800));
+    final b = op.base!..doctrine = Doctrine.manual;
+    until(op, () => b.deployed);
+    expect(b.orderUpgrade(BaseTier.fortress), isFalse, reason: 'one tier at a time');
+    expect(b.orderUpgrade(BaseTier.station), isTrue);
+    until(op, () => b.core!.tier == BaseTier.station, max: 200);
+    expect(b.socketsOf(SocketKind.module), 5);
+    expect(b.whyNotUpgrade(BaseTier.fortress), contains('Military Base'));
+  });
+
+  test('a charge hits harder for 30 s, then costs morale; powers have cooldowns', () {
+    final op = assault();
+    until(op, () => op.phase == OperationPhase.engaged);
+    op.setOrder(OrderKind.hold);
+    expect(op.charge('seat'), isNotNull, reason: 'nobody is there');
+    expect(op.charge(op.lzId), isNull);
+    expect(op.charge(op.lzId), contains('breath'));
+    final f = op.formations.firstWhere((f) => f.side == CombatSide.attacker && f.at == op.lzId);
+    final m = f.morale;
+    for (var i = 0; i < 31; i++) {
       op.advance(1);
     }
-    expect(b.countOf(ModuleKind.supplyPad), 1);
+    expect(f.morale, lessThan(m + 0.06), reason: 'the charge was paid for');
+    until(op, () => op.base!.standing);
+    expect(op.power('supplyDrop'), isNull);
+    expect(op.power('supplyDrop'), contains('not ready'));
+    expect(op.base!.runs, isNotEmpty);
+    expect(op.power('medevac', objectiveId: op.lzId), contains('hospital'));
+  });
+
+  test('defenders of a colony dig in where nobody has come for them', () {
+    final op = assault();
+    until(op, () => op.phase == OperationPhase.engaged);
+    for (var i = 0; i < 130; i++) {
+      op.advance(1);
+    }
+    final quiet = [for (final o in op.graph.objectives) if (o.dugIn) o.id];
+    expect(quiet, isNotEmpty);
+    expect(op.graph.byId(op.lzId)!.dugIn, isFalse);
+  });
+
+  test('an outpost opens beside an objective held a minute, with its own line', () {
+    final op = assault(base: const BaseManifest(materiel: 800));
+    final b = op.base!..doctrine = Doctrine.manual;
+    until(op, () => b.deployed);
+    final o = op.graph.byId('power')!;
+    expect(b.whyNotOutpost(op, 'power'), contains('Hold it'));
+    for (var i = 0; i < 61; i++) {
+      o.control = 1;
+      op.advance(1);
+    }
+    expect(b.orderOutpost(op, 'power'), isTrue);
+    for (var i = 0; i < 45; i++) {
+      o.control = 1;
+      op.advance(1);
+    }
+    expect(b.sites, hasLength(2));
+    expect(b.sites.last.outpost, isTrue);
+    expect(b.fAttBonus('power', op.lzId), 0, reason: 'no module yet');
+    expect(b.orderBuild(ModuleKind.turret, 0, site: 1), isTrue);
+    for (var i = 0; i < 35; i++) {
+      o.control = 1;
+      op.advance(1);
+    }
+    expect(b.fAttBonus('power', op.lzId), closeTo(kOutpostFortification + kTurretFortification, 1e-9));
+    // Taken back, held a minute, it is razed.
+    for (var i = 0; i < 61; i++) {
+      o.control = -1;
+      op.advance(1);
+    }
+    expect(b.sites.last.razed, isTrue);
+  });
+
+  test('a spare core comes down at a held objective after an overrun', () {
+    final op = assault(base: const BaseManifest(spareCore: true));
+    final b = op.base!;
+    until(op, () => b.modules.length >= 2);
+    final lz = op.graph.byId(op.lzId)!;
+    for (var i = 0; i < 61 && !b.overrun; i++) {
+      lz.control = -1;
+      op.advance(1);
+    }
+    expect(b.overrun, isTrue);
+    final o = op.graph.byId('power')!..control = 1;
+    expect(b.orderSpareCore(op, 'power'), isNull);
+    for (var i = 0; i < kSpareCoreDeployS + 1; i++) {
+      o.control = 1;
+      op.advance(1);
+    }
+    expect(b.standing, isTrue);
+    expect(b.core!.outpost, isTrue);
+    expect(b.core!.objectiveId, 'power');
+    expect(b.whyNotUpgrade(BaseTier.station), contains('outpost-sized'));
   });
 
   test('a module needs its home gate: no Arms Factory, no second turret', () {
@@ -122,7 +250,7 @@ void main() {
 
   test("a player's order goes first, and a cancel refunds half", () {
     final op = assault(base: const BaseManifest(materiel: 600));
-    final b = op.base!..autoBuild = false;
+    final b = op.base!..doctrine = Doctrine.manual;
     until(op, () => b.deployed);
     expect(b.orderBuild(ModuleKind.barracksPod, 2), isTrue);
     op.advance(1);
@@ -232,6 +360,14 @@ void main() {
       back.advance(1);
     }
     expect(jsonEncode(back.toJson()), jsonEncode(x.toJson()));
+  });
+
+  test('counters are saved with the operation: HMG guns cut infantry down', () {
+    final op = assault(regulars: 0);
+    final back = Operation.fromJson(
+        (jsonDecode(jsonEncode(op.toJson())) as Map).cast<String, dynamic>());
+    expect(back.counters.name, op.counters.name);
+    expect(op.counters.factor(CounterClass.empHmg, CounterClass.inf), 1.25);
   });
 
   test('the base catalog is the combat\'s own, never a colony building', () {

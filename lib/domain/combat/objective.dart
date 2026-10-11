@@ -29,6 +29,8 @@ class Objective {
     this.heldS = 0,
     this.e = 0,
     this.n = 0,
+    this.quietS = 0,
+    this.dugIn = false,
   });
 
   final String id;
@@ -60,6 +62,11 @@ class Objective {
   /// it — march times are on the links.
   final double e, n;
 
+  /// Seconds no attacker has come for it, and whether its defenders have dug
+  /// in (§7D).
+  int quietS;
+  bool dugIn;
+
   /// The objective width for a footprint of [areaM2] square metres:
   /// `min(cap, 6 + 4·sqrt(m² / 10,000))` — a 1 ha port is about 10.
   static double widthFor(double areaM2, {double cap = 24}) =>
@@ -76,6 +83,8 @@ class Objective {
         if (heldS != 0) 'held': heldS,
         if (e != 0) 'e': e,
         if (n != 0) 'n': n,
+        if (quietS != 0) 'quiet': quietS,
+        if (dugIn) 'dugIn': true,
       };
 
   factory Objective.fromJson(Map<String, dynamic> j) => Objective(
@@ -89,8 +98,13 @@ class Objective {
         heldS: (j['held'] as num?)?.toInt() ?? 0,
         e: (j['e'] as num?)?.toDouble() ?? 0,
         n: (j['n'] as num?)?.toDouble() ?? 0,
+        quietS: (j['quiet'] as num?)?.toInt() ?? 0,
+        dugIn: j['dugIn'] == true,
       );
 }
+
+/// What dug-in defenders fight from, on top of the building's.
+const double kDigInFortification = 0.3;
 
 /// A march between two objectives, in whole seconds of operation time.
 class ObjectiveLink {

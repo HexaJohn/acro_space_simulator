@@ -122,8 +122,16 @@ const String kSupportSite = 'support';
 /// The share of its people a colony can spare as a base's support staff.
 const double kSupportShare = 0.05;
 
-/// The goods a base keeps, in its order (ammo, guns, rations).
-const List<String> kBaseGoods = [Commodity.ammo, Commodity.guns, Commodity.rations];
+/// The goods a base keeps, in its order (`kBaseStock`).
+const List<String> kBaseGoods = [
+  Commodity.ammo,
+  Commodity.guns,
+  Commodity.rations,
+  Commodity.fuel,
+  Commodity.medicine,
+  Commodity.steel,
+  Commodity.electronics,
+];
 
 /// What a war is fought with, in a fixed order.
 const List<String> kWarCommodities = [
@@ -480,6 +488,9 @@ extension CityWar on CitySim {
       stock: {
         for (final k in kWarCommodities) k: stockOf(k),
         Commodity.ore: stockOf(Commodity.ore),
+        Commodity.medicine: stockOf(Commodity.medicine),
+        Commodity.steel: stockOf(Commodity.steel),
+        Commodity.electronics: stockOf(Commodity.electronics),
       },
       supportAvailable: math.max(0, (population * kSupportShare).floor() - supportAway),
       buildings: have,
@@ -512,6 +523,16 @@ extension CityWar on CitySim {
         : (loyalty.reclaim.grievance ?? const Grievance())
             .severity(loyalty.reclaim.tuning, revoltsToSecede: loyalty.tuning.revoltsToSecede);
     final independent = loyalty.allegiance == Allegiance.independent;
+    // What a base's sockets must keep clear of, and the pads an LZ keeps its
+    // distance from (combat.md §7D).
+    final obstacles = <(double, double, double)>[];
+    final pads = <(double, double)>[];
+    for (final (p, s) in _sitesInOrder()) {
+      final c = p.centroid;
+      final r = math.sqrt(p.area) * 0.75;
+      obstacles.add((c.e, c.n, r));
+      if (s.siteKind == SiteKind.pad) pads.add((c.e, c.n));
+    }
     var regulars = 0;
     final guns = <EmplacementSite>[];
     var sheltered = 0.0;
@@ -545,6 +566,9 @@ extension CityWar on CitySim {
       emplacements: guns,
       shelterCover: population <= 0 ? 0 : (sheltered / population).clamp(0.0, 1.0),
       resolveBoost: colonyTimeS < war.resolveBoostUntilS ? kResolveBoost : 0,
+      airless: !body.hasAtmosphere,
+      obstacles: obstacles,
+      pads: pads,
     );
   }
 
@@ -621,7 +645,13 @@ extension CityWar on CitySim {
       case DeployWrite():
         war.deployed.add(DeployedTroopers(w.opId, w.siteId, w.troopers, w.jobs));
         // Kit, and a forward base's Materiel (ore).
-        for (final k in const [...kWarCommodities, Commodity.ore]) {
+        for (final k in const [
+          ...kWarCommodities,
+          Commodity.ore,
+          Commodity.medicine,
+          Commodity.steel,
+          Commodity.electronics,
+        ]) {
           final v = w.kit[k];
           if (v != null && v > 0) stock[k] = math.max(0.0, stockOf(k) - v);
         }
@@ -635,12 +665,13 @@ extension CityWar on CitySim {
         }
         final m = ship(Commodity.ore, w.materiel);
         final sent = [
-          for (var i = 0; i < kBaseGoods.length; i++) ship(kBaseGoods[i], w.stock[i])
+          for (var i = 0; i < kBaseGoods.length; i++)
+            ship(kBaseGoods[i], i < w.stock.length ? w.stock[i] : 0)
         ];
         war.outbox.add(BaseRunShippedEvent(w.opId, w.runId, m, sent));
       case BaseGoodsWrite():
         if (w.materiel > 0) stock[Commodity.ore] = stockOf(Commodity.ore) + w.materiel;
-        for (var i = 0; i < kBaseGoods.length; i++) {
+        for (var i = 0; i < kBaseGoods.length && i < w.stock.length; i++) {
           if (w.stock[i] > 0) stock[kBaseGoods[i]] = stockOf(kBaseGoods[i]) + w.stock[i];
         }
       case TroopersHomeWrite():

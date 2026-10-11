@@ -105,8 +105,16 @@ class CombatPhase {
       case RestoreCharterCommand():
         _find(cities, c.colonyId)?.war.inbox.add(const RestoreCharterWrite());
       case OrderOperationCommand():
+        final op = registry.byId(c.operationId);
+        if (c.order == 'charge') {
+          if (op != null && c.target != null) registry.lastRefusal = op.charge(c.target!);
+          break;
+        }
         final kind = OrderKind.values.where((k) => k.name == c.order).firstOrNull;
-        if (kind != null) registry.byId(c.operationId)?.setOrder(kind, target: c.target);
+        if (kind != null) op?.setOrder(kind, target: c.target);
+      case CommanderPowerCommand():
+        registry.lastRefusal =
+            registry.byId(c.operationId)?.power(c.power, objectiveId: c.target);
       case ReinforceOperationCommand():
         _reinforce(c, cities);
       case BaseOrderCommand():
@@ -115,15 +123,28 @@ class CombatPhase {
         if (op == null || b == null || op.resolved) break;
         final kind = ModuleKind.values.where((k) => k.name == c.module).firstOrNull;
         final ring = SocketKind.values.where((r) => r.name == c.ring).firstOrNull;
+        final site = c.site ?? 0;
         switch (c.action) {
           case 'build':
-            if (kind != null) b.orderBuild(kind, c.socket ?? b.firstFree(moduleSpec(kind).socket) ?? -1);
+            if (kind != null) {
+              b.orderBuild(kind, c.socket ?? b.firstFree(moduleSpec(kind).socket) ?? -1, site: site);
+            }
           case 'cancel':
-            b.cancelJob();
+            b.cancelJob(site: site, line: c.socket ?? 0);
           case 'demolish':
-            if (ring != null && c.socket != null) b.demolish(op, ring, c.socket!);
+            if (ring != null && c.socket != null) b.demolish(op, ring, c.socket!, site: site);
           case 'formSquad':
             b.formSquad(op);
+          case 'upgrade':
+            final t = BaseTier.values.where((x) => x.name == c.value).firstOrNull;
+            if (t != null) b.orderUpgrade(t);
+          case 'outpost':
+            if (c.value != null) b.orderOutpost(op, c.value!);
+          case 'doctrine':
+            final d = Doctrine.values.where((x) => x.name == c.value).firstOrNull;
+            if (d != null) b.doctrine = d;
+          case 'spareCore':
+            if (c.value != null) registry.lastRefusal = b.orderSpareCore(op, c.value!);
         }
     }
   }

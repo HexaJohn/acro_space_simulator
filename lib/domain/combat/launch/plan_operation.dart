@@ -15,6 +15,7 @@ import 'dart:math' as math;
 import '../base/base_modules.dart';
 import '../base/forward_base.dart';
 import '../defender_sizing.dart';
+import 'base_layout.dart';
 import '../formation.dart';
 import '../objective.dart';
 import '../operation.dart';
@@ -159,13 +160,29 @@ _Draws _drawAttackers(List<TrooperDraw> draws, List<SourceSnapshot> sources,
 
 /// What an operation ships to build a forward base (§7C).
 class BaseManifest {
-  const BaseManifest({this.materiel = 300, this.support = 10});
+  const BaseManifest({
+    this.materiel = 300,
+    this.support = 10,
+    this.fuel = 24,
+    this.medicine = 10,
+    this.steel = 0,
+    this.electronics = 0,
+    this.spareCore = false,
+    this.doctrine = Doctrine.balanced,
+  });
 
   /// Ore, whole units.
   final int materiel;
 
   /// Support staff.
   final int support;
+
+  /// Shipped as far as the lead source has them (§7D).
+  final int fuel, medicine, steel, electronics;
+
+  /// A spare core aboard (100 Materiel more).
+  final bool spareCore;
+  final Doctrine doctrine;
 }
 
 /// Days of kit the support staff carry.
@@ -202,7 +219,8 @@ const int kLandingTurretAmmo = 60;
   }
   if (src == null) return (base: null, debit: null, refusal: 'Unknown colony ${ids[lead]}.');
   final ore = src.stock['ore'] ?? 0;
-  if (ore + 1e-9 < manifest.materiel) {
+  final materielAll = manifest.materiel + (manifest.spareCore ? kSpareCoreMateriel : 0);
+  if (ore + 1e-9 < materielAll) {
     return (
       base: null,
       debit: null,
@@ -219,6 +237,12 @@ const int kLandingTurretAmmo = 60;
   final rations = kRationsPerDay * manifest.support * kSupportKitDays;
   final ammo = kAmmoPerDay * manifest.support * kSupportKitDays + kLandingTurretAmmo;
   final guns = manifest.support.toDouble();
+  // The rest goes as far as the source has it: none of it gates the launch.
+  double upTo(String k, int want) => math.min(want.toDouble(), math.max(0.0, src!.stock[k] ?? 0));
+  final fuel = upTo('fuel', manifest.fuel);
+  final medicine = upTo('medicine', manifest.medicine);
+  final steel = upTo('steel', manifest.steel);
+  final electronics = upTo('electronics', manifest.electronics);
   // What this source already gives its troopers, plus the base's share.
   double already(String k) {
     var v = 0.0;
@@ -251,14 +275,34 @@ const int kLandingTurretAmmo = 60;
       materielC: unpacked,
       palletsC: total - unpacked,
       support: manifest.support,
-      stockC: [(ammo * 100).round(), (guns * 100).round(), (rations * 100).round()],
+      stockC: [
+        for (final k in kBaseStock)
+          (switch (k) {
+                    'ammo' => ammo,
+                    'guns' => guns,
+                    'rations' => rations,
+                    'fuel' => fuel,
+                    'medicine' => medicine,
+                    'steel' => steel,
+                    'electronics' => electronics,
+                    _ => 0.0,
+                  } *
+                  100)
+              .round(),
+      ],
       gates: gates,
+      spareCore: manifest.spareCore,
+      doctrine: manifest.doctrine,
     ),
     debit: SourceDebit(src.colonyId, 'support', manifest.support, 0, {
-      'ore': manifest.materiel.toDouble(),
+      'ore': materielAll.toDouble(),
       'rations': rations,
       'ammo': ammo,
       'guns': guns,
+      if (fuel > 0) 'fuel': fuel,
+      if (medicine > 0) 'medicine': medicine,
+      if (steel > 0) 'steel': steel,
+      if (electronics > 0) 'electronics': electronics,
     }),
     refusal: null,
   );
@@ -314,7 +358,16 @@ PlannedOperation planPortRetake({
     at: 'port',
   ));
   final marchS = (kLzDistanceM / kInfantryMarchMps).round();
-  final lz = lzFrom(target.portE, target.portN);
+  final layout = layoutBase(
+      anchorE: target.portE,
+      anchorN: target.portN,
+      distanceM: kLzDistanceM,
+      obstacles: target.obstacles,
+      pads: target.pads);
+  final lz = (layout.e, layout.n);
+  planned?.base
+    ?..layoutBlockedModules = layout.blockedModules
+    ..layoutBlockedTurrets = layout.blockedTurrets;
   final op = Operation(
     id: operationId,
     targetColonyId: target.colonyId,
@@ -444,7 +497,16 @@ PlannedOperation planColonyAssault({
   // The LZ: out from the port (else the seat), away from the colony centre,
   // past the impound radius of its pads.
   final anchor = at['port'] ?? at['seat']!;
-  at['lz'] = lzFrom(anchor.$1, anchor.$2);
+  final layout = layoutBase(
+      anchorE: anchor.$1,
+      anchorN: anchor.$2,
+      distanceM: kLzDistanceM,
+      obstacles: target.obstacles,
+      pads: target.pads);
+  at['lz'] = (layout.e, layout.n);
+  planned?.base
+    ?..layoutBlockedModules = layout.blockedModules
+    ..layoutBlockedTurrets = layout.blockedTurrets;
   ids.add('lz');
   nodes.add(Objective(
       id: 'lz',
@@ -551,6 +613,8 @@ PlannedOperation planColonyAssault({
     lzId: 'lz',
     kind: OperationKind.colonyAssault,
     roe: roe,
+    airless: target.airless,
+    counters: kCounters,
     shelterCover: target.shelterCover,
     graph: ObjectiveGraph(nodes, links),
     formations: formations,

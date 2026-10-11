@@ -139,6 +139,9 @@ class LaunchSnapshot {
     this.emplacements = const [],
     this.shelterCover = 0,
     this.resolveBoost = 0,
+    this.airless = false,
+    this.obstacles = const [],
+    this.pads = const [],
   });
 
   final String colonyId;
@@ -182,4 +185,14 @@ class LaunchSnapshot {
 
   /// Resolve added after it beat an attack off (+0.2 for 10 days).
   final double resolveBoost;
+
+  /// Its body has no air (jump jets, §7D).
+  final bool airless;
+
+  /// Its buildings as circles (east, north, radius m): what a base socket
+  /// must keep clear of (§7D).
+  final List<(double, double, double)> obstacles;
+
+  /// Its landing pads' centres: an LZ keeps 400 m from every one.
+  final List<(double, double)> pads;
 }

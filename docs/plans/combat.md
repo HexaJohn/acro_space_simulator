@@ -522,6 +522,50 @@ power, personnel, sockets with build buttons, the line, Form squad); the overlay
 **Out of scope (1b-ii):** Station and Fortress, Stores, hospital, generator, workshop, the other doctrines, layout
 positions and the LZ picker, the spare core, outposts, counters, abilities, powers, the garrison post.
 
+**Built** ba83db0, 564eb1b; verified live on the Moon (core, pad, pod, pad; runs landed; struck and home).
+
+## 7D. Phase 1b-ii spec: The full base and the post
+
+Specified the same day as §7C, on the same footing.
+
+**Stocks** gain fuel, medicine, steel and electronics, shipped from the lead source and by runs; every stock and the
+unpacked Materiel are capped at 400 + 300 per Stores (pallets past the cap wait).
+
+**Tiers** (an upgrade takes a line): Station — 5 module and 4 turret sockets, 2 lines, 100 Materiel, 50 s;
+Fortress — 7 and 4, 3 lines, 160 Materiel + 20 steel, 60 s, +0.3 at the LZ, needs a source Military Base.
+
+**Modules:** Stores (20, 20 s, no crew or power; +300 caps); field hospital (40, 40 s, 2 crew, 4 kW, medicine 0.2 a
+patient-day, needs a source Hospital: every half day the wounded recover into the LZ reserve instead of going home);
+generator (40, 30 s, 1 crew, +30 kW, fuel 0.1/s); munitions workshop (60 + 10 steel, 50 s, 3 crew, 12 kW, needs an
+Arms Factory: 15 steel and 3 electronics a day into 30 ammo and 9 guns). The barracks pod forms recovered wounded
+into squads (4 or more waiting, every 30 s).
+
+**Doctrines:** Balanced (pad, pod, Station, Stores, hospital, turret, workshop, outpost, Fortress, then turrets),
+Hold (turret, turret, hospital, Station, turret, Stores, pad), Push (pad, pod, Station, a second pod, Stores,
+hospital, outpost), Manual (nothing). A generator jumps the list when power would run short.
+
+**Outposts:** at an objective the attacker has held at ≥ 0.9 for 60 s: 120 Materiel, 40 s, 2 module and 1 turret
+sockets, its own line; +0.3 and +0.25 a turret to that objective's `F_att`; offline while its control ≤ 0; razed at
+≤ −0.9 for 60 s. **Spare core:** shipped for 100 Materiel; after the core is lost or overrun, deployed in 60 s at a
+held objective as an outpost-sized base.
+
+**Layout:** sockets get positions — modules on a 45 m ring, turrets on a 75 m ring facing the enemy — and a socket on
+a building is blocked *(Spike S item 6, how many are free on real ground, is measured, not gated: the LZ is 450 m
+out from the town)*. The LZ picker tries eight bearings 450 m from the anchor and takes the one with the most free
+sockets, at least 400 m from every pad.
+
+**Counters** (`kCounters`): HMG emplacements ×1.25 against infantry, infantry ×0.8 against emplacements; the rest 1.
+**Abilities:** charge (an order: squads at an objective fight ×1.5 for 30 s, then lose 0.1 morale), jump jets
+(regulars march 40% faster on airless bodies), dig in (defenders unthreatened for 120 s at an objective fight from
++0.3 there until it is taken). **Powers** (`CommanderPowerCommand`): emergency supply drop (a run landing in half a
+day, every 2 days), Medevac (the wounded at one objective to the hospital now, every day; needs one).
+
+**The post:** a won port retake with a standing base leaves the base's kit to the garrison, which holds longer; a won
+assault's turrets each count two troopers toward suppression while their crews stay *(default)*.
+
+**Out of scope:** the vehicle bay and airpad (phases 6–7), AT/AA turrets, orbital and silo powers (3b, 7), fog (with
+the battle view), the depth-tested 3D base (4a's renderer).
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.
