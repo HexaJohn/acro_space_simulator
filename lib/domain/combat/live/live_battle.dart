@@ -31,7 +31,9 @@ const double kRifleReloadS = 2;
 const double kRifleDamage = 40;
 const double kRifleRangeM = 300;
 
-/// Defender fire.
+/// Defender fire: the chance a trained defender hits at 30 m or nearer,
+/// scaled by its quality and falling with range.
+const double kDefenderAccuracy = 0.35;
 const double kDefenderRangeM = 200;
 const double kDefenderDamage = 20;
 
@@ -53,6 +55,9 @@ class LiveUnit {
   final String objectiveId;
   final double e, n;
   double hp = 100;
+
+  /// 1.0 trained, 0.5 armed militia, 0.3 improvised: how well it shoots.
+  double quality = 1;
 
   /// Its formation's count when last mirrored: a kill is pending until the
   /// count falls below it.
@@ -142,12 +147,15 @@ class LiveBattle {
           room[f.side] = room[f.side]! - 1;
           final have = _unit(f.id, m);
           if (have != null && have.objectiveId == o.id) {
-            want.add(have..formationCount = f.count);
+            want.add(have
+              ..formationCount = f.count
+              ..quality = f.quality);
             continue;
           }
           final (e, n) = _slot(op, o, f, m);
           want.add(LiveUnit(f.id, m, f.side, f.kind, o.id, e, n)
             ..formationCount = f.count
+            ..quality = f.quality
             ..cooldownS = 1 + 2 * combatUnit(seed, f.id, m));
         }
       }
@@ -201,20 +209,41 @@ class LiveBattle {
     _rifle(dt, eye, aim, trigger, reload);
   }
 
+  /// Each defender fires at the nearest attacker in range — the player, or
+  /// one of the attackers standing in the bubble. Only a shot at the player
+  /// does damage here: the others' losses are the resolver's, and counting
+  /// them twice would bleed the attackers faster live than abstract.
   void _defend(double dt, (double, double, double) eye) {
     for (final u in units) {
       if (u.side != CombatSide.defender) continue;
       u.cooldownS -= dt;
       if (u.cooldownS > 0) continue;
-      final de = eye.$1 - u.e, dn = eye.$2 - u.n;
-      final d = math.sqrt(de * de + dn * dn);
       final rate = u.kind == FormationKind.emplacement ? 3.0 : 1.0;
-      u.cooldownS = (1.5 + combatUnit(seed, u.formationId * 64 + u.member, 1000 + u.shots)) / rate;
+      final key = u.formationId * 64 + u.member;
+      u.cooldownS = (1.5 + combatUnit(seed, key, 1000 + u.shots)) / rate;
+      final de = eye.$1 - u.e, dn = eye.$2 - u.n;
+      final dPlayer = math.sqrt(de * de + dn * dn);
+      LiveUnit? other;
+      var dOther = double.infinity;
+      for (final a in units) {
+        if (a.side != CombatSide.attacker) continue;
+        final d = math.sqrt((a.e - u.e) * (a.e - u.e) + (a.n - u.n) * (a.n - u.n));
+        if (d < dOther) {
+          dOther = d;
+          other = a;
+        }
+      }
+      final atPlayer = dPlayer <= dOther;
+      final d = atPlayer ? dPlayer : dOther;
       if (d > kDefenderRangeM) continue;
       u.shots++;
-      final hit = combatUnit(seed, u.formationId * 64 + u.member, 2000 + u.shots) <
-          0.5 * math.min(1.0, 40 / math.max(d, 1));
-      final miss = hit ? 0.0 : 1.5 + 2 * combatUnit(seed, u.formationId * 64 + u.member, 3000 + u.shots);
+      if (!atPlayer) {
+        tracers.add(Tracer(u.e, u.n, 1.4, other!.e, other.n, 1.2, CombatSide.defender));
+        continue;
+      }
+      final hit = combatUnit(seed, key, 2000 + u.shots) <
+          kDefenderAccuracy * u.quality * math.min(1.0, 30 / math.max(d, 1));
+      final miss = hit ? 0.0 : 1.5 + 2 * combatUnit(seed, key, 3000 + u.shots);
       tracers.add(Tracer(u.e, u.n, 1.4, eye.$1 + miss, eye.$2 - miss * 0.5, eye.$3 - 0.3, CombatSide.defender));
       if (hit) {
         hp -= kDefenderDamage;

@@ -73,6 +73,11 @@ class _CombatViewState {
 
   /// Dev only: aim at the nearest defender and hold the trigger.
   bool devAutofire = false;
+
+  /// Turn to face this objective a few frames after joining (the walker's
+  /// gravity frame settles first).
+  String? faceObjective;
+  int faceInFrames = 0;
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -755,20 +760,45 @@ extension _SimulationViewCombat on _SimulationViewState {
     if (op.resolved || op.phase != OperationPhase.engaged) return 'Not until the squads are down.';
     final r = _combatState.rasters[op.id];
     if (r == null || !r.complete) return 'Mapping the ground: ${((r?.progress ?? 0) * 100).round()}%';
-    if (_squadAtLz(op) == null) return 'No squad of yours is at the landing zone.';
+    if (_squadAtLz(op) == null) return 'No squad of yours is left to join.';
     return null;
   }
 
+  /// The squad the player fights as one of: [prefer] while it has anyone
+  /// left, else the first of the operation's living infantry. Wherever it
+  /// is, the player steps out at the LZ.
   Formation? _squadAtLz(Operation op, {int? prefer}) {
-    final t = op.clock.steps;
     Formation? best;
     for (final f in op.formations) {
       if (f.side != CombatSide.attacker || f.kind == FormationKind.emplacement) continue;
-      if (!f.presentAt(op.lzId, t)) continue;
+      if (!f.alive || f.at == FormationAt.transit) continue;
       if (f.id == prefer) return f;
       best ??= f;
     }
     return best;
+  }
+
+  /// Turns the walker's head toward [objectiveId] (a coarse search over the
+  /// look angles, then left level).
+  void _faceToward(Operation op, CitySim city, String objectiveId) {
+    final o = op.graph.byId(objectiveId);
+    final body = _universe.current().body(city.body.id);
+    if (o == null || body == null) return;
+    final at = city.localToBodyFixed(Vec2(o.e, o.n), bodyRadiusM: _freecamRelLocal.length);
+    final want = _refBodyQuat().rotate((at - _freecamRelLocal).normalized);
+    var best = _view;
+    var score = -2.0;
+    for (var a = 0; a < 72; a++) {
+      for (var el = -3; el <= 3; el++) {
+        _view = _view.copyWith(azimuth: a * math.pi / 36, elevation: el * 0.1);
+        final s = _camera.forward.dot(want);
+        if (s > score) {
+          score = s;
+          best = _view;
+        }
+      }
+    }
+    rebuild(() => _view = best);
   }
 
   void _localFrame(Operation op, CitySim city, double radius) {
@@ -806,7 +836,10 @@ extension _SimulationViewCombat on _SimulationViewState {
       ..unitGround.clear()
       ..drawnOffset = 0
       ..trigger = false;
-    st.frameOp = -1;
+    st
+      ..frameOp = -1
+      ..faceObjective = op.goalId
+      ..faceInFrames = 5;
     rebuild(() {
       _freecamRef = city.body.id;
       _freecam = true;
@@ -869,6 +902,10 @@ extension _SimulationViewCombat on _SimulationViewState {
       return;
     }
     _localFrame(op, city, body.radius);
+    if (st.faceObjective != null && --st.faceInFrames <= 0) {
+      _faceToward(op, city, st.faceObjective!);
+      st.faceObjective = null;
+    }
     final p = _freecamRelLocal;
     final d = p - st.frameO;
     final e = d.dot(st.frameE), n = d.dot(st.frameN);
@@ -1540,7 +1577,7 @@ extension _SimulationViewCombat on _SimulationViewState {
     }
     // The soldier (§7G): join=1 steps out at the LZ of the running battle,
     // autofire=1|0 aims at the nearest defender and holds the trigger,
-    // walkTo=OBJ stands 30 m short of an objective, leave=1 leaves.
+    // walkTo=OBJ stands 60 m short of an objective, leave=1 leaves.
     if (p['join'] != null && target != null) {
       final running = _operations.runningAgainst(target.id);
       if (running != null) {
@@ -1562,10 +1599,13 @@ extension _SimulationViewCombat on _SimulationViewState {
         final lz = op!.graph.byId(op.lzId)!;
         final dx = lz.e - o.e, dy = lz.n - o.n;
         final l = math.max(1.0, math.sqrt(dx * dx + dy * dy));
-        final e = o.e + dx / l * 30, n = o.n + dy / l * 30;
+        final e = o.e + dx / l * 60, n = o.n + dy / l * 60;
         final dir = city.localToBodyFixed(Vec2(e, n), bodyRadiusM: body.radius).normalized;
         _freecamRelLocal = dir * ((r.radiusAt(e, n) ?? body.radius) + walkEyeHeight);
         did['walkTo'] = walkTo;
+        _combatState
+          ..faceObjective = walkTo
+          ..faceInFrames = 3;
       }
     }
     if (p['leave'] != null) {

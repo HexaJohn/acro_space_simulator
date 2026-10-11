@@ -640,16 +640,18 @@ holding their positions, die and redeploy, or leave and let it auto-resolve.
 (persistent isolates holding the field once, the mesh pool's pattern; inline on web), objectives first. Bilinear
 height; never a field sample while joined. Not saved: re-baked after a load (seconds on the pool).
 
-**Join:** from the drawer once engaged and baked: you become a trooper of the lowest-id squad at the LZ, on foot
-there with a rifle; warp held at 1× while joined; Leave from the drawer or Esc. The walker's ground is the raster
+**Join:** from the drawer once engaged and baked: you become a trooper of the first living infantry squad, on foot
+at the LZ with a rifle, facing the goal; warp held at 1× while joined; L leaves. The walker's ground is the raster
 plus the smoothed drawn offset (Spike S item 3).
 
 **The bubble (`live/live_battle.dart`):** every formation member in the square, up to 24 a side, stands as a unit
 in a ring round its objective (holding, no navigation). The abstract fight goes on; a member the resolver removes
-leaves the bubble. Defenders in range fire at you every 1.5–2.5 s (seeded per unit, emplacements 3×), hit chance
-`0.5·min(1, 40 m / d)`, 20 damage. Your rifle: hitscan, 6 rounds a second, 30 a magazine, R reloads in 2 s, 40
+leaves the bubble. Each defender fires every 1.5–2.5 s (seeded per unit, emplacements 3×) at the nearest attacker in range —
+you, or an attacker standing in the bubble, whose losses stay the resolver's; at you it hits with
+`0.35·quality·min(1, 30 m / d)` for 20 damage (found live: everyone firing at the player killed them in a second). Your rifle: hitscan, 6 rounds a second, 30 a magazine, R reloads in 2 s, 40
 damage, 300 m. Each kill and your death reach the battle as `LiveKillCommand`s at the tick (one member removed);
-dead, a 5 s death camera, then REDEPLOY as the next trooper of a squad at the LZ, or out if none is left.
+dead, a 5 s death camera, then REDEPLOY at the LZ as the next trooper of your squad (or another living one), or
+out if none is left.
 
 **Render and HUD:** `CombatUnitNodes`, primitive instanced soldiers by side and tracers (Spike S item 4 measured
 here); health, ammo, crosshair, squad and REDEPLOY on the HUD.
