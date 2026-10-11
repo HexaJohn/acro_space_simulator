@@ -743,6 +743,7 @@ extension _SimulationViewColony on _SimulationViewState {
       ),
       onTargetPad: (site) => _targetPad(city, site),
       targetPadHint: hint,
+      extra: (site, spec) => _combatSiteRows(city, site, spec),
     );
   }
 

@@ -93,6 +93,11 @@ class SimViewControl {
   /// it without changing anything.
   Map<String, Object?> Function(Map<String, String> params)? roadTool;
 
+  /// Drive the combat surface by name (`ext.acro.combat`, combat.md §7.9):
+  /// `status`, `fixture=portSeizedPair`, `launch=1&garrison=N`, `step=S`,
+  /// `planner=open`, `drawer=ID`. Returns the operations as JSON.
+  Map<String, Object?> Function(Map<String, String> params)? combat;
+
   /// Open the route inspector on the colony's vehicle [handle], as a click
   /// on the car does (docs/plans/agent-traffic.md §16.4, E32). Returns what
   /// `CityAgents.describe` says of it — the sheet's source — or null when
@@ -123,6 +128,7 @@ class SimViewControl {
     spawnLanded = null;
     status = null;
     roadTool = null;
+    combat = null;
     selectVehicle = null;
     setTrafficView = null;
   }

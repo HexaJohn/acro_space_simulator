@@ -44,7 +44,17 @@ import 'flight_session.dart';
 import 'pointer_lock.dart';
 import 'screens/city_edit_overlay.dart';
 import 'screens/city_game_hud.dart';
+import 'screens/app_theme.dart';
 import 'screens/city_site_actions.dart';
+import 'screens/combat/operation_planner_sheet.dart';
+import '../../domain/colony/city/city_loyalty.dart';
+import '../../domain/colony/city/city_starter_kit.dart';
+import '../../domain/colony/city/city_war.dart';
+import '../../domain/colony/city/commodity.dart';
+import '../../domain/combat/formation.dart';
+import '../../domain/combat/operation.dart';
+import '../../domain/combat/operation_registry.dart';
+import '../../domain/multiplayer/player.dart';
 import 'screens/road_tool_scene.dart';
 import 'screens/traffic_lane_speed_overlay.dart';
 import 'screens/traffic_vehicle_inspector.dart';
@@ -107,6 +117,7 @@ import 'top_down_painter.dart';
 part 'simulation_view_debug_panel.dart';
 part 'simulation_view_colony.dart';
 part 'simulation_view_planner.dart';
+part 'simulation_view_combat.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
@@ -502,6 +513,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   /// setState, exactly like user input.
   void _registerControl() {
     final c = SimViewControl.instance;
+    c.combat = (params) => mounted ? _combatHook(params) : const {};
     c.orbit = ({double? azimuth, double? elevation, double? roll}) {
       if (!mounted) return;
       setState(() {
@@ -3475,6 +3487,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         onToggleTraffic: _toggleLaneSpeedView,
                       ),
                     ),
+                  ),
+                // Combat operations: a chip per running operation and per
+                // result not yet seen, under the HUD's top bar, both modes
+                // (combat.md §7.9).
+                if (_combatChips() case final chips?)
+                  Positioned(
+                    top: widget.cityMode ? 64 : 12,
+                    right: 12,
+                    child: SafeArea(child: chips),
                   ),
                 // A captured mouse has no cursor. Topmost, so whatever the pin
                 // happens to sit over — the toolbar included — cannot put an

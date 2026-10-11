@@ -26,6 +26,8 @@
 ///                                  them): `agentsDrawn=0` takes the
 ///                                  vehicle draws out without a rebuild,
 ///                                  which is how the renderer is bisected
+///   ext.acro.combat?status | fixture=portSeizedPair | launch=1&garrison=N |
+///       step=S | planner=open | drawer=ID   the combat surface (combat.md)
 ///   ext.acro.camera?elevationDeg=&azimuthDeg=&rangeM=
 ///                                  aim the camera, for framing the shot
 ///   ext.acro.roadtool              the road tool, driven by name through
@@ -231,6 +233,25 @@ Future<void> main() async {
         'city': CityNodes.debugLine,
       },
     }));
+  });
+
+  // Combat operations, driven through the view (SimViewControl.combat):
+  // `status`, `fixture=portSeizedPair` (the open colony's rebels seize its
+  // port and a supplied source colony is founded beside it),
+  // `launch=1&garrison=N`, `step=S` (world ticks now), `planner=open`,
+  // `drawer=ID` (docs/plans/combat.md §7.9).
+  developer.registerExtension('ext.acro.combat', (method, params) async {
+    final drive = SimViewControl.instance.combat;
+    if (drive == null) {
+      return developer.ServiceExtensionResponse.error(
+          developer.ServiceExtensionResponse.extensionError, 'no view yet');
+    }
+    try {
+      return developer.ServiceExtensionResponse.result(jsonEncode(drive(params)));
+    } catch (e) {
+      return developer.ServiceExtensionResponse.error(
+          developer.ServiceExtensionResponse.extensionError, '$e');
+    }
   });
 
   // The road tool, driven through the view (SimViewControl.roadTool) so a
