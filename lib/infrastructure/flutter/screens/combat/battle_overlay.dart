@@ -208,7 +208,11 @@ class BattleOverlayPainter extends CustomPainter {
     final at = project(o.e, o.n);
     if (at == null) return;
     final r = _px(o.e, o.n, ringM, min: 9, max: 90);
-    final c = o.kind == ObjectiveKind.lz ? kAttackerColour : controlColour(o.control);
+    // An LZ is whoever holds it: the player's, or — in a fight the player
+    // defends (§7N) — where the rebels or raiders gather.
+    final c = o.kind == ObjectiveKind.lz
+        ? (o.control < 0 ? kDefenderColour : kAttackerColour)
+        : controlColour(o.control);
     canvas.drawCircle(at, r, Paint()..color = c.withValues(alpha: 0.16));
     canvas.drawCircle(
         at,

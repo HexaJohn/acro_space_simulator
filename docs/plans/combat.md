@@ -833,9 +833,15 @@ commands for it from anyone else are refused.
 **Cut *(default)*:** live defensive fights and the post as the defender's base, rival bases and doctrine, server
 snapshots with prediction over a real transport.
 
-**Built** 71005ab (wire, authority) and the defensive operations after it. Found while building: a 450 m march
-outlasted a 2-day ceasefire, so every rising and raid "melted away" still marching; risings now gather in town and
-defensive fights run 5 days.
+**Built** 71005ab (wire, authority), d695a50 (risings, raids), fde065e and after (drawn the player's way round).
+Found while building: a 450 m march outlasted a 2-day ceasefire, so every rising and raid "melted away" still
+marching; risings now gather in town and defensive fights run 5 days. **Verified live on the Moon:** a taken dev
+colony rose against its 4-trooper garrison (one rebel turned out: the assault had left 32 people) and melted away,
+crushed, with the notice; a raid by the independent dev colony on Garrison Town sent 9 raiders against 27 barracks
+troopers, who never came on, and gave up after 5 days. Found live: the overlay drew the garrison in the enemy's
+colour (the frame now flips a defended fight's sides and control), and a raid on a colony founded that minute finds
+no built Seat and is skipped. The taken-Seat paths (a rising that wins, raiders who plunder) are covered by tests,
+not yet seen live.
 
 ## 8. Open questions
 
