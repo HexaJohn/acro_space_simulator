@@ -50,6 +50,7 @@ import 'screens/city_game_hud.dart';
 import 'screens/app_theme.dart';
 import 'screens/city_site_actions.dart';
 import 'screens/city_control_ui.dart' show showIndependence;
+import 'screens/colony_markers_painter.dart';
 import 'screens/combat/battle_overlay.dart';
 import 'screens/combat/combat_hooks.dart';
 import 'screens/combat/occupation_panel.dart';
@@ -87,6 +88,7 @@ import '../../domain/shared/quaternion.dart';
 import '../../domain/shared/vector3.dart';
 
 import '../../adapters/presenters/camera_ground_clamp.dart';
+import '../../adapters/presenters/colony_markers.dart';
 import '../../adapters/presenters/first_person_walker.dart';
 import '../../adapters/presenters/top_down_snapshot.dart';
 import '../../adapters/wire/flatbuffer_codec.dart';
@@ -142,6 +144,7 @@ part 'simulation_view_debug_panel.dart';
 part 'simulation_view_colony.dart';
 part 'simulation_view_planner.dart';
 part 'simulation_view_combat.dart';
+part 'simulation_view_colony_markers.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
@@ -3300,6 +3303,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     ),
                   // The battle over the colony (combat.md §7B): a command
                   // overlay projected from the operation's ground.
+                  if (_colonyMarkers(_sceneWorld) case final markers?) markers,
                   if (_battleOverlay(_sceneWorld) case final battle?) battle,
                   if (_liveHud() case final hud?) hud,
                   if (_commandCard() case final card?) card,

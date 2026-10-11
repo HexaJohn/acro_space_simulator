@@ -18,6 +18,7 @@ class DebugLayers {
   final bool infiniteFuel; // never drain propellant (cheat)
   final bool showSoi; // draw sphere-of-influence circles
   final bool cullDistant; // tilted-view cull of non-active bodies
+  final bool colonyMarkers; // HUD markers on the known colonies
 
   const DebugLayers({
     this.skybox = true,
@@ -32,6 +33,7 @@ class DebugLayers {
     this.infiniteFuel = false,
     this.showSoi = false,
     this.cullDistant = true,
+    this.colonyMarkers = true,
   });
 
   DebugLayers copyWith({
@@ -47,6 +49,7 @@ class DebugLayers {
     bool? infiniteFuel,
     bool? showSoi,
     bool? cullDistant,
+    bool? colonyMarkers,
   }) {
     return DebugLayers(
       skybox: skybox ?? this.skybox,
@@ -61,6 +64,7 @@ class DebugLayers {
       infiniteFuel: infiniteFuel ?? this.infiniteFuel,
       showSoi: showSoi ?? this.showSoi,
       cullDistant: cullDistant ?? this.cullDistant,
+      colonyMarkers: colonyMarkers ?? this.colonyMarkers,
     );
   }
 
@@ -79,10 +83,11 @@ class DebugLayers {
       other.exaggerateAtmosphere == exaggerateAtmosphere &&
       other.infiniteFuel == infiniteFuel &&
       other.showSoi == showSoi &&
-      other.cullDistant == cullDistant;
+      other.cullDistant == cullDistant &&
+      other.colonyMarkers == colonyMarkers;
 
   @override
   int get hashCode => Object.hash(skybox, orbitRails, planetTexture,
       sphereShadow, atmoHalo, atmoOverlay, navBall, exaggerateStar,
-      exaggerateAtmosphere, infiniteFuel, showSoi, cullDistant);
+      exaggerateAtmosphere, infiniteFuel, showSoi, cullDistant, colonyMarkers);
 }

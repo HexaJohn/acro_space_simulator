@@ -237,6 +237,7 @@ extension SimulationViewDebugPanel on _SimulationViewState {
     final rows = <(String, bool, DebugLayers Function(bool))>[
       ('Skybox', _layers.skybox, (v) => _layers.copyWith(skybox: v)),
       ('Orbit rails', _layers.orbitRails, (v) => _layers.copyWith(orbitRails: v)),
+      ('Colony markers', _layers.colonyMarkers, (v) => _layers.copyWith(colonyMarkers: v)),
       ('Planet texture', _layers.planetTexture, (v) => _layers.copyWith(planetTexture: v)),
       ('Sphere shadow', _layers.sphereShadow, (v) => _layers.copyWith(sphereShadow: v)),
       // Drives BOTH renderers: the software painter's halo layer and the
