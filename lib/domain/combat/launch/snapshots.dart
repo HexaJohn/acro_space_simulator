@@ -189,9 +189,9 @@ class LaunchSnapshot {
   /// Its body has no air (jump jets, §7D).
   final bool airless;
 
-  /// Its building lots as polygons (east, north m): what a base socket must
-  /// keep clear of (§7D).
-  final List<List<(double, double)>> obstacles;
+  /// Its buildings as circles round their footprints (east, north, radius
+  /// m): what a base socket must keep clear of (§7D).
+  final List<(double, double, double)> obstacles;
 
   /// Its landing pads' centres: an LZ keeps 400 m from every one.
   final List<(double, double)> pads;

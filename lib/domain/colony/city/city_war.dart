@@ -24,6 +24,7 @@ import 'city_sim.dart';
 import 'commodity.dart';
 import 'independent_governor.dart';
 import 'parcel.dart';
+import 'site_access/site_envelope.dart';
 
 /// Troopers away from one of this colony's buildings.
 class DeployedTroopers {
@@ -540,11 +541,13 @@ extension CityWar on CitySim {
     final independent = loyalty.allegiance == Allegiance.independent;
     // What a base's sockets must keep clear of, and the pads an LZ keeps its
     // distance from (combat.md §7D).
-    final obstacles = <List<(double, double)>>[];
+    final obstacles = <(double, double, double)>[];
     final pads = <(double, double)>[];
     for (final (p, s) in _sitesInOrder()) {
-      obstacles.add([for (final v in p.polygon) (v.e, v.n)]);
-      if (s.siteKind == SiteKind.pad) pads.add((p.centroid.e, p.centroid.n));
+      final c = p.centroid;
+      final f = buildingFootprint(p, s);
+      obstacles.add((c.e, c.n, 0.5 * math.sqrt(f.width * f.width + f.depth * f.depth)));
+      if (s.siteKind == SiteKind.pad) pads.add((c.e, c.n));
     }
     var regulars = 0;
     final guns = <EmplacementSite>[];
