@@ -212,6 +212,9 @@ class NavGrid {
       if (g != null && g > y - 0.2) return false;
     }
     for (final f in footprints) {
+      // A shooter in a building fires out of it, and is seen in it: the
+      // building round either end is no wall between them.
+      if (_d2(a.$1, a.$2, f.$1, f.$2) < f.$3 * f.$3 || _d2(b.$1, b.$2, f.$1, f.$2) < f.$3 * f.$3) continue;
       // Closest approach of the segment to the building's centre, in plan.
       final dx = b.$1 - a.$1, dy = b.$2 - a.$2;
       final l2 = dx * dx + dy * dy;

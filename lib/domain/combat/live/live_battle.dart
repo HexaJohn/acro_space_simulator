@@ -107,13 +107,35 @@ class Tracer {
 }
 
 class LiveBattle {
-  LiveBattle({required this.opId, required this.seed, required this.playerFormationId});
+  LiveBattle({
+    required this.opId,
+    required this.seed,
+    required this.playerFormationId,
+    this.playerless = false,
+    List<int>? squads,
+  }) : squads = squads ?? [];
 
   final int opId;
   final int seed;
 
   /// The squad the player fights as one of; changes on a redeploy.
   int playerFormationId;
+
+  /// No player at all: the calibration harness's AI-against-AI fights
+  /// (§7I). Nobody aims, nobody is the target of a shot.
+  final bool playerless;
+
+  /// Further squads the bubble fights with besides the player's (the
+  /// harness's: every attacking squad). They take the same orders.
+  final List<int> squads;
+
+  /// Every squad the bubble owns, the player's first.
+  List<int> get _owned => [if (!playerless) playerFormationId, ...squads.where((id) => id != playerFormationId)];
+
+  /// Squads that reached an objective this step: (formation, objective),
+  /// for the view (or the harness) to tell the battle. Drained by it.
+  final List<(int, String)> arrivals = [];
+  final Map<int, String> _arrivedAt = {};
 
   /// Where units can walk and see; null (a test, a raster not yet
   /// navigated) walks straight and sees everything.
@@ -129,7 +151,7 @@ class LiveBattle {
 
   /// Seconds left on the death camera; 0 alive.
   double deadS = 0;
-  bool get dead => hp <= 0;
+  bool get dead => playerless || hp <= 0;
 
   /// Ready to redeploy (the death camera has run).
   bool get redeployReady => dead && deadS <= 0;
@@ -188,15 +210,21 @@ class LiveBattle {
     final want = <LiveUnit>[];
     final room = {CombatSide.attacker: kLiveMaxPerSide, CombatSide.defender: kLiveMaxPerSide};
 
-    // The player's squad first, wherever its formation stands: it is with them.
-    final mine = op.formationById(playerFormationId);
-    if (mine != null && mine.alive) {
-      final count = mine.count - _pendingFor(mine) - (dead ? 0 : 1);
+    // The bubble's own squads first, wherever their formations stand: the
+    // player's is with the player; any other appears at its objective.
+    final owned = _owned;
+    for (final id in owned) {
+      final mine = op.formationById(id);
+      if (mine == null || !mine.alive) continue;
+      final isPlayers = !playerless && id == playerFormationId;
+      final count = mine.count - _pendingFor(mine) - (isPlayers && !dead ? 1 : 0);
+      final at = op.graph.byId(mine.at);
       for (var m = 0; m < count && room[mine.side]! > 0; m++) {
         room[mine.side] = room[mine.side]! - 1;
         final have = _unit(mine.id, m);
+        final (se, sn) = isPlayers || at == null ? (pe - 3 - m * 1.5, pn - 2 + (m % 3) * 1.5) : _slot(op, at, mine, m);
         final u = have ??
-            (LiveUnit(mine.id, m, mine.side, mine.kind, mine.at, pe - 3 - m * 1.5, pn - 2 + (m % 3) * 1.5)
+            (LiveUnit(mine.id, m, mine.side, mine.kind, mine.at, se, sn)
               ..cooldownS = 1 + 2 * combatUnit(seed, mine.id, m));
         want.add(u
           ..squad = true
@@ -207,7 +235,7 @@ class LiveBattle {
 
     for (final o in objs) {
       for (final f in op.formations) {
-        if (f.id == playerFormationId) continue;
+        if (owned.contains(f.id)) continue;
         final marching = f.at == o.id && t < f.arriveStep && f.fromAt != null;
         if (!f.presentAt(o.id, t) && !marching) continue;
         final count = f.count - _pendingFor(f);
@@ -311,6 +339,8 @@ class LiveBattle {
     final (fe, fn) = _heading;
     for (var i = 0; i < squad.length; i++) {
       final u = squad[i];
+      // With no player to follow, a squad holds where it stands until sent.
+      if (playerless && order != SquadOrder.attack) continue;
       final back = 4.0 + 3 * (i ~/ 3), side = ((i % 3) - 1) * 3.0;
       switch (order) {
         case SquadOrder.follow:
@@ -456,22 +486,29 @@ class LiveBattle {
     units.remove(u);
   }
 
-  /// The squad's centre on an objective: tell the battle, once.
+  /// Each squad's centre on its objective: tell the battle, once.
   void _squadArrival() {
-    final squad = [for (final u in units) if (u.squad) u];
-    if (squad.isEmpty) return;
-    var ce = 0.0, cn = 0.0;
-    for (final u in squad) {
-      ce += u.e;
-      cn += u.n;
-    }
-    ce /= squad.length;
-    cn /= squad.length;
     final o = _attackObjective;
-    final near = o != null && math.sqrt((o.e - ce) * (o.e - ce) + (o.n - cn) * (o.n - cn)) < kSquadArriveM;
-    if (near && _squadAt != o.id) {
-      _squadAt = o.id;
-      squadArrived = o.id;
+    if (o == null) return;
+    for (final id in _owned) {
+      var ce = 0.0, cn = 0.0, k = 0;
+      for (final u in units) {
+        if (u.formationId != id || !u.squad) continue;
+        ce += u.e;
+        cn += u.n;
+        k++;
+      }
+      if (k == 0) continue;
+      ce /= k;
+      cn /= k;
+      if (math.sqrt((o.e - ce) * (o.e - ce) + (o.n - cn) * (o.n - cn)) >= kSquadArriveM) continue;
+      if (_arrivedAt[id] == o.id) continue;
+      _arrivedAt[id] = o.id;
+      arrivals.add((id, o.id));
+      if (!playerless && id == playerFormationId && _squadAt != o.id) {
+        _squadAt = o.id;
+        squadArrived = o.id;
+      }
     }
   }
 
