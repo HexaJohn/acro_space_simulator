@@ -731,6 +731,20 @@ attackers' AI: it marches to its objective and holds it until ordered again or h
 **Cut *(default)*:** waypoints, pause-and-order, the minimap, U/R/F1–F3/L and the power keys, the build grid (the
 drawer keeps building), rebinding.
 
+**Built** 5324c3c; verified live on the Moon: Y selected all six squads, an order sent them to the power plant
+(directed, marching), and possession put the player in squad 0 where it was, mid-march, not at the LZ.
+
+## 7K. Phase G1 spec: Gamepad
+
+Specified and built 2026-10-11; optional in the plan, built small.
+
+An Xbox-style pad on Windows through XInput (`ffi`, the pointer lock's pattern; no pad elsewhere), polled each frame
+only while a battle wants it. **Soldier:** left stick walks, right stick looks, RT fires, X reloads, D-pad up/left/right
+follow/hold/take, Y reinforces, B leaves, View (Back) opens the command view. **Command view:** Y selects all, A
+possesses, D-pad left holds, down hands back to the plan, B leaves. `GamepadMapper` (dead zones, look speed, button
+edges) is pure and tested on stub states. **Cut *(default)*:** G2 (web, macOS, Linux), rumble, rebinding, the
+pad's cursor in the command view (selection stays the mouse's). Not verified on hardware: no pad was attached.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

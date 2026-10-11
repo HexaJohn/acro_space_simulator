@@ -73,6 +73,7 @@ import '../../domain/terrain/terrain_field.dart';
 import '../../domain/terrain/ground_sample_pool.dart';
 import '../../domain/combat/live/live_battle.dart';
 import '../../domain/combat/live/nav_grid.dart';
+import 'gamepad.dart';
 import '../../domain/combat/powers/orbital.dart';
 import '../../domain/combat/powers/strike_window.dart';
 import '../../domain/multiplayer/player.dart';
@@ -1975,8 +1976,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     }
 
     // The battle the player has joined (combat.md §7G), and every battle's
-    // ground baking off the main thread.
+    // ground baking off the main thread; a gamepad's share of the input (§7K).
     _stepLive(frameDt);
+    final pad = _padStep(frameDt);
 
     // Freecam flight: WASD in the camera frame, Q/E down/up, Shift boosts.
     // Speed scales with zoom range so it feels right from surface to map.
@@ -1984,8 +1986,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       double axis(LogicalKeyboardKey neg, LogicalKeyboardKey pos) =>
           (_keysDown.contains(pos) ? 1.0 : 0.0) -
           (_keysDown.contains(neg) ? 1.0 : 0.0);
-      final fwd = axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW);
-      final strafe = axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD);
+      final fwd = (axis(LogicalKeyboardKey.keyS, LogicalKeyboardKey.keyW) + pad.fwd).clamp(-1.0, 1.0);
+      final strafe = (axis(LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD) + pad.strafe).clamp(-1.0, 1.0);
       final lift = axis(LogicalKeyboardKey.keyQ, LogicalKeyboardKey.keyE);
       if (_walkMode) {
         // Mouse look: whatever the captured mouse moved since last frame, as

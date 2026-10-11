@@ -83,6 +83,15 @@ class _CombatViewState {
   (double, double, double) lastEye = (0, 0, 1.7);
   (double, double, double) lastAim = (1, 0, 0);
 
+  // ---- the gamepad (§7K) ----
+
+  Gamepad? pad;
+  final GamepadMapper padMapper = GamepadMapper();
+
+  /// This frame's pad: the trigger and reload it holds, read by the step.
+  bool padFire = false;
+  bool padReload = false;
+
   // ---- the command view (§7J) ----
 
   /// The battle the command view is over; null when it is not open.
@@ -1002,7 +1011,7 @@ extension _SimulationViewCombat on _SimulationViewState {
     final up = p.normalized;
     final f = _refBodyQuat().conjugate.rotate(_camera.forward);
     var aim = (f.dot(st.frameE), f.dot(st.frameN), f.dot(up));
-    var trigger = st.trigger && _pointerLock.captured;
+    var trigger = (st.trigger && _pointerLock.captured) || st.padFire;
     live.sync(op, r, e, n);
     if (st.devAutofire) {
       LiveUnit? best;
@@ -1026,7 +1035,10 @@ extension _SimulationViewCombat on _SimulationViewState {
       ..lastEye = (e, n, h)
       ..lastAim = aim;
     live.step(frameDt.clamp(0.0, 0.1),
-        eye: (e, n, h), aim: aim, trigger: trigger, reload: _keysDown.contains(LogicalKeyboardKey.keyR));
+        eye: (e, n, h),
+        aim: aim,
+        trigger: trigger,
+        reload: _keysDown.contains(LogicalKeyboardKey.keyR) || st.padReload);
     if (live.squadArrived case final at?) {
       _operations.inbox.enqueue(
           LiveSquadCommand(const PlayerId('player'), 0, op.id, live.playerFormationId, at: at));
@@ -1169,6 +1181,46 @@ extension _SimulationViewCombat on _SimulationViewState {
         ]),
       ),
     );
+  }
+
+  // ---- the gamepad (§7K) --------------------------------------------------------
+
+  /// One frame of the pad, if one is connected and a battle wants it: the
+  /// walk and look it adds (returned for the frame loop), and its buttons as
+  /// the keys they stand for. Halo Wars' layout where the battle has one.
+  ({double fwd, double strafe}) _padStep(double frameDt) {
+    final st = _combatState;
+    st
+      ..padFire = false
+      ..padReload = false;
+    if (!_liveJoined && !_commanding) return (fwd: 0, strafe: 0);
+    final s = (st.pad ??= Gamepad.platform()).read();
+    if (s == null) return (fwd: 0, strafe: 0);
+    final f = st.padMapper.map(s, frameDt);
+    if (f.lookYaw != 0 || f.lookPitch != 0) _orbitCamera(f.lookYaw, f.lookPitch);
+    if (f.tapped(PadButton.back)) _tabCommand();
+    if (_liveJoined) {
+      st
+        ..padFire = f.fire
+        ..padReload = f.tapped(PadButton.x);
+      if (f.tapped(PadButton.dpadUp)) _squadOrder(SquadOrder.follow);
+      if (f.tapped(PadButton.dpadLeft)) _squadOrder(SquadOrder.hold);
+      if (f.tapped(PadButton.dpadRight)) _squadOrder(SquadOrder.attack);
+      if (f.tapped(PadButton.y)) _callReinforcements();
+      if (f.tapped(PadButton.b)) _leaveFight();
+    } else if (_commanding) {
+      final op = _commandOpNow();
+      if (op != null && f.tapped(PadButton.y)) {
+        rebuild(() => st.selected
+          ..clear()
+          ..addAll(_orderable(op)));
+      }
+      if (f.tapped(PadButton.a)) _tabCommand();
+      if (f.tapped(PadButton.dpadLeft)) _orderSelected(Operation.holdHere);
+      if (f.tapped(PadButton.dpadDown)) _orderSelected(null);
+      if (f.tapped(PadButton.b)) _exitCommand();
+    }
+    return (fwd: f.moveForward, strafe: f.moveRight);
   }
 
   // ---- the command view (§7J) ---------------------------------------------------
