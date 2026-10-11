@@ -608,7 +608,12 @@ from `powers/strike_window.dart`, Strike buttons per objective, Arm at a pad); t
 blast and the scorch.
 
 **Cut *(default)*:** Time the launch, the auto policy and "Orbital weapons free", recon's fog reveal (no fog yet),
-the danger-close prompt (the drawer says it instead), real ordnance parts.
+the danger-close prompt (the drawer says it instead), real ordnance parts. Overhead is judged at the battle's centre,
+not per objective (under 1 km apart, against 100 km and more of slant).
+
+**Built** d5b0bc2; verified live on the Moon: a 100 km orbit assigned at launch rose overhead by contact (124 km
+slant), the strike fired at once, flew 50 s, spent its round, rested 60 s and cratered the power plant (Standard ROE;
+no defenders there).
 
 ## 8. Open questions
 
