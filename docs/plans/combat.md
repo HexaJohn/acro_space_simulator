@@ -795,6 +795,34 @@ takes manual control as for any vessel, the landing guidance resumes when let go
 **Cut *(default)*:** `PilotInputCommand` and the lander as a respawn point, live gunship models and strafing runs in
 the bubble (the pass is abstract, with a notice), Earth and Mars (the aero fix is cross-lane).
 
+## 7N. Phase 8 spec: Uprisings, rivals, multiplayer groundwork
+
+Specified 2026-10-11; defaults *(default)* for review.
+
+**Ships:** an occupied colony that would throw its garrison out fights for it instead; a strong independent colony
+raids its colonial neighbours; combat commands travel on the wire with each operation answering only its owner.
+
+**Defensive operations** (`OperationKind.uprising`, `OperationKind.raid`): the same resolver with the sides' roles
+swapped — the colony's (or a rival's) militia attack from an LZ at the colony's edge toward its Seat, and the
+player's troopers there defend. Abstract only *(default)*: no base, no landers, no live bubble.
+
+**Uprising:** where an occupation would expel its garrison (level ≤ 0 or three revolts), an uprising starts
+instead, while none is running: the garrison holds the Seat against its militia. **Rebels win:** the garrison is
+expelled as before. **Garrison holds:** the revolt is crushed — revolts cleared, rebellion halved, the dead a
+grievance.
+
+**Raid** (rivals, faction `rival:<colony>`): an independent colony with 40 or more people raids its nearest colonial
+neighbour on the same body once every 10 days (seeded); its militia's tenth attack, the target's own barracks
+troopers and militia defend. **Raiders win:** they carry off a fifth of its ore and rations, loyalty −0.05; held,
+nothing lost but the dead.
+
+**Wire:** `CombatJson { json }` in `wire/sim.fbs`' command union carries every `CombatCommand` as its JSON;
+`FlatBufferCodec` round-trips them. **Authority:** each operation keeps its owner (the launcher's `PlayerId`);
+commands for it from anyone else are refused.
+
+**Cut *(default)*:** live defensive fights and the post as the defender's base, rival bases and doctrine, server
+snapshots with prediction over a real transport.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

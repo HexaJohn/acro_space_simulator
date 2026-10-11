@@ -119,7 +119,28 @@ class CombatPhase {
 
   // ---- 1. commands -------------------------------------------------------------
 
+  /// The operation [c] is for, when it names one.
+  static int? _opOf(CombatCommand c) => switch (c) {
+        WithdrawOperationCommand() => c.operationId,
+        OrderOperationCommand() => c.operationId,
+        CommanderPowerCommand() => c.operationId,
+        ReinforceOperationCommand() => c.operationId,
+        BaseOrderCommand() => c.operationId,
+        LiveCasualtiesCommand() => c.operationId,
+        LiveSquadCommand() => c.operationId,
+        SquadOrderCommand() => c.operationId,
+        AssignOrbitalSupportCommand() => c.operationId,
+        _ => null,
+      };
+
   void _apply(CombatCommand c, List<CitySim> cities) {
+    // Authority (§7N): an operation takes orders from its owner only.
+    final opId = _opOf(c);
+    final owned = opId == null ? null : registry.byId(opId);
+    if (owned != null && !owned.ownedBy(c.issuedBy.value)) {
+      registry.lastRefusal = 'That operation is not yours to order.';
+      return;
+    }
     switch (c) {
       case LaunchOperationCommand():
         _launch(c, cities);
@@ -416,6 +437,7 @@ class CombatPhase {
     registry.lastRefusal = null;
     registry.nextOperationId++;
     _orbitalAtLaunch(op, target, snap);
+    op.ownerId = c.issuedBy.value;
     op.air.rebelSilos = snap.rebelSilos;
     if (_landersFor(target)) {
       op.landers.addAll(packLanders(

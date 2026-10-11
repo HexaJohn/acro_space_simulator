@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:acro_space_simulator/application/snapshot/world_snapshot.dart';
@@ -383,6 +384,15 @@ class FlatBufferCodec {
           final c = e.cmd as gen.ReportTerrainHeight;
           cmds.add(ReportTerrainHeightCommand(
               by, tick, c.body ?? '', c.lat, c.lon, c.height));
+        case gen.CmdTypeId.CombatJson:
+          // A combat command as its own JSON (combat.md §7N); the envelope's
+          // attribution wins over whatever the JSON says.
+          final c = e.cmd as gen.CombatJson;
+          final j = c.json == null ? null : jsonDecode(c.json!);
+          if (j is Map) {
+            final cmd = CombatCommand.fromJson({...j, 'by': by.value, 'tick': tick});
+            if (cmd != null) cmds.add(cmd);
+          }
         case gen.CmdTypeId.NONE:
         case null:
           break; // unknown/empty envelope — skip
@@ -437,9 +447,12 @@ class FlatBufferCodec {
               height: x.height,
             ),
           ),
-        // Combat is local-only until it goes on the wire (combat.md §7.7): a
-        // combat command reaching the codec is a bug, said loudly.
-        CombatCommand() =>
-          throw UnsupportedError('combat commands are local-only'),
+        // Combat travels as its own JSON (combat.md §7N).
+        CombatCommand x => gen.CmdEnvelopeObjectBuilder(
+            issuedBy: x.issuedBy.value,
+            tick: x.tick,
+            cmdType: gen.CmdTypeId.CombatJson,
+            cmd: gen.CombatJsonObjectBuilder(json: jsonEncode(x.toJson())),
+          ),
       };
 }

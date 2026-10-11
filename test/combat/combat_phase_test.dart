@@ -600,12 +600,50 @@ void main() {
     expect(c.garrison, 2);
   });
 
-  test('combat commands never reach the wire', () {
-    expect(
-        () => const FlatBufferCodec().encodeCommands(CommandBatch(Epoch(0), [
-              WithdrawOperationCommand(player, 0, 1),
-            ])),
-        throwsUnsupportedError);
+  test('combat commands travel on the wire as their JSON (combat.md §7N)', () {
+    const other = PlayerId('player-2');
+    final cmds = <CombatCommand>[
+      WithdrawOperationCommand(player, 3, 1),
+      LaunchOperationCommand(player, 4,
+          targetColonyId: 'tgt',
+          draws: const [(colonyId: 'src', siteId: 'b0', count: 9)],
+          garrison: 2,
+          roe: 'heavy',
+          baseMateriel: 300,
+          baseSupport: 6,
+          baseDoctrine: 'hold'),
+      const SquadOrderCommand(other, 5, 1, [3, 4], 'power'),
+      const CommanderPowerCommand(player, 6, 1, 'gunship', target: 'seat'),
+      const LiveCasualtiesCommand(player, 7, 1, [2, 2, 5]),
+      const ArmVesselCommand(player, 8, 'rod-1', 'src', 4),
+    ];
+    const codec = FlatBufferCodec();
+    final back = codec.decodeCommands(codec.encodeCommands(CommandBatch(Epoch(12), cmds))).commands;
+    expect(back, hasLength(cmds.length));
+    for (var i = 0; i < cmds.length; i++) {
+      expect(jsonEncode((back[i] as CombatCommand).toJson()), jsonEncode(cmds[i].toJson()));
+    }
+    expect(back[2].issuedBy, other, reason: 'the envelope attributes it');
+  });
+
+  test('an operation takes orders from the player who launched it (§7N)', () {
+    final src = source(3), tgt = target();
+    final w = world([src, tgt]);
+    w.tick.execute(w.clock);
+    w.ops.inbox.enqueue(launch(src));
+    w.tick.execute(w.clock);
+    final op = w.ops.operations.single;
+    expect(op.ownerId, 'player');
+    expect(Operation.fromJson(jsonDecode(jsonEncode(op.toJson()))).ownerId, 'player');
+
+    w.ops.inbox.enqueue(WithdrawOperationCommand(const PlayerId('player-2'), 0, op.id));
+    w.tick.execute(w.clock);
+    expect(op.resolved, isFalse, reason: 'a stranger cannot withdraw it');
+    expect(w.ops.lastRefusal, 'That operation is not yours to order.');
+
+    w.ops.inbox.enqueue(WithdrawOperationCommand(player, 0, op.id));
+    w.tick.execute(w.clock);
+    expect(op.outcome, OperationOutcome.withdrawn, reason: 'its owner can');
   });
 }
 

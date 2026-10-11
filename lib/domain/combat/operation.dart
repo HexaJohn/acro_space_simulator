@@ -252,6 +252,15 @@ class Operation {
   /// Gunship passes, silo strikes, and the rebels' own silo (§7M).
   final AirSupport air;
 
+  /// Who launched it (a `PlayerId` value): the only player it takes orders
+  /// from (§7N). The single-player game is `player`.
+  String ownerId = 'player';
+
+  /// Whether [playerId] may order it: its owner, or (one player under two
+  /// names, reference §4.4) the local player's other spelling.
+  bool ownedBy(String playerId) =>
+      playerId == ownerId || (Factions.ownerIsPlayer(playerId) && Factions.ownerIsPlayer(ownerId));
+
   /// A charge under way (§7D): the objective, and when it ends.
   String? chargeAt;
   int chargeUntilStep;
@@ -1427,6 +1436,7 @@ class Operation {
         if (!orbital.isEmpty || orbital.centreBF != null) 'orbital': orbital.toJson(),
         if (directed.isNotEmpty) 'directed': [for (final d in directed) [d.$1, d.$2]],
         if (!air.isEmpty) 'air': air.toJson(),
+        if (ownerId != 'player') 'owner': ownerId,
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
             for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
@@ -1438,6 +1448,11 @@ class Operation {
           {ResolverTuning tuning = const ResolverTuning(),
           CounterTuning counters = const CounterTuning.uniform(),
           int? seedOverride}) =>
+      _fromJson(j, tuning: tuning, counters: counters, seedOverride: seedOverride)
+        ..ownerId = j['owner'] as String? ?? 'player';
+
+  static Operation _fromJson(Map<String, dynamic> j,
+          {required ResolverTuning tuning, required CounterTuning counters, int? seedOverride}) =>
       Operation(
         id: (j['id'] as num).toInt(),
         seed: seedOverride ?? (j['seed'] as num).toInt(),

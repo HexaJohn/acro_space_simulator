@@ -99,7 +99,8 @@ enum CmdTypeId {
   SeparateStage(2),
   SetAttitude(3),
   PlaceBuilding(4),
-  ReportTerrainHeight(5);
+  ReportTerrainHeight(5),
+  CombatJson(6);
 
   final int value;
   const CmdTypeId(this.value);
@@ -112,6 +113,7 @@ enum CmdTypeId {
       case 3: return CmdTypeId.SetAttitude;
       case 4: return CmdTypeId.PlaceBuilding;
       case 5: return CmdTypeId.ReportTerrainHeight;
+      case 6: return CmdTypeId.CombatJson;
       default: throw StateError('Invalid value $value for bit flag enum');
     }
   }
@@ -120,7 +122,7 @@ enum CmdTypeId {
       value == null ? null : CmdTypeId.fromValue(value);
 
   static const int minValue = 0;
-  static const int maxValue = 5;
+  static const int maxValue = 6;
   static const fb.Reader<CmdTypeId> reader = _CmdTypeIdReader();
 }
 
@@ -1454,6 +1456,204 @@ class EventFrameObjectBuilder extends fb.ObjectBuilder {
     return fbBuilder.buffer;
   }
 }
+class TerrainEditFrame {
+  TerrainEditFrame._(this._bc, this._bcOffset);
+  factory TerrainEditFrame(List<int> bytes) {
+    final rootRef = fb.BufferContext.fromBytes(bytes);
+    return reader.read(rootRef, 0);
+  }
+
+  static const fb.Reader<TerrainEditFrame> reader = _TerrainEditFrameReader();
+
+  final fb.BufferContext _bc;
+  final int _bcOffset;
+
+  String? get body => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 4);
+  int get kind => const fb.Uint8Reader().vTableGet(_bc, _bcOffset, 6, 0);
+  Vec3? get centre => Vec3.reader.vTableGetNullable(_bc, _bcOffset, 8);
+  Vec3? get axis => Vec3.reader.vTableGetNullable(_bc, _bcOffset, 10);
+  double get radius => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 12, 0.0);
+  double get depth => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 14, 0.0);
+  double get rim => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 16, 0.0);
+  int get tick => const fb.Int64Reader().vTableGet(_bc, _bcOffset, 18, 0);
+  double get datum => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 20, 0.0);
+  double get datumEnd => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 22, 0.0);
+  double get falloff => const fb.Float64Reader().vTableGet(_bc, _bcOffset, 24, 0.0);
+  int get benches => const fb.Int32Reader().vTableGet(_bc, _bcOffset, 26, 1);
+  Vec3? get end => Vec3.reader.vTableGetNullable(_bc, _bcOffset, 28);
+  List<Vec3>? get polygon => const fb.ListReader<Vec3>(Vec3.reader).vTableGetNullable(_bc, _bcOffset, 30);
+
+  @override
+  String toString() {
+    return 'TerrainEditFrame{body: ${body}, kind: ${kind}, centre: ${centre}, axis: ${axis}, radius: ${radius}, depth: ${depth}, rim: ${rim}, tick: ${tick}, datum: ${datum}, datumEnd: ${datumEnd}, falloff: ${falloff}, benches: ${benches}, end: ${end}, polygon: ${polygon}}';
+  }
+}
+
+class _TerrainEditFrameReader extends fb.TableReader<TerrainEditFrame> {
+  const _TerrainEditFrameReader();
+
+  @override
+  TerrainEditFrame createObject(fb.BufferContext bc, int offset) => 
+    TerrainEditFrame._(bc, offset);
+}
+
+class TerrainEditFrameBuilder {
+  TerrainEditFrameBuilder(this.fbBuilder);
+
+  final fb.Builder fbBuilder;
+
+  void begin() {
+    fbBuilder.startTable(14);
+  }
+
+  int addBodyOffset(int? offset) {
+    fbBuilder.addOffset(0, offset);
+    return fbBuilder.offset;
+  }
+  int addKind(int? kind) {
+    fbBuilder.addUint8(1, kind);
+    return fbBuilder.offset;
+  }
+  int addCentre(int offset) {
+    fbBuilder.addStruct(2, offset);
+    return fbBuilder.offset;
+  }
+  int addAxis(int offset) {
+    fbBuilder.addStruct(3, offset);
+    return fbBuilder.offset;
+  }
+  int addRadius(double? radius) {
+    fbBuilder.addFloat64(4, radius);
+    return fbBuilder.offset;
+  }
+  int addDepth(double? depth) {
+    fbBuilder.addFloat64(5, depth);
+    return fbBuilder.offset;
+  }
+  int addRim(double? rim) {
+    fbBuilder.addFloat64(6, rim);
+    return fbBuilder.offset;
+  }
+  int addTick(int? tick) {
+    fbBuilder.addInt64(7, tick);
+    return fbBuilder.offset;
+  }
+  int addDatum(double? datum) {
+    fbBuilder.addFloat64(8, datum);
+    return fbBuilder.offset;
+  }
+  int addDatumEnd(double? datumEnd) {
+    fbBuilder.addFloat64(9, datumEnd);
+    return fbBuilder.offset;
+  }
+  int addFalloff(double? falloff) {
+    fbBuilder.addFloat64(10, falloff);
+    return fbBuilder.offset;
+  }
+  int addBenches(int? benches) {
+    fbBuilder.addInt32(11, benches);
+    return fbBuilder.offset;
+  }
+  int addEnd(int offset) {
+    fbBuilder.addStruct(12, offset);
+    return fbBuilder.offset;
+  }
+  int addPolygonOffset(int? offset) {
+    fbBuilder.addOffset(13, offset);
+    return fbBuilder.offset;
+  }
+
+  int finish() {
+    return fbBuilder.endTable();
+  }
+}
+
+class TerrainEditFrameObjectBuilder extends fb.ObjectBuilder {
+  final String? _body;
+  final int? _kind;
+  final Vec3ObjectBuilder? _centre;
+  final Vec3ObjectBuilder? _axis;
+  final double? _radius;
+  final double? _depth;
+  final double? _rim;
+  final int? _tick;
+  final double? _datum;
+  final double? _datumEnd;
+  final double? _falloff;
+  final int? _benches;
+  final Vec3ObjectBuilder? _end;
+  final List<Vec3ObjectBuilder>? _polygon;
+
+  TerrainEditFrameObjectBuilder({
+    String? body,
+    int? kind,
+    Vec3ObjectBuilder? centre,
+    Vec3ObjectBuilder? axis,
+    double? radius,
+    double? depth,
+    double? rim,
+    int? tick,
+    double? datum,
+    double? datumEnd,
+    double? falloff,
+    int? benches,
+    Vec3ObjectBuilder? end,
+    List<Vec3ObjectBuilder>? polygon,
+  })
+      : _body = body,
+        _kind = kind,
+        _centre = centre,
+        _axis = axis,
+        _radius = radius,
+        _depth = depth,
+        _rim = rim,
+        _tick = tick,
+        _datum = datum,
+        _datumEnd = datumEnd,
+        _falloff = falloff,
+        _benches = benches,
+        _end = end,
+        _polygon = polygon;
+
+  /// Finish building, and store into the [fbBuilder].
+  @override
+  int finish(fb.Builder fbBuilder) {
+    final int? bodyOffset = _body == null ? null
+        : fbBuilder.writeString(_body!);
+    final int? polygonOffset = _polygon == null ? null
+        : fbBuilder.writeListOfStructs(_polygon!);
+    fbBuilder.startTable(14);
+    fbBuilder.addOffset(0, bodyOffset);
+    fbBuilder.addUint8(1, _kind);
+    if (_centre != null) {
+      fbBuilder.addStruct(2, _centre!.finish(fbBuilder));
+    }
+    if (_axis != null) {
+      fbBuilder.addStruct(3, _axis!.finish(fbBuilder));
+    }
+    fbBuilder.addFloat64(4, _radius);
+    fbBuilder.addFloat64(5, _depth);
+    fbBuilder.addFloat64(6, _rim);
+    fbBuilder.addInt64(7, _tick);
+    fbBuilder.addFloat64(8, _datum);
+    fbBuilder.addFloat64(9, _datumEnd);
+    fbBuilder.addFloat64(10, _falloff);
+    fbBuilder.addInt32(11, _benches);
+    if (_end != null) {
+      fbBuilder.addStruct(12, _end!.finish(fbBuilder));
+    }
+    fbBuilder.addOffset(13, polygonOffset);
+    return fbBuilder.endTable();
+  }
+
+  /// Convenience method to serialize to byte list.
+  @override
+  Uint8List toBytes([String? fileIdentifier]) {
+    final fbBuilder = fb.Builder(deduplicateTables: false);
+    fbBuilder.finish(finish(fbBuilder), fileIdentifier);
+    return fbBuilder.buffer;
+  }
+}
 class WorldFrame {
   WorldFrame._(this._bc, this._bcOffset);
   factory WorldFrame(List<int> bytes) {
@@ -1474,10 +1674,11 @@ class WorldFrame {
   List<BuildingFrame>? get buildings => const fb.ListReader<BuildingFrame>(BuildingFrame.reader).vTableGetNullable(_bc, _bcOffset, 14);
   List<EventFrame>? get events => const fb.ListReader<EventFrame>(EventFrame.reader).vTableGetNullable(_bc, _bcOffset, 16);
   List<BodyDescriptor>? get descriptors => const fb.ListReader<BodyDescriptor>(BodyDescriptor.reader).vTableGetNullable(_bc, _bcOffset, 18);
+  List<TerrainEditFrame>? get terrainEdits => const fb.ListReader<TerrainEditFrame>(TerrainEditFrame.reader).vTableGetNullable(_bc, _bcOffset, 20);
 
   @override
   String toString() {
-    return 'WorldFrame{tick: ${tick}, epoch: ${epoch}, fingerprint: ${fingerprint}, bodies: ${bodies}, vessels: ${vessels}, buildings: ${buildings}, events: ${events}, descriptors: ${descriptors}}';
+    return 'WorldFrame{tick: ${tick}, epoch: ${epoch}, fingerprint: ${fingerprint}, bodies: ${bodies}, vessels: ${vessels}, buildings: ${buildings}, events: ${events}, descriptors: ${descriptors}, terrainEdits: ${terrainEdits}}';
   }
 }
 
@@ -1495,7 +1696,7 @@ class WorldFrameBuilder {
   final fb.Builder fbBuilder;
 
   void begin() {
-    fbBuilder.startTable(8);
+    fbBuilder.startTable(9);
   }
 
   int addTick(int? tick) {
@@ -1530,6 +1731,10 @@ class WorldFrameBuilder {
     fbBuilder.addOffset(7, offset);
     return fbBuilder.offset;
   }
+  int addTerrainEditsOffset(int? offset) {
+    fbBuilder.addOffset(8, offset);
+    return fbBuilder.offset;
+  }
 
   int finish() {
     return fbBuilder.endTable();
@@ -1545,6 +1750,7 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
   final List<BuildingFrameObjectBuilder>? _buildings;
   final List<EventFrameObjectBuilder>? _events;
   final List<BodyDescriptorObjectBuilder>? _descriptors;
+  final List<TerrainEditFrameObjectBuilder>? _terrainEdits;
 
   WorldFrameObjectBuilder({
     int? tick,
@@ -1555,6 +1761,7 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
     List<BuildingFrameObjectBuilder>? buildings,
     List<EventFrameObjectBuilder>? events,
     List<BodyDescriptorObjectBuilder>? descriptors,
+    List<TerrainEditFrameObjectBuilder>? terrainEdits,
   })
       : _tick = tick,
         _epoch = epoch,
@@ -1563,7 +1770,8 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
         _vessels = vessels,
         _buildings = buildings,
         _events = events,
-        _descriptors = descriptors;
+        _descriptors = descriptors,
+        _terrainEdits = terrainEdits;
 
   /// Finish building, and store into the [fbBuilder].
   @override
@@ -1580,7 +1788,9 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
         : fbBuilder.writeList(_events!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
     final int? descriptorsOffset = _descriptors == null ? null
         : fbBuilder.writeList(_descriptors!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
-    fbBuilder.startTable(8);
+    final int? terrainEditsOffset = _terrainEdits == null ? null
+        : fbBuilder.writeList(_terrainEdits!.map((b) => b.getOrCreateOffset(fbBuilder)).toList());
+    fbBuilder.startTable(9);
     fbBuilder.addInt64(0, _tick);
     fbBuilder.addFloat64(1, _epoch);
     fbBuilder.addOffset(2, fingerprintOffset);
@@ -1589,6 +1799,7 @@ class WorldFrameObjectBuilder extends fb.ObjectBuilder {
     fbBuilder.addOffset(5, buildingsOffset);
     fbBuilder.addOffset(6, eventsOffset);
     fbBuilder.addOffset(7, descriptorsOffset);
+    fbBuilder.addOffset(8, terrainEditsOffset);
     return fbBuilder.endTable();
   }
 
@@ -2041,6 +2252,79 @@ class ReportTerrainHeightObjectBuilder extends fb.ObjectBuilder {
     return fbBuilder.buffer;
   }
 }
+class CombatJson {
+  CombatJson._(this._bc, this._bcOffset);
+  factory CombatJson(List<int> bytes) {
+    final rootRef = fb.BufferContext.fromBytes(bytes);
+    return reader.read(rootRef, 0);
+  }
+
+  static const fb.Reader<CombatJson> reader = _CombatJsonReader();
+
+  final fb.BufferContext _bc;
+  final int _bcOffset;
+
+  String? get json => const fb.StringReader().vTableGetNullable(_bc, _bcOffset, 4);
+
+  @override
+  String toString() {
+    return 'CombatJson{json: ${json}}';
+  }
+}
+
+class _CombatJsonReader extends fb.TableReader<CombatJson> {
+  const _CombatJsonReader();
+
+  @override
+  CombatJson createObject(fb.BufferContext bc, int offset) => 
+    CombatJson._(bc, offset);
+}
+
+class CombatJsonBuilder {
+  CombatJsonBuilder(this.fbBuilder);
+
+  final fb.Builder fbBuilder;
+
+  void begin() {
+    fbBuilder.startTable(1);
+  }
+
+  int addJsonOffset(int? offset) {
+    fbBuilder.addOffset(0, offset);
+    return fbBuilder.offset;
+  }
+
+  int finish() {
+    return fbBuilder.endTable();
+  }
+}
+
+class CombatJsonObjectBuilder extends fb.ObjectBuilder {
+  final String? _json;
+
+  CombatJsonObjectBuilder({
+    String? json,
+  })
+      : _json = json;
+
+  /// Finish building, and store into the [fbBuilder].
+  @override
+  int finish(fb.Builder fbBuilder) {
+    final int? jsonOffset = _json == null ? null
+        : fbBuilder.writeString(_json!);
+    fbBuilder.startTable(1);
+    fbBuilder.addOffset(0, jsonOffset);
+    return fbBuilder.endTable();
+  }
+
+  /// Convenience method to serialize to byte list.
+  @override
+  Uint8List toBytes([String? fileIdentifier]) {
+    final fbBuilder = fb.Builder(deduplicateTables: false);
+    fbBuilder.finish(finish(fbBuilder), fileIdentifier);
+    return fbBuilder.buffer;
+  }
+}
 class CmdEnvelope {
   CmdEnvelope._(this._bc, this._bcOffset);
   factory CmdEnvelope(List<int> bytes) {
@@ -2063,6 +2347,7 @@ class CmdEnvelope {
       case 3: return SetAttitude.reader.vTableGetNullable(_bc, _bcOffset, 10);
       case 4: return PlaceBuilding.reader.vTableGetNullable(_bc, _bcOffset, 10);
       case 5: return ReportTerrainHeight.reader.vTableGetNullable(_bc, _bcOffset, 10);
+      case 6: return CombatJson.reader.vTableGetNullable(_bc, _bcOffset, 10);
       default: return null;
     }
   }

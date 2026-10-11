@@ -250,7 +250,12 @@ table PlaceBuilding { colony:string; kind:string; gx:int; gy:int; }
 // Renderer -> sim terrain height report (render-reconciliation, not owned intent).
 table ReportTerrainHeight { body:string; lat:double; lon:double; height:double; }
 
-union Cmd { SetThrottle, SeparateStage, SetAttitude, PlaceBuilding, ReportTerrainHeight }
+// A combat command (docs/plans/combat.md §7N) as its own JSON: the combat
+// family is wide and still moving, and every member already round-trips
+// through toJson/fromJson; one string keeps the schema still.
+table CombatJson { json:string; }
+
+union Cmd { SetThrottle, SeparateStage, SetAttitude, PlaceBuilding, ReportTerrainHeight, CombatJson }
 
 table CmdEnvelope {
   issued_by:string;   // PlayerId.value
