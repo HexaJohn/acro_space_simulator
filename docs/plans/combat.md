@@ -356,6 +356,69 @@ morale +0.002/s out of contact, +0.0005/s holding, −0.0005/s without rations; 
 objectives, landers and the warp ceiling, units and the live and input layers, combat on the wire, `SimHost`
 substeps, and anything on `CityGameHud` beyond the colony notice.
 
+**Built** 4b07554 → 9071eb3 (2026-10-10/11), verified live on the Moon.
+
+## 7A. Phase 2 spec: Take the colony, hold it
+
+Specified 2026-10-11, the night the user said "run through phase 2 and phase 3 and we'll review tomorrow": every
+choice below marked *(default)* was taken on the proposed default without asking, for review.
+
+**Ships:** an independent colony can be taken by force. The Force row on its panel opens the same planner; a win
+occupies it, a garrison holds it, and the player either governs it back to a restored charter or watches it throw
+the garrison out.
+
+**Objectives** (from the target's buildings at launch, `buildingParcels()` centroids, at most 5):
+- **Seat** — the goal. The biggest civic building by jobs (police, emergency, hospital, school, clinic), nearest
+  the colony centre on a tie; else the biggest non-home building; else the Port *(default, Q8: no Council Hall)*.
+- **Port** (a spaceport, airfields excluded), **Life support** (the biggest `isLifeSupport` site), **Power** (the
+  biggest plant by output), each only when it is a different site from those before it; the **LZ** 450 m out from
+  the Port (else from the Seat), away from the colony centre.
+- Links: each node to its two nearest; march = distance / 1.4 m/s, at least 60 s.
+- Holding Life support or Power changes nothing in the colony yet (payouts are 1b-ii's).
+
+**Defenders** (resolve `r` as in phase 1, with the grievance and the colony's wish to rejoin):
+- the Port's holders, as in phase 1, at the Port;
+- **regulars** from its own barracks and bases (half their staff, at its throttle; quality 0.8, morale 0.5 + 0.3r)
+  at the Seat;
+- **emplacements**: each Gun Emplacement is 4 crew of strength 3 (quality 0.8, morale 0.6) at its nearest
+  objective, and never moves;
+- militia waves, as in phase 1, sent to whichever objective is threatened.
+- A defeat raises the target's resolve by 0.2 for 10 days.
+
+**AI.** The attacker takes the objectives on the shortest path from the LZ to the Seat in order, advancing from the
+objectives it holds with the phase 1 strength test. The defender sends waves and rallied squads to the most
+valuable threatened objective. On the phase 1 graph (LZ and Port) both reduce exactly to phase 1's rules, so its
+pins hold unchanged.
+
+**ROE** *(default Q5: Restrained)*. Restrained: attacker fire ×0.9, no civilian harm. Standard: full fire, and a
+quarter of the defender dead again as civilians, less the share sheltered (Fallout Shelters and Bunkers), charged
+to the target with corpses and into its grievance. Heavy is phase 6.
+
+**Occupation** (`city_occupation.dart`, the reference's §7.2 nearly as written):
+- `occupy()`: allegiance occupied, loyalty 0.2 (Defiant), revolts, independence, council log, petition and terms
+  cleared; the grievance kept, plus its war dead; `attend()`; notice "Your troopers hold the colony. It takes your
+  orders under guard."
+- An occupied branch in `_stageStep`: no standoff and no secession while the garrison holds; the stage follows
+  the loyalty bands; never self-governing. Level ≤ 0 or three revolts **expels** the garrison (home alive) and the
+  colony takes the plain colonial rules from the next tick.
+- Suppression `s = min(0.8, troopers / (0.05·population))` scales rebellion growth and misrule by (1 − s) and costs
+  mood 0.1·s. Neglect is not suppressed: occupation is ruling, not a timer.
+- Upkeep from the garrison's stock, then requisitioned from the colony's own (mood −0.05 while it is); unpaid, a
+  tenth a day goes home. Supply runs as for a port garrison.
+- **Restore charter** *(default Q15: a player act)*: offered once loyalty has stayed ≥ 0.6 for 10 days; the colony
+  becomes colonial and the garrison comes home. **Withdraw** early: loyalty −0.2, then the plain colonial rules.
+- The HUD reads "Occupied"; the control gate already allows orders; reputation already excludes occupied colonies.
+
+**Commands:** `LaunchOperationCommand` gains the ROE; `RestoreCharterCommand`; `WithdrawGarrisonCommand` also ends
+an occupation. Petition answers stay widget calls for now (trap list) *(deferred)*.
+
+**Out of scope:** salvage, outposts, power cuts and the base (1b), landers and the battle on screen (phase 3).
+
+**Tests:** the multi-objective AI on hand-built graphs; the phase 1 pins unchanged; `planColonyAssault` from a
+fixture; `occupy()` on a colony that left by three revolts stays occupied after a step and reads "Occupied";
+suppression; expulsion; Restore charter; early withdrawal; the Force row live (the pin updated deliberately); a
+launch-to-occupation world run; save/resume with an occupation garrison.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

@@ -34,6 +34,7 @@ class ResolverTuning {
     this.emplacementPower = 3.0,
     this.daySec = 120,
     this.ceasefireDays = 10,
+    this.assaultCeasefireDays = 20,
     this.kitOutLossDays = 2,
     this.aiEveryS = 30,
     this.waveSize = 8,
@@ -46,6 +47,8 @@ class ResolverTuning {
     this.decisiveLossShare = 0.2,
     this.valiantDefenderShare = 0.5,
     this.decisiveDefeatDefenderShare = 0.2,
+    this.standardFire = 1.2,
+    this.collateralShare = 0.25,
   });
 
   /// Members removed per second per unit of effective enemy strength.
@@ -92,6 +95,10 @@ class ResolverTuning {
   /// No decision after this many days of fighting: ceasefire.
   final double ceasefireDays;
 
+  /// The same for a colony assault, which marches across a whole colony: two
+  /// marches of 300–600 m are most of a port retake's ten days on their own.
+  final double assaultCeasefireDays;
+
   /// Every attacker out of kit for this long: lost.
   final double kitOutLossDays;
 
@@ -101,7 +108,8 @@ class ResolverTuning {
   /// Most militia one defender wave brings.
   final int waveSize;
 
-  /// Attackers advance only when E_A/F_def ≥ this × E_D/F_att.
+  /// Attackers advance only when S_A/F_def ≥ this × S_D/F_att, on whole
+  /// strengths (not width-capped).
   final double advanceRatio;
 
   /// Share of survivors lost in a fighting withdrawal.
@@ -118,6 +126,12 @@ class ResolverTuning {
   /// Defeat bands by the share of the defending force lost.
   final double valiantDefenderShare;
   final double decisiveDefeatDefenderShare;
+
+  /// Attacker fire under Standard ROE, against Restrained's 1.
+  final double standardFire;
+
+  /// Civilians killed per defender killed under Standard ROE, unsheltered.
+  final double collateralShare;
 
   /// Strength per member before quality, morale and supply.
   double powerOf(FormationKind kind) =>

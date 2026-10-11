@@ -29,6 +29,26 @@ enum OperationPhase { mustering, transit, engaged, resolved }
 /// How an operation ended. Append-only: saved by name.
 enum OperationOutcome { won, lost, withdrawn, ceasefire, rejoined, overtaken }
 
+/// What an operation is for. Append-only: saved by name.
+enum OperationKind {
+  /// Phase 1: take back a colony's seized spaceport.
+  portRetake,
+
+  /// Phase 2: take an independent colony, and occupy it.
+  colonyAssault,
+}
+
+/// Rules of engagement (docs/plans/combat.md §7A). Append-only: saved by name.
+enum Roe {
+  /// Small arms, surrender accepted, nobody else harmed: the baseline every
+  /// phase 1 number was calibrated on.
+  restrained,
+
+  /// Heavier fire, and the town pays for it: civilians die alongside the
+  /// defenders, less the share in shelters.
+  standard,
+}
+
 /// Total War: Warhammer II's wording, by the share of each side lost.
 enum OutcomeBand {
   decisiveVictory,
@@ -74,6 +94,9 @@ class Operation {
     required List<Formation> formations,
     required this.militia,
     required this.defenderFaction,
+    this.kind = OperationKind.portRetake,
+    this.roe = Roe.restrained,
+    this.shelterCover = 0,
     this.sameBody = true,
     int? seed,
     OperationClock? clock,
@@ -125,6 +148,13 @@ class Operation {
 
   /// The attacker's landing zone.
   final String lzId;
+
+  final OperationKind kind;
+  final Roe roe;
+
+  /// The share of the target's people a shelter or bunker holds, at launch:
+  /// what spares civilians under [Roe.standard].
+  final double shelterCover;
   final ObjectiveGraph graph;
 
   /// In id order, always.
@@ -170,6 +200,11 @@ class Operation {
   final CounterTuning counters;
 
   bool get resolved => phase == OperationPhase.resolved;
+
+  /// Days of fighting before a ceasefire.
+  double get ceasefireDays => kind == OperationKind.colonyAssault
+      ? tuning.assaultCeasefireDays
+      : tuning.ceasefireDays;
 
   /// Operation time, s.
   double get seconds => clock.seconds;
@@ -274,10 +309,12 @@ class Operation {
       final f = formations[i];
       if (f.engagedMembers == 0) f.engagedMembers = f.count;
     }
+    final fire = roe == Roe.standard ? tuning.standardFire : 1.0;
     final attS = [
       for (final i in att)
         formationStrength(formations[i], tuning,
-            armed: formations[i].kitDays > 0)
+                armed: formations[i].kitDays > 0) *
+            fire
     ];
     final defS = [
       for (final i in def) formationStrength(formations[i], tuning, armed: true)
@@ -350,7 +387,9 @@ class Operation {
       f.morale = m.clamp(0.0, 1.0);
       if (!f.broken && f.morale < tuning.brokenBelow) {
         f.broken = true;
-        f.at = FormationAt.reserve;
+        // A gun emplacement's crew abandon the gun, not the ground: it stays
+        // where it was built, silent until they rally to it.
+        if (f.kind != FormationKind.emplacement) f.at = FormationAt.reserve;
       } else if (f.broken && f.morale >= tuning.rallyAt) {
         f.broken = false;
       }
@@ -359,12 +398,26 @@ class Operation {
 
   // ---- the abstract AIs (docs/plans/combat.md §7.5) ------------------------
 
-  /// The defender holds the goal: it feeds the town's militia to it in waves
-  /// while it is under attack, and sends rallied squads back.
+  /// The objective the defender most needs to hold now: the most valuable one
+  /// an attacker is at or marching on (never the attacker's own LZ), or null
+  /// with none threatened. With phase 1's graph that is the Port or nothing.
+  Objective? _threatened() {
+    Objective? best;
+    for (final o in graph.objectives) {
+      if (o.kind == ObjectiveKind.lz) continue;
+      final hit = formations.any((f) =>
+          f.side == CombatSide.attacker && f.alive && !f.broken && f.at == o.id);
+      if (hit && (best == null || o.value > best.value)) best = o;
+    }
+    return best;
+  }
+
+  /// The defender holds what is threatened: it feeds the town's militia there
+  /// in waves while it is under attack, and sends rallied squads back to it
+  /// (or to the goal when nothing is). Emplacements never move.
   void _defenderAi(int t) {
-    final threatened = formations.any((f) =>
-        f.side == CombatSide.attacker && f.alive && !f.broken && f.at == goalId);
-    if (threatened && militia.total > 0) {
+    final threat = _threatened();
+    if (threat != null && militia.total > 0) {
       final fromArmed = militia.armed > 0;
       final n = math.min(tuning.waveSize, fromArmed ? militia.armed : militia.improvised);
       if (fromArmed) {
@@ -380,25 +433,71 @@ class Operation {
         count: n,
         quality: fromArmed ? 0.5 : 0.3,
         morale: militia.morale,
-        at: goalId,
+        at: threat.id,
         arriveStep: t,
       ));
       defenderRaised += n;
     }
+    final rally = threat?.id ?? goalId;
     for (final f in formations) {
       if (f.side == CombatSide.defender &&
           f.alive &&
           !f.broken &&
+          f.kind != FormationKind.emplacement &&
           f.at == FormationAt.reserve) {
-        f.at = goalId;
+        f.at = rally;
         f.arriveStep = t + tuning.aiEveryS;
       }
     }
   }
 
-  /// Attackers at the LZ advance on the goal when they are strong enough to
-  /// take it, and hold for reinforcements when they are not. Rallied squads
-  /// regroup at the LZ.
+  List<String>? _pathCache;
+
+  /// The shortest march from the LZ to the goal, by seconds, ties broken by
+  /// id: the order the attacker takes objectives in. LZ first, goal last.
+  /// Phase 1's graph gives `[lz, port]`.
+  List<String> get path => _pathCache ??= _shortestPath();
+
+  static const int _far = 1 << 40;
+
+  List<String> _shortestPath() {
+    final ids = [for (final o in graph.objectives) o.id];
+    final dist = <String, int>{for (final id in ids) id: _far};
+    final prev = <String, String>{};
+    final done = <String>[];
+    dist[lzId] = 0;
+    while (done.length < ids.length) {
+      String? u;
+      for (final id in ids) {
+        if (done.contains(id)) continue;
+        if (u == null || dist[id]! < dist[u]!) u = id;
+      }
+      if (u == null || dist[u]! >= _far) break;
+      done.add(u);
+      for (final l in graph.links) {
+        final v = l.a == u ? l.b : (l.b == u ? l.a : null);
+        if (v == null || done.contains(v) || !dist.containsKey(v)) continue;
+        final d = dist[u]! + l.marchS;
+        if (d < dist[v]!) {
+          dist[v] = d;
+          prev[v] = u;
+        }
+      }
+    }
+    if (!prev.containsKey(goalId)) return [lzId, goalId];
+    final out = <String>[goalId];
+    while (out.last != lzId) {
+      out.add(prev[out.last]!);
+    }
+    return out.reversed.toList();
+  }
+
+  /// The attacker takes the objectives on [path] in order: its target is the
+  /// first one past the LZ it does not yet hold (the goal once the rest are
+  /// held). Squads that have arrived at an objective behind the target
+  /// advance on it when they are strong enough to take it, and hold for
+  /// reinforcements when they are not. Rallied squads regroup at the LZ. On
+  /// phase 1's graph that is: from the LZ, on the port.
   void _attackerAi(int t) {
     for (final f in formations) {
       if (f.side == CombatSide.attacker &&
@@ -409,31 +508,44 @@ class Operation {
         f.arriveStep = t;
       }
     }
-    final goal = graph.byId(goalId);
-    if (goal == null) return;
+    final route = path;
+    var k = 1;
+    while (k < route.length - 1 &&
+        (graph.byId(route[k])?.control ?? 1) >= tuning.holdingControl) {
+      k++;
+    }
+    final target = graph.byId(route[k]);
+    if (target == null) return;
+    final behind = route.sublist(0, k);
     var ready = 0.0;
     final movers = <Formation>[];
     for (final f in formations) {
-      if (f.side == CombatSide.attacker &&
-          f.presentAt(lzId, t) &&
-          f.morale >= tuning.pinnedBelow) {
-        ready += formationStrength(f, tuning, armed: f.kitDays > 0);
-        movers.add(f);
+      if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
+      var there = false;
+      for (final id in behind) {
+        if (f.presentAt(id, t)) there = true;
       }
+      if (!there) continue;
+      ready += formationStrength(f, tuning, armed: f.kitDays > 0);
+      movers.add(f);
     }
     if (movers.isEmpty) return;
     var held = 0.0;
     for (final f in formations) {
-      if (f.side == CombatSide.defender && f.alive && !f.broken && f.at == goalId) {
+      if (f.side == CombatSide.defender && f.alive && !f.broken && f.at == target.id) {
         held += formationStrength(f, tuning, armed: true);
       }
     }
-    final a = math.min(ready, goal.width) / goal.fDef;
-    final d = math.min(held, goal.width) / goal.fAtt;
+    // Whole strengths, not width-capped ones: the width caps what either
+    // side brings to bear, which is the losses' business. Capped here, two
+    // sides that both fill a small objective compare width/F_def against
+    // width/F_att, and behind any fortification the attacker never went in.
+    final a = ready / target.fDef;
+    final d = held / target.fAtt;
     if (a < tuning.advanceRatio * d) return;
-    final march = graph.marchS(lzId, goalId);
     for (final f in movers) {
-      f.at = goalId;
+      final march = graph.marchS(f.at, target.id);
+      f.at = target.id;
       f.arriveStep = t + march;
     }
   }
@@ -483,7 +595,7 @@ class Operation {
       _resolve(OperationOutcome.lost);
       return;
     }
-    if (t - engagedAtStep >= tuning.ceasefireDays * tuning.daySec) {
+    if (t - engagedAtStep >= ceasefireDays * tuning.daySec) {
       _resolve(OperationOutcome.ceasefire);
     }
   }
@@ -569,6 +681,14 @@ class Operation {
   int get defenderWounded => _sum(CombatSide.defender, (f) => f.wounded);
   int get defenderRemoved => _sum(CombatSide.defender, (f) => f.removed);
 
+  /// Townsfolk killed alongside the defenders: none under [Roe.restrained];
+  /// under [Roe.standard] a [ResolverTuning.collateralShare] of the defender
+  /// dead again, less the share a shelter held.
+  int get civilianDead => roe == Roe.standard
+      ? (defenderDead * tuning.collateralShare * (1 - shelterCover.clamp(0.0, 1.0)))
+          .round()
+      : 0;
+
   /// Attacker dead and wounded by home colony, in colony id order: what each
   /// home is charged when the operation reports back.
   List<({String home, int dead, int wounded, int alive})> attackerByHome() {
@@ -611,6 +731,9 @@ class Operation {
         'formations': [for (final f in formations) f.toJson()],
         'militia': militia.toJson(),
         'defFaction': defenderFaction,
+        if (kind != OperationKind.portRetake) 'kind': kind.name,
+        if (roe != Roe.restrained) 'roe': roe.name,
+        if (shelterCover != 0) 'shelter': shelterCover,
         if (!sameBody) 'sameBody': false,
         'clock': clock.toJson(),
         'phase': phase.name,
@@ -649,6 +772,11 @@ class Operation {
         ],
         militia: MilitiaPool.fromJson((j['militia'] as Map?)?.cast<String, dynamic>()),
         defenderFaction: j['defFaction'] as String,
+        kind: j['kind'] == null
+            ? OperationKind.portRetake
+            : OperationKind.values.byName(j['kind'] as String),
+        roe: j['roe'] == null ? Roe.restrained : Roe.values.byName(j['roe'] as String),
+        shelterCover: (j['shelter'] as num?)?.toDouble() ?? 0,
         sameBody: j['sameBody'] != false,
         clock: OperationClock.fromJson((j['clock'] as Map?)?.cast<String, dynamic>()),
         phase: OperationPhase.values.byName(j['phase'] as String),

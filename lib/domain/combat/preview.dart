@@ -50,7 +50,10 @@ class OperationPreview {
   /// The longest a run can take: mustering, transit and the ceasefire cap.
   int get _maxSteps {
     final t = _tuning;
-    return ((t.musteringDays + t.transitDaysOtherBody + t.ceasefireDays) *
+    final cease = t.ceasefireDays > t.assaultCeasefireDays
+        ? t.ceasefireDays
+        : t.assaultCeasefireDays;
+    return ((t.musteringDays + t.transitDaysOtherBody + cease) *
                 t.daySec)
             .ceil() +
         10;

@@ -78,6 +78,34 @@ class SourceSnapshot {
   }
 }
 
+/// An objective's ground, as the colony's buildings place it: what a
+/// colony assault's battle graph is built from (docs/plans/combat.md §7A).
+class ObjectiveSite {
+  const ObjectiveSite({
+    required this.kind,
+    required this.siteId,
+    required this.e,
+    required this.n,
+    required this.areaM2,
+  });
+
+  /// `port`, `seat`, `lifeSupport` or `power` (an `ObjectiveKind` name).
+  final String kind;
+  final String siteId;
+
+  /// Its centre in the colony's east/north metres.
+  final double e, n;
+  final double areaM2;
+}
+
+/// A gun emplacement in the target colony: a fixed defender.
+class EmplacementSite {
+  const EmplacementSite(this.siteId, this.e, this.n, this.crew);
+  final String siteId;
+  final double e, n;
+  final int crew;
+}
+
 /// The colony being fought over, as it stood at launch.
 class LaunchSnapshot {
   const LaunchSnapshot({
@@ -93,6 +121,12 @@ class LaunchSnapshot {
     required this.portSeized,
     this.portWidth = 24,
     this.portFortification = 1.3,
+    this.independent = false,
+    this.objectives = const [],
+    this.regulars = 0,
+    this.emplacements = const [],
+    this.shelterCover = 0,
+    this.resolveBoost = 0,
   });
 
   final String colonyId;
@@ -117,4 +151,20 @@ class LaunchSnapshot {
   /// behind (+0.3: a building stands on it).
   final double portWidth;
   final double portFortification;
+
+  /// The colony has seceded: a colony assault's target, not a port retake's.
+  final bool independent;
+
+  /// Its Seat, Port, Life support and Power, in that order, those it has.
+  final List<ObjectiveSite> objectives;
+
+  /// Troopers its own barracks and bases can turn out.
+  final int regulars;
+  final List<EmplacementSite> emplacements;
+
+  /// The share of its people a shelter or bunker holds.
+  final double shelterCover;
+
+  /// Resolve added after it beat an attack off (+0.2 for 10 days).
+  final double resolveBoost;
 }
