@@ -432,9 +432,17 @@ extension CityWar on CitySim {
   /// This colony as the target, as it stands now.
   LaunchSnapshot launchSnapshot() {
     var portJobs = 0;
-    for (final (_, s) in landingPads()) {
-      if (s.type == 'spaceport') portJobs += s.jobs;
+    Parcel? port;
+    var portBest = -1;
+    for (final (p, s) in landingPads()) {
+      if (s.type != 'spaceport') continue;
+      portJobs += s.jobs;
+      if (s.jobs > portBest || (s.jobs == portBest && p.id.compareTo(port!.id) < 0)) {
+        portBest = s.jobs;
+        port = p;
+      }
     }
+    final portAt = port?.centroid;
     final colonial = loyalty.allegiance == Allegiance.colonial;
     final severity = colonial
         ? Grievance(
@@ -472,6 +480,8 @@ extension CityWar on CitySim {
       spaceportJobs: portJobs,
       gunsInStock: stockOf(Commodity.guns).floor(),
       portSeized: loyalty.portSeized,
+      portE: portAt?.e ?? 0,
+      portN: portAt?.n ?? 0,
       independent: independent,
       objectives: independent ? assaultObjectives() : const [],
       regulars: regulars,

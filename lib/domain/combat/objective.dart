@@ -27,6 +27,8 @@ class Objective {
     this.fAtt = 1.0,
     this.control = 0.0,
     this.heldS = 0,
+    this.e = 0,
+    this.n = 0,
   });
 
   final String id;
@@ -53,6 +55,11 @@ class Objective {
   /// Consecutive seconds the attacker has held it at or above the win line.
   int heldS;
 
+  /// Where it stands, in the target colony's east/north metres: what the
+  /// battle is drawn at (docs/plans/combat.md §7B). The resolver never reads
+  /// it — march times are on the links.
+  final double e, n;
+
   /// The objective width for a footprint of [areaM2] square metres:
   /// `min(cap, 6 + 4·sqrt(m² / 10,000))` — a 1 ha port is about 10.
   static double widthFor(double areaM2, {double cap = 24}) =>
@@ -67,6 +74,8 @@ class Objective {
         if (fAtt != 1.0) 'fAtt': fAtt,
         if (control != 0) 'c': control,
         if (heldS != 0) 'held': heldS,
+        if (e != 0) 'e': e,
+        if (n != 0) 'n': n,
       };
 
   factory Objective.fromJson(Map<String, dynamic> j) => Objective(
@@ -78,6 +87,8 @@ class Objective {
         fAtt: (j['fAtt'] as num?)?.toDouble() ?? 1.0,
         control: (j['c'] as num?)?.toDouble() ?? 0,
         heldS: (j['held'] as num?)?.toInt() ?? 0,
+        e: (j['e'] as num?)?.toDouble() ?? 0,
+        n: (j['n'] as num?)?.toDouble() ?? 0,
       );
 }
 

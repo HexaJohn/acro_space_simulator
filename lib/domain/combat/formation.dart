@@ -70,6 +70,8 @@ class Formation {
     this.engagedMembers = 0,
     this.arriveStep = 0,
     this.broken = false,
+    this.fromAt,
+    this.departStep = 0,
   });
 
   /// A handle from the operation's saved counter.
@@ -111,6 +113,20 @@ class Formation {
 
   /// Broken: out of the fight in the reserve until morale rallies.
   bool broken;
+
+  /// The objective a march to [at] set out from, and the step it set out:
+  /// where a squad is drawn between two objectives. Null when it is not
+  /// marching from anywhere (landed, raised in place, broken).
+  String? fromAt;
+  int departStep;
+
+  /// Sends it to [to], arriving [marchS] seconds after [step].
+  void marchTo(String to, int step, int marchS) {
+    fromAt = at;
+    departStep = step;
+    at = to;
+    arriveStep = step + marchS;
+  }
 
   /// The colony its members live in, where their deaths are charged.
   final String? homeColonyId;
@@ -170,6 +186,8 @@ class Formation {
         if (homeSiteId != null) 'site': homeSiteId,
         if (lossCarry != 0) 'carry': lossCarry,
         if (engagedMembers != 0) 'engaged': engagedMembers,
+        if (fromAt != null) 'from': fromAt,
+        if (departStep != 0) 'depart': departStep,
       };
 
   factory Formation.fromJson(Map<String, dynamic> j) => Formation(
@@ -194,5 +212,7 @@ class Formation {
         homeSiteId: j['site'] as String?,
         lossCarry: (j['carry'] as num?)?.toDouble() ?? 0,
         engagedMembers: (j['engaged'] as num?)?.toInt() ?? 0,
+        fromAt: j['from'] as String?,
+        departStep: (j['depart'] as num?)?.toInt() ?? 0,
       );
 }

@@ -93,6 +93,53 @@ class CombatPhase {
         _find(cities, c.colonyId)?.war.inbox.add(const GarrisonWithdrawWrite());
       case RestoreCharterCommand():
         _find(cities, c.colonyId)?.war.inbox.add(const RestoreCharterWrite());
+      case OrderOperationCommand():
+        final kind = OrderKind.values.where((k) => k.name == c.order).firstOrNull;
+        if (kind != null) registry.byId(c.operationId)?.setOrder(kind, target: c.target);
+      case ReinforceOperationCommand():
+        _reinforce(c, cities);
+    }
+  }
+
+  void _reinforce(ReinforceOperationCommand c, List<CitySim> cities) {
+    final op = registry.byId(c.operationId);
+    final target = op == null ? null : _find(cities, op.targetColonyId);
+    if (op == null || op.resolved || target == null) {
+      registry.lastRefusal = 'That operation is over.';
+      return;
+    }
+    final sourceIds = <String>[];
+    for (final d in c.draws) {
+      if (!sourceIds.contains(d.colonyId)) sourceIds.add(d.colonyId);
+    }
+    sourceIds.sort();
+    final sources = <SourceSnapshot>[];
+    for (final id in sourceIds) {
+      final s = _find(cities, id);
+      if (s == null || s.loyalty.allegiance == Allegiance.independent) {
+        registry.lastRefusal = 'A source colony takes no orders.';
+        return;
+      }
+      sources.add(s.sourceSnapshot());
+    }
+    final planned = planReinforcements(
+      op: op,
+      targetBodyId: target.body.id.value,
+      sources: sources,
+      draws: [for (final d in c.draws) TrooperDraw(d.colonyId, d.siteId, d.count)],
+      kitDays: c.kitDays,
+    );
+    if (planned.refusal case final why?) {
+      registry.lastRefusal = why;
+      return;
+    }
+    registry.lastRefusal = null;
+    op.reinforce(planned.formations);
+    for (final d in planned.debits) {
+      _find(cities, d.colonyId)
+          ?.war
+          .inbox
+          .add(DeployWrite(op.id, d.siteId, d.troopers, d.jobs, d.kit));
     }
   }
 

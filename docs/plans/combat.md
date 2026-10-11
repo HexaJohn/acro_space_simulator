@@ -424,6 +424,48 @@ fixture; `occupy()` on a colony that left by three revolts stays occupied after 
 suppression; expulsion; Restore charter; early withdrawal; the Force row live (the pin updated deliberately); a
 launch-to-occupation world run; save/resume with an occupation garrison.
 
+## 7B. Phase 3 spec: Watch it
+
+Specified 2026-10-11, same night as §7A, on the same footing: *(default)* marks a choice taken without asking.
+
+**Ships:** troop landers come down on the Moon as real vessels; the fight is drawn over the colony — objectives
+coloured by who holds them, squads moving between them, blasts and smoke where they meet — and the player can
+redirect the force or send more. Still no individual soldiers.
+
+**On the operation** (saved): each objective's colony-local position, the LZ's included; each march's origin and
+start step (for drawing a squad between two objectives); the standing order; the landers.
+
+**Orders** (`OrderOperationCommand`): *auto* (the phase 2 plan), *attack* an objective now whatever the odds (back
+to auto once held), *hold*, *fall back* to the LZ (then hold). **Reinforcements** (`ReinforceOperationCommand`):
+fresh squads from the same planner rules, landing at the LZ a mustering and a crossing after the order.
+
+**Landers** (`ForceLanders`, the tick's first world read for combat):
+- Only where the target's body has no atmosphere *(default Q9)*; elsewhere landing stays abstract.
+- One lander per 16 troopers, flown by the shuttles' `LandingGuidance` from 16 km up onto a ring of points 40 m
+  round the LZ (450 m from any pad, so nothing is impounded). The transit ends when every lander is down; a squad
+  lands with its lander; a lander lost before touchdown loses everyone aboard, dead and charged home. With craft
+  destruction off (the default cheat) nothing is lost, as for any craft.
+- Lander records live on the operation (saved) and re-arm their guidance every tick, so a load resumes a descent.
+- **Warp ceiling:** while a lander descends, warp is held at 1× — above 4× a craft is on rails and its guidance
+  does nothing. One clamp in the tick (every host) and one in the view (its ladder and a notice).
+- Landed, they wait at the LZ; when the operation ends they lift off and are recovered past 4 km.
+
+**On screen** (the in-world view):
+- `CombatFrame`, a pure read of an operation: objectives with control, squads with interpolated positions, and the
+  contact intensity at each objective.
+- A projected 2D overlay (`_camera.projectPx`): objective rings coloured by control, front arrows for marches,
+  squad pips sized by count, flashes where they fight. Not depth-tested: it is a command overlay.
+- Smoke and muzzle flashes in 3D: a `combat` SceneSync stage with two persistent particle systems per battle,
+  driven by `CombatOverlayState` (its own state; the road overlay's is wiped by every tool change).
+- **Watch** in the drawer frames the camera on the battle; the drawer gives the orders and Reinforce.
+
+**Out of scope:** fog of war, module nodes and drawn supply drops (need the base, 1b), hot-drop, the orbital layer
+(3b), and soldiers (4a).
+
+**Tests:** orders and reinforcements on hand-built operations; positions saved; the frame's interpolation; landers
+through the real tick on the Moon fixture — touchdown, transit gated on them, a lost lander's dead, the warp clamp
+(1,000× asked, 1× while descending), save and resume mid-descent.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

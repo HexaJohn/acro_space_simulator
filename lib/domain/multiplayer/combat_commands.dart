@@ -48,6 +48,25 @@ sealed class CombatCommand extends SimCommand {
         return WithdrawGarrisonCommand(by, tick, j['colony'] as String);
       case 'restoreCharter':
         return RestoreCharterCommand(by, tick, j['colony'] as String);
+      case 'order':
+        return OrderOperationCommand(by, tick, (j['op'] as num).toInt(), j['order'] as String,
+            target: j['target'] as String?);
+      case 'reinforce':
+        return ReinforceOperationCommand(
+          by,
+          tick,
+          (j['op'] as num).toInt(),
+          draws: [
+            for (final d in (j['draws'] as List? ?? const []))
+              if (d is Map)
+                (
+                  colonyId: d['colony'] as String,
+                  siteId: d['site'] as String,
+                  count: (d['n'] as num).toInt(),
+                ),
+          ],
+          kitDays: (j['kit'] as num?)?.toDouble() ?? 3,
+        );
     }
     return null;
   }
@@ -134,4 +153,53 @@ class RestoreCharterCommand extends CombatCommand {
   @override
   Map<String, dynamic> toJson() =>
       {'kind': 'restoreCharter', 'by': issuedBy.value, 'tick': tick, 'colony': colonyId};
+}
+
+/// Give a running operation's attackers a standing order
+/// (docs/plans/combat.md §7B): `auto`, `attack` [target], `hold` or
+/// `fallBack`.
+class OrderOperationCommand extends CombatCommand {
+  const OrderOperationCommand(super.issuedBy, super.tick, this.operationId, this.order,
+      {this.target});
+  final int operationId;
+  final String order;
+  final String? target;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'order',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'order': order,
+        if (target != null) 'target': target,
+      };
+}
+
+/// Send more troopers to a running operation; they land at its LZ a
+/// mustering and a crossing later.
+class ReinforceOperationCommand extends CombatCommand {
+  const ReinforceOperationCommand(super.issuedBy, super.tick, this.operationId,
+      {required this.draws, this.kitDays = 3});
+  final int operationId;
+  final List<({String colonyId, String siteId, int count})> draws;
+  final double kitDays;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'reinforce',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'draws': [
+          for (final d in draws) {'colony': d.colonyId, 'site': d.siteId, 'n': d.count}
+        ],
+        'kit': kitDays,
+      };
 }

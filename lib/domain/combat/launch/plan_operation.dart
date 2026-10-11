@@ -72,8 +72,9 @@ class _Draws {
 }
 
 _Draws _drawAttackers(List<TrooperDraw> draws, List<SourceSnapshot> sources,
-    String targetBodyId, double kitDays) {
-  final out = _Draws();
+    String targetBodyId, double kitDays,
+    {int firstId = 0}) {
+  final out = _Draws()..nextId = firstId;
   for (final d in draws) {
     if (d.count <= 0) continue;
     SourceSnapshot? src;
@@ -130,6 +131,30 @@ _Draws _drawAttackers(List<TrooperDraw> draws, List<SourceSnapshot> sources,
   return out;
 }
 
+/// Reinforcements for the running [op] (docs/plans/combat.md §7B): [draws]
+/// from [sources] as fresh squads that land at its LZ a mustering and a
+/// crossing from now, and what each source hands over; or why not.
+({List<Formation> formations, List<SourceDebit> debits, String? refusal}) planReinforcements({
+  required Operation op,
+  required String targetBodyId,
+  required List<SourceSnapshot> sources,
+  required List<TrooperDraw> draws,
+  double kitDays = 3,
+}) {
+  if (op.resolved) {
+    return (formations: const [], debits: const [], refusal: 'That operation is over.');
+  }
+  final drawn = _drawAttackers(draws, sources, targetBodyId, kitDays, firstId: op.nextFormationId);
+  if (drawn.refusal case final why?) {
+    return (formations: const [], debits: const [], refusal: why);
+  }
+  final lands = op.clock.steps + op.reinforcementDelaySteps;
+  for (final f in drawn.formations) {
+    f.arriveStep = lands;
+  }
+  return (formations: drawn.formations, debits: drawn.debits, refusal: null);
+}
+
 /// [n] people as squads of at most 8, as even as they split: 9 is 5 and 4,
 /// not 8 and a lone trooper who breaks the moment anyone shoots at him.
 List<int> evenSquads(int n) {
@@ -177,6 +202,7 @@ PlannedOperation planPortRetake({
     at: 'port',
   ));
   final marchS = (kLzDistanceM / kInfantryMarchMps).round();
+  final lz = lzFrom(target.portE, target.portN);
   final op = Operation(
     id: operationId,
     targetColonyId: target.colonyId,
@@ -189,8 +215,11 @@ PlannedOperation planPortRetake({
           value: 10,
           width: target.portWidth,
           fDef: target.portFortification,
-          control: -1),
-      Objective(id: 'lz', kind: ObjectiveKind.lz, value: 2, width: 24, control: 1),
+          control: -1,
+          e: target.portE,
+          n: target.portN),
+      Objective(
+          id: 'lz', kind: ObjectiveKind.lz, value: 2, width: 24, control: 1, e: lz.$1, n: lz.$2),
     ], [
       ObjectiveLink('lz', 'port', marchS),
     ]),
@@ -211,6 +240,19 @@ PlannedOperation planPortRetake({
     tuning: tuning,
   );
   return PlannedOperation(op, drawn.debits, null);
+}
+
+/// The LZ for an anchor at ([e], [n]): [kLzDistanceM] out from it, away from
+/// the colony centre (east, for an anchor on the centre itself).
+(double, double) lzFrom(double e, double n) {
+  var de = e, dn = n;
+  var len = math.sqrt(de * de + dn * dn);
+  if (len < 1) {
+    de = 1;
+    dn = 0;
+    len = 1;
+  }
+  return (e + de / len * kLzDistanceM, n + dn / len * kLzDistanceM);
 }
 
 /// How much the defender cares about each objective (§7A): the Seat most.
@@ -279,21 +321,23 @@ PlannedOperation planColonyAssault({
       width: o.kind == 'port' ? target.portWidth : Objective.widthFor(o.areaM2),
       fDef: kBuildingFortification,
       control: -1,
+      e: o.e,
+      n: o.n,
     ));
   }
   // The LZ: out from the port (else the seat), away from the colony centre,
   // past the impound radius of its pads.
   final anchor = at['port'] ?? at['seat']!;
-  var de = anchor.$1, dn = anchor.$2;
-  var len = math.sqrt(de * de + dn * dn);
-  if (len < 1) {
-    de = 1;
-    dn = 0;
-    len = 1;
-  }
-  at['lz'] = (anchor.$1 + de / len * kLzDistanceM, anchor.$2 + dn / len * kLzDistanceM);
+  at['lz'] = lzFrom(anchor.$1, anchor.$2);
   ids.add('lz');
-  nodes.add(Objective(id: 'lz', kind: ObjectiveKind.lz, value: 2, width: 24, control: 1));
+  nodes.add(Objective(
+      id: 'lz',
+      kind: ObjectiveKind.lz,
+      value: 2,
+      width: 24,
+      control: 1,
+      e: at['lz']!.$1,
+      n: at['lz']!.$2));
   double dist(String a, String b) {
     final p = at[a]!, q = at[b]!;
     final x = p.$1 - q.$1, y = p.$2 - q.$2;

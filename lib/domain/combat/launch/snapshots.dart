@@ -121,6 +121,8 @@ class LaunchSnapshot {
     required this.portSeized,
     this.portWidth = 24,
     this.portFortification = 1.3,
+    this.portE = 0,
+    this.portN = 0,
     this.independent = false,
     this.objectives = const [],
     this.regulars = 0,
@@ -151,6 +153,9 @@ class LaunchSnapshot {
   /// behind (+0.3: a building stands on it).
   final double portWidth;
   final double portFortification;
+
+  /// Its spaceport's centre in its east/north metres (0, 0 with none).
+  final double portE, portN;
 
   /// The colony has seceded: a colony assault's target, not a port retake's.
   final bool independent;

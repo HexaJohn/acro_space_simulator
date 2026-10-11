@@ -358,6 +358,32 @@ void main() {
     expect(tgt.loyalty.allegiance, Allegiance.colonial);
   });
 
+  test('orders and reinforcements go through the tick as commands', () {
+    final src = source(3), tgt = target();
+    final w = world([src, tgt]);
+    w.tick.execute(w.clock);
+    w.ops.inbox.enqueue(launch(src, each: 4));
+    w.tick.execute(w.clock);
+    final op = w.ops.operations.single;
+    final away = src.troopersAway;
+    w.ops.inbox.enqueue(OrderOperationCommand(player, 0, op.id, 'hold'));
+    w.tick.execute(w.clock);
+    expect(op.order, OrderKind.hold);
+    final sources = src.trooperSources();
+    w.ops.inbox.enqueue(ReinforceOperationCommand(player, 0, op.id, draws: [
+      for (final s in sources)
+        if (s.ready) (colonyId: src.id, siteId: s.siteId, count: 2)
+    ]));
+    w.tick.execute(w.clock);
+    expect(w.ops.lastRefusal, isNull);
+    expect(src.troopersAway, away + 2 * sources.where((s) => s.ready).length);
+    expect(op.attackerRaised, away + 2 * sources.where((s) => s.ready).length);
+    w.ops.inbox.enqueue(OrderOperationCommand(player, 0, op.id, 'auto'));
+    runUntilReported(w);
+    expect(op.resolved, isTrue);
+    expect(src.troopersAway, op.outcome == OperationOutcome.won ? 2 : 0);
+  });
+
   test('a v2 save loads with no operations, and the registry forgets the session', () {
     final ops = OperationRegistry()..nextOperationId = 9;
     const GameStateCodec().decode(

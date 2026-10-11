@@ -49,6 +49,23 @@ enum Roe {
   standard,
 }
 
+/// The player's standing order to the attackers (docs/plans/combat.md §7B).
+/// Append-only: saved by name.
+enum OrderKind {
+  /// The abstract AI's own plan: the objectives on the way to the goal, in
+  /// order, each when strong enough.
+  auto,
+
+  /// Go for one objective now, whatever the odds; back to [auto] once held.
+  attack,
+
+  /// Stay where they are.
+  hold,
+
+  /// Back to the landing zone, then hold there.
+  fallBack,
+}
+
 /// Total War: Warhammer II's wording, by the share of each side lost.
 enum OutcomeBand {
   decisiveVictory,
@@ -112,6 +129,8 @@ class Operation {
     this.defenderRaised = 0,
     this.defenderSurrendered = 0,
     this.garrison = 0,
+    this.order = OrderKind.auto,
+    this.orderTarget,
     Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
@@ -196,6 +215,44 @@ class Operation {
   /// building's inputs, recorded at launch so reporting reads no colony.
   final Map<String, double> garrisonKit;
 
+  /// The player's standing order, and the objective an [OrderKind.attack]
+  /// is for.
+  OrderKind order;
+  String? orderTarget;
+
+  /// Gives the attackers [kind] (and, to attack, the objective [target]). An
+  /// attack on an unknown objective, or on the LZ, is no order at all.
+  void setOrder(OrderKind kind, {String? target}) {
+    if (resolved) return;
+    if (kind == OrderKind.attack) {
+      final o = target == null ? null : graph.byId(target);
+      if (o == null || o.kind == ObjectiveKind.lz) return;
+    }
+    order = kind;
+    orderTarget = kind == OrderKind.attack ? target : null;
+  }
+
+  /// Adds [fresh] attacking squads to a running operation: reinforcements,
+  /// in transit until their own arrival step, then at the LZ. Their ids must
+  /// follow [nextFormationId] (the planner takes them from there).
+  void reinforce(List<Formation> fresh) {
+    if (resolved || fresh.isEmpty) return;
+    for (final f in fresh) {
+      formations.add(f);
+      attackerRaised += f.count;
+      if (f.id >= nextFormationId) nextFormationId = f.id + 1;
+    }
+    formations.sort((a, b) => a.id.compareTo(b.id));
+  }
+
+  /// Steps from now until squads launched now would land: mustering and the
+  /// crossing, as for the first wave.
+  int get reinforcementDelaySteps =>
+      ((tuning.musteringDays +
+                  (sameBody ? tuning.transitDaysSameBody : tuning.transitDaysOtherBody)) *
+              tuning.daySec)
+          .round();
+
   final ResolverTuning tuning;
   final CounterTuning counters;
 
@@ -256,6 +313,15 @@ class Operation {
       case OperationPhase.transit:
         if (t >= phaseEndsStep) _land(t);
       case OperationPhase.engaged:
+        // Reinforcements land at the LZ on their own schedule.
+        for (final f in formations) {
+          if (f.side == CombatSide.attacker &&
+              f.at == FormationAt.transit &&
+              t >= f.arriveStep) {
+            f.at = lzId;
+            f.arriveStep = t;
+          }
+        }
         if ((t - engagedAtStep) % tuning.aiEveryS == 0) {
           _defenderAi(t);
           _attackerAi(t);
@@ -508,6 +574,37 @@ class Operation {
         f.arriveStep = t;
       }
     }
+    switch (order) {
+      case OrderKind.hold:
+        return;
+      case OrderKind.fallBack:
+        for (final f in formations) {
+          if (f.side != CombatSide.attacker || !f.alive || f.broken) continue;
+          if (f.at == lzId || graph.byId(f.at) == null) continue;
+          f.marchTo(lzId, t, graph.marchS(f.at, lzId));
+        }
+        order = OrderKind.hold;
+        return;
+      case OrderKind.attack:
+        final target = graph.byId(orderTarget ?? '');
+        if (target == null ||
+            (target.id != goalId && target.control >= tuning.holdingControl)) {
+          // Taken (or gone): the plan resumes.
+          order = OrderKind.auto;
+          orderTarget = null;
+          break;
+        }
+        for (final f in formations) {
+          if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
+          if (f.at == target.id || graph.byId(f.at) == null || !f.presentAt(f.at, t)) {
+            continue;
+          }
+          f.marchTo(target.id, t, graph.marchS(f.at, target.id));
+        }
+        return;
+      case OrderKind.auto:
+        break;
+    }
     final route = path;
     var k = 1;
     while (k < route.length - 1 &&
@@ -544,9 +641,7 @@ class Operation {
     final d = held / target.fAtt;
     if (a < tuning.advanceRatio * d) return;
     for (final f in movers) {
-      final march = graph.marchS(f.at, target.id);
-      f.at = target.id;
-      f.arriveStep = t + march;
+      f.marchTo(target.id, t, graph.marchS(f.at, target.id));
     }
   }
 
@@ -748,6 +843,8 @@ class Operation {
         'defRaised': defenderRaised,
         if (defenderSurrendered != 0) 'surrendered': defenderSurrendered,
         if (garrison != 0) 'garrison': garrison,
+        if (order != OrderKind.auto) 'order': order.name,
+        if (orderTarget != null) 'orderTarget': orderTarget,
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
             for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
@@ -795,6 +892,8 @@ class Operation {
         defenderRaised: (j['defRaised'] as num).toInt(),
         defenderSurrendered: (j['surrendered'] as num?)?.toInt() ?? 0,
         garrison: (j['garrison'] as num?)?.toInt() ?? 0,
+        order: j['order'] == null ? OrderKind.auto : OrderKind.values.byName(j['order'] as String),
+        orderTarget: j['orderTarget'] as String?,
         garrisonKit: {
           for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
             if ((j['garrisonKit'] as Map?)?[k] is num)
