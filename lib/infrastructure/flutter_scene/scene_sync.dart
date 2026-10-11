@@ -27,6 +27,7 @@ import 'exhaust_nodes.dart';
 import 'frame_budget.dart';
 import 'gravity_grid_nodes.dart';
 import 'halo_ring_nodes.dart';
+import 'combat_fx_nodes.dart';
 import 'impact_fx_nodes.dart';
 import 'line_nodes.dart';
 import 'planner_plane_nodes.dart';
@@ -61,6 +62,7 @@ class SceneSync {
     _vessels = VesselNodes(scene);
     _exhaust = ExhaustNodes(scene);
     _impactFx = ImpactFxNodes(scene);
+    _combatFx = CombatFxNodes(scene);
     _lines = LineNodes(scene);
     _plannerPlane = PlannerPlaneNodes(scene);
     _atmospheres = AtmosphereNodes(scene);
@@ -83,6 +85,7 @@ class SceneSync {
   late final VesselNodes _vessels;
   late final ExhaustNodes _exhaust;
   late final ImpactFxNodes _impactFx;
+  late final CombatFxNodes _combatFx;
   late final LineNodes _lines;
   late final PlannerPlaneNodes _plannerPlane;
   late final AtmosphereNodes _atmospheres;
@@ -350,6 +353,10 @@ class SceneSync {
       viewCone: viewCone,
     );
     mark('city');
+    // The battle's smoke and flashes (combat.md §7B), after the colonies so
+    // the ground they stand on is resident; empty and free with no battle.
+    _combatFx.update(snap, origin);
+    mark('combat');
     _skybox.update(
         cameraRangeKm:
             camera == null ? 0 : camera.eyeOffset.length * kRenderScale);

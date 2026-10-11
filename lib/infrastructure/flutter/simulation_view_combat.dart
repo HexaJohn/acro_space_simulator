@@ -227,11 +227,26 @@ extension _SimulationViewCombat on _SimulationViewState {
         return field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
       }();
 
-  /// The battle overlay over [snap], or null with no battle in view.
+  /// The battle overlay over [snap], or null with no battle in view. Also
+  /// tells the scene where to put the smoke ([CombatFxState]).
   Widget? _battleOverlay(WorldSnapshot? snap) {
-    if (snap == null) return null;
+    if (snap == null) {
+      CombatFxState.sites = const [];
+      return null;
+    }
     final hit = _battleInView(snap);
-    if (hit == null) return null;
+    if (hit == null) {
+      CombatFxState.sites = const [];
+      return null;
+    }
+    final frame = CombatFrame.of(hit.op);
+    final groundR = _battleGround(hit.op, hit.city);
+    CombatFxState.sites = [
+      for (final o in frame.objectives)
+        if (o.contested)
+          CombatFxSite('${hit.op.id}:${o.id}', hit.city.body.id.value,
+              hit.city.localToBodyFixed(Vec2(o.e, o.n), bodyRadiusM: groundR), o.heat),
+    ];
     final body = snap.bodies[hit.city.body.id.value];
     final focus = _focusWorldForPick(snap);
     if (body == null || focus == null) return null;
@@ -254,7 +269,7 @@ extension _SimulationViewCombat on _SimulationViewState {
         child: CustomPaint(
           key: Key('battle-overlay-${hit.op.id}'),
           painter: BattleOverlayPainter(
-            frame: CombatFrame.of(hit.op),
+            frame: frame,
             project: project,
             scale: scale,
             timeS: _clock.epoch.seconds,
@@ -311,6 +326,10 @@ extension _SimulationViewCombat on _SimulationViewState {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppTheme.panel,
+      // Scroll-controlled, so the orders and buttons under a long squad list
+      // stay reachable: the default caps the sheet at 9/16 of the screen.
+      isScrollControlled: true,
+      constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.85),
       builder: (ctx) => StatefulBuilder(builder: (ctx, setSheet) {
         Widget line(String a, String b) => Padding(
               padding: const EdgeInsets.symmetric(vertical: 2),

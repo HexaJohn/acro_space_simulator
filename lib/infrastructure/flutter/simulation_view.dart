@@ -39,6 +39,7 @@ import '../../domain/colony/city/parcel.dart';
 import '../../domain/colony/city/traffic/vehicle_inspection.dart';
 import '../../adapters/presenters/surface_picker.dart';
 import '../flutter_scene/city/city_nodes.dart';
+import '../flutter_scene/combat_fx_nodes.dart';
 import '../flutter_scene/city/road_overlay_state.dart';
 import 'flight_session.dart';
 import 'pointer_lock.dart';
