@@ -23,6 +23,7 @@ import 'base/forward_base.dart';
 import 'lander.dart';
 import 'objective.dart';
 import 'operation_clock.dart';
+import 'powers/orbital.dart';
 import 'resolver.dart';
 import 'resolver_tuning.dart';
 
@@ -142,10 +143,12 @@ class Operation {
     this.chargeReadyStep = 0,
     this.supplyDropReadyStep = 0,
     this.medevacReadyStep = 0,
+    OrbitalSupport? orbital,
     Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
   })  : garrisonKit = garrisonKit ?? const {},
+        orbital = orbital ?? OrbitalSupport(),
         landers = landers ?? [],
         seed = seed ?? combatSeed(targetColonyId, id),
         clock = clock ?? OperationClock(),
@@ -233,6 +236,10 @@ class Operation {
   /// The target's body has no air: jump jets work (§7D).
   final bool airless;
 
+  /// Vessels assigned overhead, the strike called, rounds in flight and the
+  /// craters they left (§7E).
+  final OrbitalSupport orbital;
+
   /// A charge under way (§7D): the objective, and when it ends.
   String? chargeAt;
   int chargeUntilStep;
@@ -286,6 +293,143 @@ class Operation {
         return null;
     }
     return 'No such power.';
+  }
+
+  /// Calls an orbital strike on [objectiveId] (§7E): it fires at the first
+  /// step an assigned vessel is overhead, armed and rested, while the uplink
+  /// is online. Null, or why not.
+  String? strike(String objectiveId) {
+    final why = whyNotStrike(objectiveId);
+    if (why == null) orbital.queued = objectiveId;
+    return why;
+  }
+
+  /// Why a strike on [objectiveId] cannot be called now, or null.
+  String? whyNotStrike(String objectiveId) {
+    if (resolved || phase != OperationPhase.engaged) return 'Not now.';
+    final o = graph.byId(objectiveId);
+    if (o == null) return 'No such objective.';
+    if (!orbital.any) return 'No orbital support is assigned.';
+    if (base == null) return 'Strikes need the base\'s uplink, and this operation has no base.';
+    if (orbital.queued != null) return 'A strike is already called.';
+    if (!strikeAllowed(o)) return 'The rules of engagement do not allow a strike there.';
+    if (!orbital.assigned.any((v) => (orbital.roundsAboard[v.id] ?? 0) > 0)) {
+      return 'No assigned vessel has rounds aboard.';
+    }
+    return null;
+  }
+
+  /// Under [Roe.restrained] only where a gun emplacement stands; under
+  /// [Roe.standard] also the Port, Power, Depot and Airfield. Never the Seat,
+  /// Life support or the LZ.
+  bool strikeAllowed(Objective o) {
+    if (o.kind == ObjectiveKind.lz || o.kind == ObjectiveKind.seat || o.kind == ObjectiveKind.lifeSupport) {
+      return false;
+    }
+    final gun = formations.any((f) =>
+        f.side == CombatSide.defender && f.kind == FormationKind.emplacement && f.alive && f.at == o.id);
+    if (gun) return true;
+    return roe == Roe.standard &&
+        (o.kind == ObjectiveKind.port ||
+            o.kind == ObjectiveKind.power ||
+            o.kind == ObjectiveKind.depot ||
+            o.kind == ObjectiveKind.airfield);
+  }
+
+  void _orbitalStep(int t) {
+    final o = orbital;
+    for (final s in [...o.inFlight]) {
+      if (t < s.impactStep) continue;
+      o.inFlight.remove(s);
+      _impact(s, t);
+    }
+    final q = o.queued;
+    if (q == null) return;
+    final obj = graph.byId(q);
+    if (obj == null || !strikeAllowed(obj)) {
+      o.queued = null;
+      o.notices.add('The strike was called off: nothing there the rules of engagement allow.');
+      return;
+    }
+    if (!(base?.uplinkOnline(this) ?? false)) return;
+    final v = o.ready(t);
+    if (v == null) return;
+    final seq = o.nextSeq++;
+    o.inFlight.add(StrikeInFlight(seq, v.id, q, t + strikeFlightS(v.slantM), v.slantM));
+    v.readyStep = t + kVesselCooldownS;
+    o.fired.add(v.id);
+    o.queued = null;
+  }
+
+  /// [x] members, the fraction by a seeded roll.
+  int _whole(double x, int seq, int k) {
+    final n = x.floor();
+    return n + (combatUnit(seed, combatKey('strike'), seq * 8 + k) < x - n ? 1 : 0);
+  }
+
+  /// A round comes down at its objective (ref §10A.12, in the pools).
+  void _impact(StrikeInFlight s, int t) {
+    final obj = graph.byId(s.objectiveId);
+    if (obj == null) return;
+    final cep = strikeCepM(s.slantM);
+    final d = orbital.craterM;
+    final key = combatKey('strike');
+    // Scatter: Rayleigh about the aim, σ = CEP / 1.1774.
+    final u = combatUnit(seed, key, s.seq * 8).clamp(0.0, 0.999999);
+    final a = combatUnit(seed, key, s.seq * 8 + 1) * 2 * math.pi;
+    final r = cep / 1.1774 * math.sqrt(-2 * math.log(1 - u));
+    final ie = obj.e + r * math.cos(a), in_ = obj.n + r * math.sin(a);
+    // The emplacement there, else its largest defender formation.
+    Formation? struck;
+    for (final f in formations) {
+      if (f.side != CombatSide.defender || !f.presentAt(obj.id, t)) continue;
+      final gun = f.kind == FormationKind.emplacement;
+      final best = struck;
+      if (best == null ||
+          (gun && best.kind != FormationKind.emplacement) ||
+          (gun == (best.kind == FormationKind.emplacement) && f.count > best.count)) {
+        struck = f;
+      }
+    }
+    var killed = false;
+    if (struck != null && struck.kind == FormationKind.emplacement) {
+      if (combatUnit(seed, key, s.seq * 8 + 2) < strikeKillChance(d, cep)) {
+        struck.removeMembers(struck.count);
+        killed = true;
+      }
+    }
+    final cover = obj.kind != ObjectiveKind.lz;
+    if (struck != null && !killed) {
+      struck.removeMembers(_whole(strikeAreaCasualties(struck.count, d, cep, cover: cover), s.seq, 3));
+    }
+    for (final f in formations) {
+      if (f.side == CombatSide.defender && f.alive && f.at == obj.id) {
+        f.morale = (f.morale - kStrikeMorale).clamp(0.0, 1.0);
+      }
+    }
+    orbital.pin(obj.id, t + kPinnedS);
+    // Danger close: squads of ours there take half the area rule.
+    var k = 4;
+    for (final f in formations) {
+      if (f.side != CombatSide.attacker || !f.presentAt(obj.id, t)) continue;
+      f.removeMembers(_whole(0.5 * strikeAreaCasualties(f.count, d, cep, cover: cover), s.seq, k));
+      if (k < 7) k++;
+    }
+    if (orbital.craters.length < kMaxCraters) {
+      final qe = (ie * 2).round() / 2, qn = (in_ * 2).round() / 2;
+      final clear = !orbital.footprints.any((p) {
+        final dx = p.$1 - qe, dy = p.$2 - qn;
+        final reach = p.$3 + d / 2;
+        return dx * dx + dy * dy < reach * reach;
+      });
+      orbital.craters.add(StrikeCrater(s.seq, qe, qn, d, t, brush: clear));
+    }
+    final what = struck == null
+        ? 'nothing there'
+        : (killed
+            ? 'the gun emplacement destroyed'
+            : (struck.kind == FormationKind.emplacement ? 'the emplacement survived' : 'the defenders pinned'));
+    orbital.notices.add('Strike on ${obj.id}: $what (${cep.round()} m scatter).');
   }
 
   Formation? formationById(int id) {
@@ -466,7 +610,9 @@ class Operation {
             f.arriveStep = t;
           }
         }
+        base?.uplinkWanted = orbital.any;
         base?.step(this, t);
+        _orbitalStep(t);
         _chargeEnd(t);
         _digIn(t);
         if ((t - engagedAtStep) % tuning.aiEveryS == 0) {
@@ -532,8 +678,9 @@ class Operation {
                 armed: formations[i].kitDays > 0) *
             fire
     ];
+    final pinned = orbital.pinnedAt(o.id, t) ? kPinnedFire : 1.0;
     final defS = [
-      for (final i in def) formationStrength(formations[i], tuning, armed: true)
+      for (final i in def) formationStrength(formations[i], tuning, armed: true) * pinned
     ];
     final u = combatSigned(seed, combatKey(o.id), t ~/ tuning.fuzzRoundS);
     final fuzz = 1 + tuning.fuzzAmplitude * u;
@@ -1081,6 +1228,7 @@ class Operation {
         if (supplyDropReadyStep != 0) 'dropReady': supplyDropReadyStep,
         if (medevacReadyStep != 0) 'medevacReady': medevacReadyStep,
         if (orderTarget != null) 'orderTarget': orderTarget,
+        if (!orbital.isEmpty || orbital.centreBF != null) 'orbital': orbital.toJson(),
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
             for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
@@ -1143,6 +1291,7 @@ class Operation {
         chargeReadyStep: (j['chargeReady'] as num?)?.toInt() ?? 0,
         supplyDropReadyStep: (j['dropReady'] as num?)?.toInt() ?? 0,
         medevacReadyStep: (j['medevacReady'] as num?)?.toInt() ?? 0,
+        orbital: OrbitalSupport.fromJson((j['orbital'] as Map?)?.cast<String, dynamic>()),
         garrisonKit: {
           for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
             if ((j['garrisonKit'] as Map?)?[k] is num)

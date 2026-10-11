@@ -22,6 +22,7 @@ library;
 import '../formation.dart';
 import '../objective.dart';
 import '../operation.dart';
+import '../powers/orbital.dart';
 import 'base_modules.dart';
 
 /// A built module in a socket of a site.
@@ -355,6 +356,19 @@ class ForwardBase {
 
   /// The preview has no colony to ask: its runs land as asked.
   bool autoShip = false;
+
+  /// Orbital support is assigned (§7E), so the core's uplink mast wants
+  /// [kUplinkKw] and [kUplinkCrew] support staff: the doctrine keeps them
+  /// free. Set by the operation every step; not saved.
+  bool uplinkWanted = false;
+
+  /// The uplink is online: wanted, the base standing, the power and the
+  /// support staff to spare.
+  bool uplinkOnline(Operation op) =>
+      uplinkWanted &&
+      standing &&
+      powerSupplyIn(op) - powerDemand >= kUplinkKw - 1e-9 &&
+      reserve >= kUplinkCrew;
 
   /// The launch layout's blocked sockets for the core's ring (saved until
   /// the core deploys and carries them).
@@ -1002,13 +1016,15 @@ class ForwardBase {
           if (k == ModuleKind.workshop && stockOf('steel') < 1000) continue;
           final socket = _firstFree(0, s.socket);
           if (socket == null) continue;
-          if (reserve < s.crew) continue;
-          if (s.powerKw > 0 && powerDemand + s.powerKw > powerSupply + 1e-9) {
+          final keepCrew = uplinkWanted ? kUplinkCrew : 0;
+          final keepKw = uplinkWanted ? kUplinkKw : 0.0;
+          if (reserve < s.crew + keepCrew) continue;
+          if (s.powerKw > 0 && powerDemand + s.powerKw + keepKw > powerSupply + 1e-9) {
             // A generator jumps the list when power would run short.
             final g = moduleSpec(ModuleKind.generator);
             final gs = _firstFree(0, SocketKind.module);
             if (gs != null &&
-                reserve >= g.crew + s.crew &&
+                reserve >= g.crew + s.crew + keepCrew &&
                 stockOf('fuel') > 0 &&
                 countOf(ModuleKind.generator) < g.max) {
               return BuildOrder(kind: ModuleKind.generator, socket: gs);

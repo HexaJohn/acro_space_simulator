@@ -65,6 +65,22 @@ class SupplyRun {
       j['target'] as String, _readKit(j['amounts']), (j['at'] as num).toInt());
 }
 
+/// The warp held while orbital support is assigned.
+const double kOrbitalWarpCeiling = 10;
+
+/// Rounds loaded aboard a vessel (combat.md §7E, the loadout route): paid
+/// for by a colony, aboard from [readyUs]. Massless in v1.
+class LoadedRounds {
+  LoadedRounds(this.vesselId, this.rounds, this.readyUs);
+  final String vesselId;
+  int rounds;
+  final int readyUs;
+
+  Map<String, dynamic> toJson() => {'v': vesselId, 'n': rounds, 'at': readyUs};
+  static LoadedRounds fromJson(Map j) =>
+      LoadedRounds(j['v'] as String, (j['n'] as num).toInt(), (j['at'] as num).toInt());
+}
+
 const List<String> _kitOrder = ['ammo', 'fuel', 'guns', 'rations'];
 
 Map<String, double> _orderedKit(Map<String, double> m) =>
@@ -109,6 +125,53 @@ class OperationRegistry {
   final List<GarrisonRecord> garrisons = [];
   final List<SupplyRun> runs = [];
 
+  /// Rounds aboard the player's vessels, loading or loaded, in vessel id
+  /// order then by when they are aboard.
+  final List<LoadedRounds> loadout = [];
+
+  /// Rounds aboard [vesselId] now.
+  int roundsAboard(String vesselId) {
+    var n = 0;
+    for (final r in loadout) {
+      if (r.vesselId == vesselId && r.readyUs <= clockUs) n += r.rounds;
+    }
+    return n;
+  }
+
+  /// Rounds still loading onto [vesselId].
+  int roundsLoading(String vesselId) {
+    var n = 0;
+    for (final r in loadout) {
+      if (r.vesselId == vesselId && r.readyUs > clockUs) n += r.rounds;
+    }
+    return n;
+  }
+
+  void loadRounds(String vesselId, int rounds, int readyUs) {
+    if (rounds <= 0) return;
+    loadout
+      ..add(LoadedRounds(vesselId, rounds, readyUs))
+      ..sort((a, b) => a.vesselId != b.vesselId
+          ? a.vesselId.compareTo(b.vesselId)
+          : a.readyUs.compareTo(b.readyUs));
+  }
+
+  /// One round leaves [vesselId].
+  void spendRound(String vesselId) {
+    for (final r in loadout) {
+      if (r.vesselId == vesselId && r.readyUs <= clockUs && r.rounds > 0) {
+        r.rounds--;
+        break;
+      }
+    }
+    loadout.removeWhere((r) => r.rounds <= 0);
+  }
+
+  /// Strike craters already cut into the world this session, by key: a load
+  /// within the session keeps its brushes (terrain edits are append-only), so
+  /// they are never cut twice. Not saved, and kept across a restore.
+  final Set<String> carvedCraters = {};
+
   /// The inbox the UI enqueues into. Its waiting commands are saved with the
   /// registry: a save taken between a click and the next tick keeps the click.
   final CommandInbox inbox = CommandInbox();
@@ -121,7 +184,7 @@ class OperationRegistry {
 
   bool get isEmpty =>
       operations.isEmpty && garrisons.isEmpty && runs.isEmpty && inbox.pending.isEmpty &&
-      nextOperationId == 1;
+      loadout.isEmpty && nextOperationId == 1;
 
   Operation? byId(int id) {
     for (final o in operations) {
@@ -129,6 +192,10 @@ class OperationRegistry {
     }
     return null;
   }
+
+  /// Some running operation has orbital support assigned: warp is held at
+  /// [kOrbitalWarpCeiling] (combat.md §7E).
+  bool get supportAssigned => operations.any((o) => !o.resolved && o.orbital.any);
 
   /// The running operation against [colonyId], if any.
   Operation? runningAgainst(String colonyId) {
@@ -162,6 +229,7 @@ class OperationRegistry {
           if (reported.isNotEmpty) 'reported': List<int>.of(reported),
           if (garrisons.isNotEmpty) 'garrisons': [for (final g in garrisons) g.toJson()],
           if (runs.isNotEmpty) 'runs': [for (final r in runs) r.toJson()],
+          if (loadout.isNotEmpty) 'loadout': [for (final r in loadout) r.toJson()],
           if (inbox.pending.isNotEmpty) 'pending': [for (final c in inbox.pending) c.toJson()],
         };
 
@@ -171,6 +239,7 @@ class OperationRegistry {
     reported.clear();
     garrisons.clear();
     runs.clear();
+    loadout.clear();
     inbox.pending.clear();
     nextOperationId = 1;
     clockUs = 0;
@@ -190,6 +259,9 @@ class OperationRegistry {
     }
     for (final r in (j['runs'] as List? ?? const [])) {
       if (r is Map) runs.add(SupplyRun.fromJson(r));
+    }
+    for (final r in (j['loadout'] as List? ?? const [])) {
+      if (r is Map) loadout.add(LoadedRounds.fromJson(r));
     }
     for (final c in (j['pending'] as List? ?? const [])) {
       final cmd = CombatCommand.fromJson(c);

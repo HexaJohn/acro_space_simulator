@@ -256,6 +256,16 @@ class BaseGoodsWrite extends CombatWrite {
   final List<double> stock;
 }
 
+/// Rounds for a vessel on this colony's pad (combat.md §7E): pay what it
+/// can of [rounds], at [steelEach] steel and [electronicsEach] electronics a
+/// round.
+class ArmDebitWrite extends CombatWrite {
+  const ArmDebitWrite(this.vesselId, this.rounds, this.steelEach, this.electronicsEach);
+  final String vesselId;
+  final int rounds;
+  final int steelEach, electronicsEach;
+}
+
 /// War weariness: the player's dead cost every colony's loyalty
 /// (combat.md §7.6). Only a colony that takes the player's orders feels it.
 class WarWearinessWrite extends CombatWrite {
@@ -283,6 +293,13 @@ class BaseRunShippedEvent extends CombatEvent {
   final int runId;
   final double materiel;
   final List<double> stock;
+}
+
+/// Rounds paid for: [paid] of [asked] are loading aboard [vesselId].
+class ArmedEvent extends CombatEvent {
+  const ArmedEvent(this.vesselId, this.paid, this.asked);
+  final String vesselId;
+  final int paid, asked;
 }
 
 /// A building troopers were drawn from is gone.
@@ -685,6 +702,16 @@ extension CityWar on CitySim {
             ship(kBaseGoods[i], i < w.stock.length ? w.stock[i] : 0)
         ];
         war.outbox.add(BaseRunShippedEvent(w.opId, w.runId, m, sent));
+      case ArmDebitWrite():
+        var n = w.rounds;
+        if (w.steelEach > 0) n = math.min(n, (stockOf(Commodity.steel) / w.steelEach).floor());
+        if (w.electronicsEach > 0) {
+          n = math.min(n, (stockOf(Commodity.electronics) / w.electronicsEach).floor());
+        }
+        if (n < 0) n = 0;
+        stock[Commodity.steel] = stockOf(Commodity.steel) - n * w.steelEach;
+        stock[Commodity.electronics] = stockOf(Commodity.electronics) - n * w.electronicsEach;
+        war.outbox.add(ArmedEvent(w.vesselId, n, w.rounds));
       case BaseGoodsWrite():
         if (w.materiel > 0) stock[Commodity.ore] = stockOf(Commodity.ore) + w.materiel;
         for (var i = 0; i < kBaseGoods.length && i < w.stock.length; i++) {

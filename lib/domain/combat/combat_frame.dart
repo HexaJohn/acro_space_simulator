@@ -101,6 +101,21 @@ class LanderMark {
   final LanderState state;
 }
 
+/// A strike as drawn (§7E): a round coming in, or where one came down.
+class StrikeMark {
+  const StrikeMark(this.e, this.n, this.diameterM, {this.ageS = 0, this.inS});
+  final double e, n;
+  final double diameterM;
+
+  /// Seconds since it landed (0 for one still coming in).
+  final double ageS;
+
+  /// Seconds until it lands; null once it has.
+  final double? inS;
+
+  bool get incoming => inS != null;
+}
+
 class CombatFrame {
   const CombatFrame({
     required this.opId,
@@ -110,6 +125,7 @@ class CombatFrame {
     required this.squads,
     required this.landers,
     this.base = const [],
+    this.strikes = const [],
   });
 
   final int opId;
@@ -121,6 +137,12 @@ class CombatFrame {
 
   /// The forward base, core first; empty with none standing.
   final List<BaseMark> base;
+
+  /// Orbital strikes: rounds in their last seconds, and every crater.
+  final List<StrikeMark> strikes;
+
+  /// A round is drawn coming in for its last this-many seconds.
+  static const double incomingS = 6;
 
   /// Squads stand this far round their objective, m.
   static const double ringM = 24;
@@ -246,12 +268,19 @@ class CombatFrame {
         }
       }
     }
+    final strikes = <StrikeMark>[
+      for (final c in op.orbital.craters) StrikeMark(c.e, c.n, c.diameterM, ageS: t - c.step),
+      for (final s in op.orbital.inFlight)
+        if (nodes[s.objectiveId] case final o? when s.impactStep - t <= incomingS)
+          StrikeMark(o.e, o.n, op.orbital.craterM, inS: math.max(0.0, s.impactStep - t)),
+    ];
     return CombatFrame(
       opId: op.id,
       targetColonyId: op.targetColonyId,
       phase: op.phase,
       objectives: marks,
       base: base,
+      strikes: strikes,
       squads: squads,
       landers: [
         if (lz != null)

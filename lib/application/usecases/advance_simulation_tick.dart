@@ -66,6 +66,7 @@ import '../ports/event_bus.dart';
 import '../ports/repositories.dart';
 import '../ports/world_repositories.dart';
 import 'combat_phase.dart';
+import 'combat_sky.dart';
 import 'force_landers.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/combat/operation_registry.dart';
@@ -268,6 +269,12 @@ class AdvanceSimulationTick {
     if (forceLanders && ops != null && clock.warpFactor > 1 && ForceLanderFlight.aloft(ops)) {
       clock.warpFactor = 1;
     }
+    // The second level (§7E): while orbital support is assigned, 10× — the
+    // largest rung whose tick still divides the battle's 1 s step, so a pass
+    // over the battle is seen at the speed the battle runs.
+    if (ops != null && clock.warpFactor > kOrbitalWarpCeiling && ops.supportAssigned) {
+      clock.warpFactor = kOrbitalWarpCeiling;
+    }
     final dt = clock.advance();
     final system = universe.current();
     final forceRails = clock.forcesRails;
@@ -419,7 +426,8 @@ class AdvanceSimulationTick {
     // Combat, before the colonies: commands, colony events, every operation's
     // step and its reports, all written into colony inboxes that each colony
     // drains at the start of its own phase below (combat.md §7.4).
-    _combat?.run(dt, cities.all());
+    _combat?.run(dt, cities.all(), sky: TickSky(vessels, system, clock.epoch, cities.all()));
+    if (ops != null) _cutStrikeCraters(ops, system, clock.tick);
     for (final city in cities.all()) {
       final agents = city.agents;
       if (agents.frameBudgeted) agents.replayTick = _replayCity;
@@ -1092,6 +1100,43 @@ class AdvanceSimulationTick {
     ));
     vessel.landed = true;
     return false;
+  }
+
+  /// Cut the craters orbital strikes left clear of every building
+  /// (combat.md §7E) into the world's terrain, each once a session: its key
+  /// is remembered, so an in-session load (whose brushes survive) never cuts
+  /// it twice, and a fresh session cuts it again from the saved record.
+  void _cutStrikeCraters(OperationRegistry ops, StarSystem system, int tick) {
+    for (final op in ops.operations) {
+      final craters = op.orbital.craters;
+      if (craters.isEmpty) continue;
+      CitySim? city;
+      for (final c in cities.all()) {
+        if (c.id == op.targetColonyId) city = c;
+      }
+      if (city == null) continue;
+      final body = system.body(city.body.id);
+      if (body == null || body.terrain == null) continue;
+      for (final c in craters) {
+        if (!c.brush) continue;
+        final key = c.key(op.id);
+        if (!ops.carvedCraters.add(key)) continue;
+        final dir = city.localToBodyFixed(Vec2(c.e, c.n), bodyRadiusM: body.radius).normalized;
+        final field = body.terrainFieldWith(terrainEdits.forBody(body.id));
+        final groundR = field?.groundRadiusAt(dir.x, dir.y, dir.z) ?? body.radius;
+        final r = c.diameterM / 2;
+        terrainEdits.record(
+            body.id,
+            TerrainBrush.crater(
+              contactBF: dir * groundR,
+              normalBF: body.terrainField?.surfaceNormalAt(dir, stepM: r) ?? dir,
+              radiusM: r,
+              depthM: c.diameterM * 0.2,
+              rimHeightM: c.diameterM * 0.04,
+              tick: tick,
+            ));
+      }
+    }
   }
 
   /// Cut the crater a destroyed craft leaves in the ground.

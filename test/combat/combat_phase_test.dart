@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/adapters/wire/flatbuffer_codec.dart';
 import 'package:acro_space_simulator/application/persistence/game_state_codec.dart';
 import 'package:acro_space_simulator/application/ports/compute_port.dart';
 import 'package:acro_space_simulator/application/usecases/advance_simulation_tick.dart';
+import 'package:acro_space_simulator/application/usecases/combat_phase.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_loyalty.dart';
@@ -22,6 +23,8 @@ import 'package:acro_space_simulator/domain/colony/city/city_war.dart';
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/combat/operation.dart';
 import 'package:acro_space_simulator/domain/combat/operation_registry.dart';
+import 'package:acro_space_simulator/domain/combat/powers/sky.dart';
+import 'package:acro_space_simulator/domain/shared/vector3.dart';
 import 'package:acro_space_simulator/domain/multiplayer/command.dart';
 import 'package:acro_space_simulator/domain/multiplayer/player.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
@@ -389,6 +392,69 @@ void main() {
     expect(g.suppressing, 1);
   });
 
+  test('orbital support through the phase: armed at a pad, assigned, held at 10x, lost when '
+      'it leaves', () {
+    final src = source(3), tgt = rebels();
+    src.stock[Commodity.ore] = 700;
+    src.stock[Commodity.steel] = 100;
+    src.stock[Commodity.electronics] = 15;
+    final reg = OperationRegistry();
+    final phase = CombatPhase(reg);
+    final sky = _FakeSky();
+    final cities = [src, tgt];
+    void run([int n = 1]) {
+      for (var i = 0; i < n; i++) {
+        phase.run(0.5, cities, sky: sky);
+        src.drainCombatInbox();
+        tgt.drainCombatInbox();
+      }
+    }
+
+    // Armed on the source's pad: it pays for what it can (15 electronics: 3 rounds).
+    sky.vessels['v1'] = (pos: null, pad: 'src');
+    reg.inbox.enqueue(ArmVesselCommand(player, 0, 'v1', 'src', 4));
+    run(2);
+    expect(reg.lastRefusal, contains('3 of 4'));
+    expect(reg.roundsLoading('v1'), 3);
+    expect(src.stockOf(Commodity.steel), closeTo(25, 1e-9));
+    final sources = src.trooperSources();
+    reg.inbox.enqueue(LaunchOperationCommand(player, 0,
+        targetColonyId: 'tgt',
+        draws: [
+          for (final s in sources)
+            if (s.ready) (colonyId: src.id, siteId: s.siteId, count: 4)
+        ],
+        kitDays: 6,
+        garrison: 2,
+        baseMateriel: 200,
+        baseSupport: 4));
+    run();
+    expect(reg.operations, hasLength(1), reason: reg.lastRefusal);
+    final op = reg.operations.single;
+    expect(op.orbital.centreBF, isNotNull);
+    expect(op.orbital.craterM, greaterThan(5));
+    // Still on the pad: it cannot be assigned.
+    reg.inbox.enqueue(AssignOrbitalSupportCommand(player, 0, op.id, 'v1'));
+    run();
+    expect(reg.lastRefusal, contains('in flight'));
+    // Up, straight over the battle.
+    final c = op.orbital.centreBF!;
+    sky.vessels['v1'] = (pos: c.normalized * (c.length + 100e3), pad: null);
+    reg.inbox.enqueue(AssignOrbitalSupportCommand(player, 0, op.id, 'v1'));
+    run();
+    expect(reg.lastRefusal, isNull);
+    expect(reg.supportAssigned, isTrue);
+    expect(op.orbital.byId('v1')!.strike, isTrue);
+    run(120);
+    expect(op.orbital.roundsAboard['v1'], 3, reason: 'loaded 60 s after it was paid for');
+    // Gone from the sky: unassigned, with a notice.
+    sky.vessels.remove('v1');
+    run();
+    expect(op.orbital.any, isFalse);
+    expect(op.orbital.notices.last, contains('left the battle'));
+    expect(reg.loadout, isEmpty, reason: 'its rounds went with it');
+  });
+
   test('an assault ends Rejoined when the colony comes back on its own', () {
     final src = source(2), tgt = rebels();
     final w = world([src, tgt]);
@@ -518,4 +584,23 @@ void main() {
             ])),
         throwsUnsupportedError);
   });
+}
+
+class _FakeSky implements CombatSky {
+  final Map<String, ({Vector3? pos, String? pad})> vessels = {};
+
+  @override
+  Vector3? positionAbout(String vesselId, String bodyId) => vessels[vesselId]?.pos;
+
+  @override
+  Vector3 toInertial(String bodyId, Vector3 bf) => bf;
+
+  @override
+  String? nameOf(String vesselId) => vessels.containsKey(vesselId) ? 'Rod $vesselId' : null;
+
+  @override
+  bool isPlayers(String vesselId) => vessels.containsKey(vesselId);
+
+  @override
+  bool landedAtPad(String vesselId, String colonyId) => vessels[vesselId]?.pad == colonyId;
 }

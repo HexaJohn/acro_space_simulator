@@ -22,6 +22,7 @@ import 'dart:math' as math;
 import '../../domain/colony/city/city_loyalty.dart';
 import '../../domain/colony/city/city_sim.dart';
 import '../../domain/colony/city/city_war.dart';
+import '../../domain/colony/city/parcel.dart' show Vec2;
 import '../../domain/combat/base/base_modules.dart';
 import '../../domain/combat/formation.dart';
 import '../../domain/combat/lander.dart';
@@ -29,6 +30,11 @@ import '../../domain/combat/launch/plan_operation.dart';
 import '../../domain/combat/launch/snapshots.dart';
 import '../../domain/combat/operation.dart';
 import '../../domain/combat/operation_registry.dart';
+import '../../domain/combat/powers/orbital.dart';
+import '../../domain/combat/powers/overhead.dart';
+import '../../domain/combat/powers/sky.dart';
+import '../../domain/shared/vector3.dart';
+import '../../domain/terrain/impact_scaling.dart';
 import '../../domain/combat/resolver_tuning.dart';
 import '../../domain/multiplayer/command.dart';
 
@@ -57,8 +63,13 @@ class CombatPhase {
 
   int get _dayUs => (tuning.daySec * 1e6).round();
 
+  /// The flying world, read at this tick's end (§7E); null where no world
+  /// flies — orbital support then has nothing to see.
+  CombatSky? _sky;
+
   /// One tick of [tickDt] seconds over [cityList].
-  void run(double tickDt, Iterable<CitySim> cityList) {
+  void run(double tickDt, Iterable<CitySim> cityList, {CombatSky? sky}) {
+    _sky = sky;
     final cities = [...cityList]..sort((a, b) => a.id.compareTo(b.id));
     final opDt = math.min(math.max(0.0, tickDt), 0.5);
     registry.clockUs += (opDt * 1e6).round();
@@ -74,8 +85,13 @@ class CombatPhase {
         _onEvent(city, e, cities);
       }
     }
+    _watchSky(cities);
     for (final op in registry.operations) {
       if (!op.resolved) op.advance(opDt);
+      for (final v in op.orbital.fired) {
+        registry.spendRound(v);
+      }
+      op.orbital.fired.clear();
     }
     _postBaseRuns(cities);
     for (final op in registry.operations) {
@@ -113,8 +129,14 @@ class CombatPhase {
         final kind = OrderKind.values.where((k) => k.name == c.order).firstOrNull;
         if (kind != null) op?.setOrder(kind, target: c.target);
       case CommanderPowerCommand():
-        registry.lastRefusal =
-            registry.byId(c.operationId)?.power(c.power, objectiveId: c.target);
+        final op = registry.byId(c.operationId);
+        registry.lastRefusal = c.power == 'orbitalStrike'
+            ? (c.target == null ? 'Strike where?' : op?.strike(c.target!))
+            : op?.power(c.power, objectiveId: c.target);
+      case AssignOrbitalSupportCommand():
+        registry.lastRefusal = _assign(c, cities);
+      case ArmVesselCommand():
+        registry.lastRefusal = _arm(c, cities);
       case ReinforceOperationCommand():
         _reinforce(c, cities);
       case BaseOrderCommand():
@@ -146,6 +168,106 @@ class CombatPhase {
           case 'spareCore':
             if (c.value != null) registry.lastRefusal = b.orderSpareCore(op, c.value!);
         }
+    }
+  }
+
+  // ---- orbital support (§7E) -----------------------------------------------------
+
+  /// Every operation an assigned vessel is overhead of, refreshed at the
+  /// tick's end; a vessel that left (gone, landed, out of the SOI) is
+  /// unassigned with a notice. Rounds aboard are handed in for the steps.
+  void _watchSky(List<CitySim> cities) {
+    final sky = _sky;
+    if (sky != null && registry.loadout.isNotEmpty) {
+      registry.loadout.removeWhere((r) => sky.nameOf(r.vesselId) == null);
+    }
+    for (final op in registry.operations) {
+      final o = op.orbital;
+      if (op.resolved || !o.any) continue;
+      final target = _find(cities, op.targetColonyId);
+      final centre = o.centreBF;
+      if (sky == null || target == null || centre == null) continue;
+      final bodyId = target.body.id.value;
+      final ground = sky.toInertial(bodyId, centre);
+      for (final v in [...o.assigned]) {
+        final at = sky.positionAbout(v.id, bodyId);
+        if (at == null) {
+          o.unassign(v.id);
+          o.notices.add('Orbital support lost: ${v.name} has left the battle.');
+          continue;
+        }
+        final seen = overheadOf(at, ground);
+        v
+          ..strike = seen.strike
+          ..recon = seen.recon
+          ..slantM = seen.slantM;
+        o.roundsAboard[v.id] = registry.roundsAboard(v.id);
+      }
+    }
+  }
+
+  String? _assign(AssignOrbitalSupportCommand c, List<CitySim> cities) {
+    final op = registry.byId(c.operationId);
+    if (op == null || op.resolved) return 'That operation is over.';
+    if (!c.assign) {
+      op.orbital.unassign(c.vesselId);
+      return null;
+    }
+    final sky = _sky;
+    final target = _find(cities, op.targetColonyId);
+    if (sky == null || target == null) return 'Nothing flies here.';
+    if (!sky.isPlayers(c.vesselId)) return 'Only your own vessels can be assigned.';
+    for (final o in registry.operations) {
+      if (o.landers.any((l) => l.vesselId == c.vesselId)) return 'That is a troop lander.';
+      if (!o.resolved && o.orbital.byId(c.vesselId) != null) {
+        return 'It is already assigned to an operation.';
+      }
+    }
+    if (sky.positionAbout(c.vesselId, target.body.id.value) == null) {
+      return 'It must be in flight about ${target.body.name}.';
+    }
+    op.orbital.assign(c.vesselId, sky.nameOf(c.vesselId) ?? c.vesselId);
+    return null;
+  }
+
+  String? _arm(ArmVesselCommand c, List<CitySim> cities) {
+    final sky = _sky;
+    final colony = _find(cities, c.colonyId);
+    if (sky == null || colony == null) return 'Nothing flies here.';
+    if (c.rounds <= 0) return null;
+    if (!sky.isPlayers(c.vesselId)) return 'Only your own vessels can be armed.';
+    final a = colony.loyalty.allegiance;
+    if (a != Allegiance.colonial && a != Allegiance.occupied) return '${colony.name} takes no orders.';
+    if (!sky.landedAtPad(c.vesselId, c.colonyId)) return 'Land it on one of ${colony.name}\'s pads first.';
+    colony.war.inbox.add(ArmDebitWrite(c.vesselId, c.rounds, kRoundSteel, kRoundElectronics));
+    return null;
+  }
+
+  /// The battle's centre on the ground, the crater a round digs there, and
+  /// the buildings near the objectives (§7E): read once, at launch.
+  void _orbitalAtLaunch(Operation op, CitySim target, LaunchSnapshot snap) {
+    final objs = op.graph.objectives;
+    if (objs.isEmpty) return;
+    var e = 0.0, n = 0.0;
+    for (final o in objs) {
+      e += o.e;
+      n += o.n;
+    }
+    final body = target.body;
+    final bf = target.localToBodyFixed(Vec2(e / objs.length, n / objs.length), bodyRadiusM: body.radius);
+    op.orbital
+      ..centreBF = Vector3(bf.x, bf.y, bf.z)
+      ..craterM = craterForImpact(
+                kineticEnergyJ: kineticEnergy(kRoundMassKg, kRoundSpeedMs),
+                surfaceGravityMs2: body.mu / (body.radius * body.radius))
+            ?.diameterM ??
+        op.orbital.craterM;
+    for (final f in snap.obstacles) {
+      final near = objs.any((o) {
+        final dx = o.e - f.$1, dy = o.n - f.$2;
+        return dx * dx + dy * dy < (300 + f.$3) * (300 + f.$3);
+      });
+      if (near) op.orbital.footprints.add(f);
     }
   }
 
@@ -267,6 +389,7 @@ class CombatPhase {
     }
     registry.lastRefusal = null;
     registry.nextOperationId++;
+    _orbitalAtLaunch(op, target, snap);
     if (_landersFor(target)) {
       op.landers.addAll(packLanders(
           op.id, [for (final f in op.formations) if (f.side == CombatSide.attacker) f]));
@@ -331,6 +454,12 @@ class CombatPhase {
         } else if (e.materiel > 0 || e.stock.any((v) => v > 0)) {
           // Shipped to an operation already over: the goods go back.
           city.war.inbox.add(BaseGoodsWrite(e.materiel, e.stock));
+        }
+      case ArmedEvent():
+        registry.loadRounds(e.vesselId, e.paid, registry.clockUs + kArmLoadS * 1000000);
+        if (e.paid < e.asked) {
+          registry.lastRefusal = '${city.name} could pay for ${e.paid} of ${e.asked} rounds '
+              '($kRoundSteel steel and $kRoundElectronics electronics each).';
         }
       case GarrisonSuppliedEvent():
         if (e.amounts.isNotEmpty) {

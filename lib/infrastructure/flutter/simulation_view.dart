@@ -56,6 +56,7 @@ import '../../domain/colony/city/city_loyalty.dart';
 import '../../domain/colony/city/city_starter_kit.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/colony/city/commodity.dart';
+import '../../application/usecases/combat_sky.dart';
 import '../../application/usecases/force_landers.dart';
 import '../../domain/combat/base/base_modules.dart';
 import '../../domain/combat/base/forward_base.dart';
@@ -65,6 +66,8 @@ import '../../domain/combat/lander.dart';
 import '../../domain/combat/objective.dart';
 import '../../domain/combat/operation.dart';
 import '../../domain/combat/operation_registry.dart';
+import '../../domain/combat/powers/orbital.dart';
+import '../../domain/combat/powers/strike_window.dart';
 import '../../domain/multiplayer/player.dart';
 import 'screens/road_tool_scene.dart';
 import 'screens/traffic_lane_speed_overlay.dart';
@@ -2004,6 +2007,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     if (_clock.warpFactor > 1 && ForceLanderFlight.aloft(_session.operations)) {
       _clock.warpFactor = _warpLevels[_warp1x];
       _warpIndex = _warp1x;
+      _warpTarget = null;
+      _warpTargetLabel = null;
+    } else if (_clock.warpFactor > kOrbitalWarpCeiling && _session.operations.supportAssigned) {
+      // The second level (§7E): 10× while orbital support is assigned.
+      _warpIndex = _warpLevels.indexOf(kOrbitalWarpCeiling);
+      _clock.warpFactor = kOrbitalWarpCeiling;
       _warpTarget = null;
       _warpTargetLabel = null;
     }

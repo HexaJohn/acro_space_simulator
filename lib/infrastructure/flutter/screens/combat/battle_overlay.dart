@@ -16,6 +16,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
@@ -87,6 +88,53 @@ class BattleOverlayPainter extends CustomPainter {
     }
     for (final m in frame.base) {
       _module(canvas, m);
+    }
+    for (final s in frame.strikes) {
+      _strike(canvas, s);
+    }
+  }
+
+  /// A round coming in (a bright streak dropping onto its aim), the blast
+  /// when it lands, and the scorch it leaves (§7E).
+  void _strike(Canvas canvas, StrikeMark s) {
+    final at = project(s.e, s.n);
+    if (at == null) return;
+    final perM = scale(s.e, s.n);
+    final r = math.max(3.0, perM * s.diameterM / 2);
+    if (s.incoming) {
+      final k = 1 - s.inS! / CombatFrame.incomingS;
+      final top = at.translate(0, -(1 - k) * 260 - 12);
+      canvas.drawLine(
+          top,
+          at.translate(0, -(1 - k) * 260 * 0.4),
+          Paint()
+            ..strokeWidth = 3
+            ..strokeCap = StrokeCap.round
+            ..shader = ui.Gradient.linear(top, at, [
+              Colors.white.withValues(alpha: 0),
+              const Color(0xFFFFF2C0),
+            ]));
+      canvas.drawCircle(
+          at,
+          r * (0.6 + 0.4 * k),
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.5
+            ..color = AppTheme.warn.withValues(alpha: 0.5 + 0.5 * k));
+      return;
+    }
+    canvas.drawCircle(at, r, Paint()..color = const Color(0xFF15110E).withValues(alpha: 0.7));
+    if (s.ageS < 4) {
+      final k = s.ageS / 4;
+      canvas.drawCircle(
+          at,
+          r + perM * 40 * k,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 4 * (1 - k) + 1
+            ..color = const Color(0xFFFFB347).withValues(alpha: 1 - k));
+      canvas.drawCircle(at, r * (1.4 - 0.4 * k),
+          Paint()..color = const Color(0xFFFFF2C0).withValues(alpha: (1 - k) * 0.9));
     }
   }
 

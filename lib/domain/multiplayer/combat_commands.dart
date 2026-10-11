@@ -62,6 +62,12 @@ sealed class CombatCommand extends SimCommand {
       case 'power':
         return CommanderPowerCommand(by, tick, (j['op'] as num).toInt(), j['power'] as String,
             target: j['target'] as String?);
+      case 'assignOrbital':
+        return AssignOrbitalSupportCommand(
+            by, tick, (j['op'] as num).toInt(), j['vessel'] as String, assign: j['on'] != false);
+      case 'arm':
+        return ArmVesselCommand(
+            by, tick, j['vessel'] as String, j['colony'] as String, (j['rounds'] as num).toInt());
       case 'base':
         return BaseOrderCommand(by, tick, (j['op'] as num).toInt(), j['action'] as String,
             module: j['module'] as String?,
@@ -287,6 +293,51 @@ class BaseOrderCommand extends CombatCommand {
 
 /// A commander power (combat.md §7D): `supplyDrop`, or `medevac` from
 /// objective [target].
+/// Assigns one of the player's vessels to an operation as orbital support,
+/// or releases it (docs/plans/combat.md §7E).
+class AssignOrbitalSupportCommand extends CombatCommand {
+  const AssignOrbitalSupportCommand(super.issuedBy, super.tick, this.operationId, this.vesselId,
+      {this.assign = true});
+  final int operationId;
+  final String vesselId;
+  final bool assign;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'assignOrbital',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'vessel': vesselId,
+        if (!assign) 'on': false,
+      };
+}
+
+/// Loads [rounds] strike rounds aboard a vessel standing on one of
+/// [colonyId]'s pads, paid for by that colony (§7E).
+class ArmVesselCommand extends CombatCommand {
+  const ArmVesselCommand(super.issuedBy, super.tick, this.vesselId, this.colonyId, this.rounds);
+  final String vesselId;
+  final String colonyId;
+  final int rounds;
+
+  @override
+  String get targetAssetId => vesselId;
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'arm',
+        'by': issuedBy.value,
+        'tick': tick,
+        'vessel': vesselId,
+        'colony': colonyId,
+        'rounds': rounds,
+      };
+}
+
 class CommanderPowerCommand extends CombatCommand {
   const CommanderPowerCommand(super.issuedBy, super.tick, this.operationId, this.power,
       {this.target});

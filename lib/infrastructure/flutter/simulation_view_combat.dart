@@ -35,6 +35,11 @@ class _CombatViewState {
   /// Operations the player has dismissed from the map (resolved ones fade
   /// on their own).
   final Set<int> hidden = {};
+
+  /// Each assigned vessel's next pass over its battle (§7E), with the epoch
+  /// second it was worked out at: UI state, recomputed at most once a game
+  /// minute, never read by the sim.
+  final Map<String, (double, StrikeWindow?)> windows = {};
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -306,6 +311,12 @@ extension _SimulationViewCombat on _SimulationViewState {
         if (o.contested)
           CombatFxSite('${hit.op.id}:${o.id}', hit.city.body.id.value,
               hit.city.localToBodyFixed(Vec2(o.e, o.n), bodyRadiusM: groundAt(o.e, o.n)), o.heat),
+      // A strike's dust and smoke, for a while after it lands.
+      for (final s in frame.strikes)
+        if (!s.incoming && s.ageS < 12)
+          CombatFxSite('${hit.op.id}:strike:${s.e}:${s.n}', hit.city.body.id.value,
+              hit.city.localToBodyFixed(Vec2(s.e, s.n), bodyRadiusM: groundAt(s.e, s.n)),
+              (1 - s.ageS / 12).clamp(0.2, 1.0)),
     ];
     final body = snap.bodies[hit.city.body.id.value];
     final focus = _focusWorldForPick(snap);
@@ -569,6 +580,148 @@ extension _SimulationViewCombat on _SimulationViewState {
   void _power(Operation op, String power, {String? target}) => _operations.inbox.enqueue(
       CommanderPowerCommand(const PlayerId('player'), 0, op.id, power, target: target));
 
+  /// The drawer's Orbital support section (§7E): who is up there, when they
+  /// next pass, the strike buttons, and arming a vessel standing on a pad.
+  List<Widget> _orbitalRows(Operation op, BuildContext ctx, String Function(String) place,
+      Widget Function(String, String) line) {
+    CitySim? target;
+    for (final c in _cities.all()) {
+      if (c.id == op.targetColonyId) target = c;
+    }
+    if (target == null) return const [];
+    final system = _universe.current();
+    final sky = TickSky(_vessels, system, _clock.epoch, _cities.all());
+    final bodyId = target.body.id.value;
+    final o = op.orbital;
+    void send(CombatCommand c) {
+      _operations.inbox.enqueue(c);
+      Navigator.of(ctx).maybePop();
+    }
+
+    final assignable = [
+      for (final v in _vessels.all())
+        if (!v.landed &&
+            v.dominantBody.value == bodyId &&
+            Factions.ownerIsPlayer(v.ownerId) &&
+            o.byId(v.id.value) == null &&
+            !op.landers.any((l) => l.vesselId == v.id.value))
+          v
+    ]..sort((a, b) => a.id.value.compareTo(b.id.value));
+    final armable = <(Vessel, CitySim)>[
+      for (final v in _vessels.all())
+        if (v.landed && Factions.ownerIsPlayer(v.ownerId))
+          for (final c in _cities.all())
+            if ((c.loyalty.allegiance == Allegiance.colonial || c.loyalty.allegiance == Allegiance.occupied) &&
+                sky.landedAtPad(v.id.value, c.id))
+              (v, c)
+    ];
+    if (!o.any && assignable.isEmpty && armable.isEmpty) return const [];
+    final t = op.clock.steps;
+    final uplink = op.base?.uplinkOnline(op) ?? false;
+    final rows = <Widget>[
+      const SizedBox(height: 10),
+      Text('Orbital support', style: AppTheme.dim),
+      if (o.any)
+        line('Uplink',
+            op.base == null ? 'no base, no uplink' : (uplink ? 'online' : 'offline: 8 kW and 2 staff to spare')),
+      for (final v in o.assigned)
+        Row(children: [
+          Expanded(
+            child: Text(
+                '  ${v.name} · ${_operations.roundsAboard(v.id)} rounds'
+                '${_operations.roundsLoading(v.id) > 0 ? ' (+${_operations.roundsLoading(v.id)} loading)' : ''}'
+                ' · ${v.strike ? 'overhead, ${(v.slantM / 1000).round()} km' : (v.recon ? 'low, watching' : 'below the horizon')}'
+                '${t < v.readyStep ? ' · ready in ${v.readyStep - t} s' : ''}'
+                ' · ${_passLine(v.id, target, o)}',
+                style: AppTheme.body),
+          ),
+          TextButton(
+            key: Key('orbital-release-${v.id}'),
+            onPressed: () => send(AssignOrbitalSupportCommand(const PlayerId('player'), 0, op.id, v.id, assign: false)),
+            child: const Text('Release'),
+          ),
+        ]),
+      if (o.queued != null) line('Strike called', 'on ${place(o.queued!)} · fires at the next pass'),
+      for (final s in o.inFlight) line('Round coming down', 'on ${place(s.objectiveId)} in ${s.impactStep - t} s'),
+      if (o.any && op.phase == OperationPhase.engaged && o.queued == null)
+        Wrap(spacing: 4, children: [
+          for (final obj in op.graph.objectives)
+            if (op.strikeAllowed(obj))
+              Tooltip(
+                message: op.whyNotStrike(obj.id) ??
+                    (op.formations.any((f) => f.side == CombatSide.attacker && f.presentAt(obj.id, t))
+                        ? 'Danger close: your squads there take half the blast.'
+                        : 'One round: ${o.craterM.round()} m crater, scatter grows with range.'),
+                child: TextButton(
+                  key: Key('orbital-strike-${obj.id}'),
+                  onPressed: op.whyNotStrike(obj.id) == null
+                      ? () => send(CommanderPowerCommand(const PlayerId('player'), 0, op.id, 'orbitalStrike',
+                          target: obj.id))
+                      : null,
+                  child: Text('Strike ${place(obj.id)}'),
+                ),
+              ),
+        ]),
+      for (final v in assignable)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            key: Key('orbital-assign-${v.id.value}'),
+            onPressed: () => send(AssignOrbitalSupportCommand(const PlayerId('player'), 0, op.id, v.id.value)),
+            child: Text('Assign ${v.name} (${_operations.roundsAboard(v.id.value)} rounds) · warp held at 10×'),
+          ),
+        ),
+      for (final (v, c) in armable)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            key: Key('orbital-arm-${v.id.value}'),
+            onPressed: () => send(ArmVesselCommand(const PlayerId('player'), 0, v.id.value, c.id, 4)),
+            child: Text('Arm ${v.name} at ${c.name}: 4 rounds '
+                '(${4 * kRoundSteel} steel, ${4 * kRoundElectronics} electronics)'),
+          ),
+        ),
+      for (final n in o.notices.length > 3 ? o.notices.sublist(o.notices.length - 3) : o.notices)
+        Text('  $n', style: AppTheme.dim),
+    ];
+    return rows;
+  }
+
+  /// "next pass in 1 h 12 min · 3 min above 30°", from the cached window.
+  String _passLine(String vesselId, CitySim target, OrbitalSupport o) {
+    final now = _clock.epoch.seconds;
+    final cached = _combatState.windows[vesselId];
+    StrikeWindow? w;
+    if (cached != null && now - cached.$1 < 60) {
+      w = cached.$2;
+    } else {
+      w = _strikeWindow(vesselId, target, o);
+      _combatState.windows[vesselId] = (now, w);
+    }
+    if (w == null) return 'no pass in 30 days';
+    String span(double s) => s < 90
+        ? '${s.round()} s'
+        : (s < 5400 ? '${(s / 60).round()} min' : '${(s / 3600).floor()} h ${((s % 3600) / 60).round()} min');
+    if (w.startS <= now) return 'overhead ${span(w.endS - now)} more';
+    return 'next pass in ${span(w.startS - now)} · ${span(w.lengthS)} above 30°';
+  }
+
+  StrikeWindow? _strikeWindow(String vesselId, CitySim target, OrbitalSupport o) {
+    final v = _vessels.byId(VesselId(vesselId));
+    final centre = o.centreBF;
+    final body = _universe.current().body(target.body.id);
+    if (v == null || centre == null || body == null || v.landed) return null;
+    const conv = StateVectorOrbitConverter();
+    final orbit = conv.toOrbit(
+        position: v.state.position, velocity: v.state.velocity, body: body, epoch: _clock.epoch);
+    return nextStrikeWindow(
+      vesselAt: (t) => conv.toStateVector(orbit, Epoch(t)).position,
+      groundAt: (t) => body.orientationAt(Epoch(t)).rotate(centre),
+      fromS: _clock.epoch.seconds,
+      stepS: 90,
+    );
+  }
+
   /// The charge and the commander powers (§7D), each with its cooldown.
   List<Widget> _abilityRows(Operation op, BuildContext ctx, String Function(String) place) {
     final t = op.clock.steps;
@@ -697,6 +850,7 @@ extension _SimulationViewCombat on _SimulationViewState {
                     line('  ${f.count} ${_kindLabel(f)} · ${where(f)}',
                         'morale ${(f.morale * 100).round()}%'),
                 if (op.base case final b?) ..._baseRows(op, b, ctx, line),
+                if (!op.resolved) ..._orbitalRows(op, ctx, place, line),
                 if (!op.resolved && op.phase == OperationPhase.engaged) ...[
                   const SizedBox(height: 10),
                   Text('Orders', style: AppTheme.dim),
@@ -867,6 +1021,49 @@ extension _SimulationViewCombat on _SimulationViewState {
         did['order'] = ordered;
       }
     }
+    // Orbital support (§7E): orbit=DEG puts a player vessel in a 100 km
+    // circular orbit DEG degrees before passing straight over the battle
+    // (rounds=N loads it, a dev shortcut past arming at a pad); assign=ID and
+    // strike=OBJ go through the commands.
+    final orbitLead = double.tryParse(p['orbit'] ?? '');
+    if (orbitLead != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      final c = running?.orbital.centreBF;
+      final body = _universe.current().body(target.body.id);
+      if (c != null && body != null) {
+        final g = body.orientationAt(_clock.epoch).rotate(c).normalized;
+        final k = g.z.abs() < 0.9 ? Vector3.unitZ : Vector3.unitX;
+        final w = (k - g * k.dot(g)).normalized;
+        final r = body.radius + 100e3;
+        final vc = math.sqrt(body.mu / r);
+        final th = -orbitLead * math.pi / 180;
+        final v = SampleWorld.buildLunarOrbiter(id: 'rod-1', name: 'Lunar Rod 1');
+        v.updateState(v.state.copyWith(
+          position: (g * math.cos(th) + w * math.sin(th)) * r,
+          velocity: (g * -math.sin(th) + w * math.cos(th)) * vc,
+        ));
+        v.dominantBody = body.id;
+        _vessels.save(v);
+        final n = int.tryParse(p['rounds'] ?? '') ?? 0;
+        if (n > 0) _operations.loadRounds('rod-1', n, _operations.clockUs);
+        did['orbit'] = {'vessel': 'rod-1', 'leadDeg': orbitLead, 'rounds': n};
+      }
+    }
+    if (p['assign'] != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      if (running != null) {
+        _operations.inbox
+            .enqueue(AssignOrbitalSupportCommand(const PlayerId('player'), 0, running.id, p['assign']!));
+        did['assign'] = p['assign'];
+      }
+    }
+    if (p['strike'] != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      if (running != null) {
+        _power(running, 'orbitalStrike', target: p['strike']);
+        did['strike'] = p['strike'];
+      }
+    }
     final power = p['power'];
     if (power != null && target != null) {
       final running = _operations.runningAgainst(target.id);
@@ -904,6 +1101,7 @@ extension _SimulationViewCombat on _SimulationViewState {
           e.key: (e.value - (_combatState.groundR[int.tryParse(e.key.split(':').first) ?? -1] ?? e.value))
               .roundToDouble(),
       },
+      'warp': _clock.warpFactor,
       'operations': [
         for (final op in _operations.operations)
           {
@@ -935,6 +1133,26 @@ extension _SimulationViewCombat on _SimulationViewState {
                 'stock': {for (final k in kBaseStock) k: b.stockOf(k) ~/ 100},
               },
             'lz': [for (final o in op.graph.objectives) if (o.id == op.lzId) [o.e.round(), o.n.round()]],
+            'orbital': {
+              'assigned': [
+                for (final v in op.orbital.assigned)
+                  {
+                    'id': v.id,
+                    'strike': v.strike,
+                    'recon': v.recon,
+                    'slantKm': (v.slantM / 1000).round(),
+                    'rounds': _operations.roundsAboard(v.id),
+                    'readyIn': v.readyStep - op.clock.steps,
+                  }
+              ],
+              'queued': op.orbital.queued,
+              'inFlight': [for (final s in op.orbital.inFlight) s.impactStep - op.clock.steps],
+              'craters': [for (final c in op.orbital.craters) [c.e.round(), c.n.round(), c.brush]],
+              'uplink': op.base?.uplinkOnline(op),
+              'notices': op.orbital.notices.length > 3
+                  ? op.orbital.notices.sublist(op.orbital.notices.length - 3)
+                  : op.orbital.notices,
+            },
             'cooldowns': {
               'charge': op.chargeReadyStep - op.clock.steps,
               'drop': op.supplyDropReadyStep - op.clock.steps,
