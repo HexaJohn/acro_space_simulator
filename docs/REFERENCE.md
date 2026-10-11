@@ -9,7 +9,7 @@ Source of truth:
 
 ## Buildings
 
-57 placeable structures, grouped by tab.
+62 placeable structures, grouped by tab.
 
 ### Power
 
@@ -30,6 +30,7 @@ Source of truth:
 | **Aquifer Pump** | 1×1 | 35 | 6 | −8 | — | water 1.50/s | 0.0 | 0 |
 | **Water Plant** | 1×1 | 40 | 8 | −12 | — | water 2.00/s | 0.5 | 0 |
 | **Farm** | 1×1 | 40 | 10 | −4 | water 0.50/s | food 1.00/s | 0.0 | 0 |
+| **Quarter-Section Farm** | 1×1 | 70 | 18 | −6 | water 1.00/s | food 2.40/s | 0.0 | 0 |
 | **Industrial Farm** | 2×2 | 110 | 24 | −14 | water 1.80/s | food 4.20/s | 1.0 | 80 |
 | **Hydroponics** | 1×2 | 90 | 14 | −22 | water 1.20/s | food 3.00/s | 0.0 | 120 |
 | **Lab-Grown Meat** | 2×2 | 160 | 30 | −30 | water 1.50/s, electronics 0.10/s | food 5.00/s | 1.5 | 300 |
@@ -107,6 +108,10 @@ Source of truth:
 | Building | Size | Cost | Jobs | Power | Inputs | Outputs | Pollution | Unlock pop |
 |---|---|---|---|---|---|---|---|---|
 | **Terraforming Tower** | 1×1 | 150 | 30 | −60 | — | oxygen 0.50/s | -2.0 | 300 |
+| **Greenhouse Factory** | 2×2 | 140 | 25 | −50 | — | — | 0.5 | 300 |
+| **Regolith Baker** | 2×2 | 160 | 30 | −90 | — | — | 1.0 | 400 |
+| **Carbon Sequestrator** | 2×2 | 150 | 20 | −70 | — | — | 0.0 | 400 |
+| **Atmospheric Retention Array** | 3×3 | 600 | 60 | −600 | — | — | 0.0 | 1000 |
 | **Fallout Shelter** | 1×1 | 60 | 0 | −8 | — | — | 0.0 | 0 |
 
 ### Prep
