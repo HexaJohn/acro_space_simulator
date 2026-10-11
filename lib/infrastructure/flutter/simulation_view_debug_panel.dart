@@ -302,6 +302,8 @@ extension SimulationViewDebugPanel on _SimulationViewState {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // In a colony, a war first: what a colony view is debugged for.
+          if (widget.cityMode) ..._combatDebugRows(),
           // Spawn presets first: the fastest way to get a scene on screen.
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 4, bottom: 2),
@@ -404,6 +406,7 @@ extension SimulationViewDebugPanel on _SimulationViewState {
               style: const TextStyle(color: Color(0xFF7E93A8), fontSize: 11),
             ),
           ),
+          if (!widget.cityMode) ..._combatDebugRows(),
           const Padding(
             padding: EdgeInsets.only(left: 4, top: 6, bottom: 2),
             child: Text(

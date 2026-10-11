@@ -111,6 +111,9 @@ class _CombatViewState {
   /// gravity frame settles first).
   String? faceObjective;
   int faceInFrames = 0;
+
+  /// What the debug panel's last combat button did, for its note.
+  String? debugNote;
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -2008,6 +2011,88 @@ extension _SimulationViewCombat on _SimulationViewState {
       Text(rising ? 'Rebel squads' : 'Raiding squads', style: AppTheme.dim),
       for (final f in theirs)
         if (f.alive) line('  ${f.count} ${_kindLabel(f)} · ${where(f)}', 'morale ${(f.morale * 100).round()}%'),
+    ];
+  }
+
+  /// The debug panel's COMBAT rows: a war to try without waiting days for a
+  /// colony to turn — the same fixtures `ext.acro.combat` drives, on the open
+  /// colony (in the flight view, the first).
+  List<Widget> _combatDebugRows() {
+    final all = _cities.all();
+    final target = _editingCity ?? (all.isEmpty ? null : all.first);
+    final st = _combatState;
+    const dim = TextStyle(color: Color(0xFF7E93A8), fontSize: 11);
+    const red = Color(0xFFFF8A7A);
+    void run(Map<String, String> p, String Function(Map<String, Object?> did) say) {
+      final r = _combatHook(p);
+      final did = (r['did'] as Map?)?.cast<String, Object?>() ?? const <String, Object?>{};
+      rebuild(() => st.debugNote = say(did));
+    }
+
+    Widget button(String label, VoidCallback? onTap) => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+          child: _atmoButton(label, red, onTap),
+        );
+    final l = target?.loyalty;
+    bool rivalReady() => all.any((c) =>
+        c.loyalty.allegiance == Allegiance.independent &&
+        c.population >= CombatPhase.raidMinPopulation &&
+        all.any((o) => o.loyalty.allegiance == Allegiance.colonial && o.body.id == c.body.id));
+    return [
+      const Padding(
+        padding: EdgeInsets.only(left: 4, top: 4, bottom: 2),
+        child: Text('COMBAT',
+            style: TextStyle(color: Color(0xFF7FB0E0), fontSize: 11, fontWeight: FontWeight.bold)),
+      ),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(4, 0, 4, 2),
+        child: Text(
+            target == null
+                ? 'No colony.'
+                : '${target.name} · ${l!.allegiance.name}'
+                    '${l.portSeized ? ' · port seized' : ''} · pop ${target.population.round()}',
+            style: dim),
+      ),
+      button(
+          'Rebels seize its port',
+          target == null || l!.allegiance != Allegiance.colonial
+              ? null
+              : () => run({'fixture': 'portSeizedPair'},
+                  (_) => 'Rebels hold the port. Click the spaceport: "Retake the port by force". '
+                      'Garrison Town beside it has 3 barracks.')),
+      button(
+          'It breaks away',
+          target == null || l!.allegiance == Allegiance.independent
+              ? null
+              : () => run({'fixture': 'independent'},
+                  (_) => 'Independent. Open its panel and pick Force. '
+                      'Garrison Town beside it has 3 barracks.')),
+      button(
+          'It rises (pop 300)',
+          target == null || !l!.occupied
+              ? null
+              : () => run({'pop': '${math.max(300, target.population.round())}', 'rise': '1'},
+                  (_) => 'Its militia is coming for the Seat: watch the chip.')),
+      button(
+          'Rival raids now',
+          target == null
+              ? null
+              : () {
+                  // The open colony, independent but small, raids as 200.
+                  final p = <String, String>{'raidDay': '1'};
+                  if (!rivalReady() && l!.allegiance == Allegiance.independent) p['pop'] = '200';
+                  run(p, (did) {
+                    final r = did['raidDay'];
+                    return r is Map
+                        ? '${_colonyName('${r['rival']}')} raids its nearest colony in a moment. '
+                            'Nothing? Its target needs finished buildings: wait a minute.'
+                        : 'No rival: a colony must be independent, with 40+ people and a '
+                            'colonial neighbour on its body.';
+                  });
+                }),
+      button('Skip 30 s of battle', () => run({'step': '30'}, (_) => 'Skipped 30 s.')),
+      if (st.debugNote case final note?)
+        Padding(padding: const EdgeInsets.fromLTRB(4, 2, 4, 6), child: Text(note, style: dim)),
     ];
   }
 
