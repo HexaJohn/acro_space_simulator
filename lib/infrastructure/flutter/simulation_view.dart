@@ -7,7 +7,6 @@ import 'dart:async' show StreamSubscription, unawaited;
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui show Image;
 
 import 'package:flutter/material.dart';
@@ -21,7 +20,8 @@ import 'package:flutter/gestures.dart'
         PointerScrollEvent,
         ScaleGestureRecognizer,
         kMiddleMouseButton,
-        kPrimaryButton;
+        kPrimaryButton,
+        kSecondaryButton;
 import 'package:flutter/services.dart'
     show
         HardwareKeyboard,
@@ -1275,6 +1275,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     LogicalKeyboardKey.digit1,
     LogicalKeyboardKey.digit2,
     LogicalKeyboardKey.digit3,
+    // The command view (combat.md §7J).
+    LogicalKeyboardKey.tab,
+    LogicalKeyboardKey.digit4,
+    LogicalKeyboardKey.keyY,
+    LogicalKeyboardKey.keyH,
+    LogicalKeyboardKey.keyP,
     LogicalKeyboardKey.escape,
     LogicalKeyboardKey.space,
     LogicalKeyboardKey.shiftLeft,
@@ -1305,6 +1311,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       _keysDown.remove(e.logicalKey);
       return _keyResult(e);
     }
+    // The command view's keys first: its Ctrl+1–4 are a chord on purpose.
+    final command = _commandKey(e);
+    if (command != null) return command;
     // A modifier chord is a shortcut, not a flight input: Cmd+Q must quit
     // rather than roll the craft, so let those bubble to the platform.
     if (HardwareKeyboard.instance.isMetaPressed ||
@@ -3283,6 +3292,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   // overlay projected from the operation's ground.
                   if (_battleOverlay(_sceneWorld) case final battle?) battle,
                   if (_liveHud() case final hud?) hud,
+                  if (_commandCard() case final card?) card,
                   // Reflection-capture debug overlay (bottom-left, above the
                   // build stamp) — the equirect the craft's IBL reflects.
                   if (PlanetEnvironmentBaker.showDebug)
@@ -3360,6 +3370,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                             // warp back to its pin would read here as a drag
                             // the other way, and the head would shake.
                             if (_pointerLock.captured) return;
+                            // The command view's left drag is a selection box.
+                            if (_commanding && d.pointerCount < 2) return;
                             if (d.pointerCount >= 2 && d.scale != 1.0) {
                               // Two-finger pinch -> zoom.
                               setState(() {
@@ -3386,6 +3398,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     child: Listener(
                       behavior: HitTestBehavior.opaque,
                       onPointerDown: (e) {
+                        if (_commandPointerDown(e)) return;
                         if (_walkMode &&
                             !_pointerLock.captured &&
                             e.buttons == kPrimaryButton) {
@@ -3395,7 +3408,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                           _combatState.trigger = true;
                         }
                       },
-                      onPointerUp: (_) => _combatState.trigger = false,
+                      onPointerMove: _commandPointerMove,
+                      onPointerUp: (e) {
+                        _combatState.trigger = false;
+                        _commandPointerUp(e);
+                      },
                       onPointerCancel: (_) => _combatState.trigger = false,
                       child: const SizedBox.expand(),
                     ),

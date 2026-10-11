@@ -57,7 +57,13 @@ class BattleOverlayPainter extends CustomPainter {
     required this.project,
     required this.scale,
     required this.timeS,
+    this.selected = const [],
+    this.marquee,
   });
+
+  /// Squads selected in the command view (§7J), and the box being dragged.
+  final List<int> selected;
+  final Rect? marquee;
 
   final CombatFrame frame;
   final ColonyProject project;
@@ -91,6 +97,28 @@ class BattleOverlayPainter extends CustomPainter {
     }
     for (final s in frame.strikes) {
       _strike(canvas, s);
+    }
+    for (final s in frame.squads) {
+      if (!selected.contains(s.id)) continue;
+      final at = project(s.e, s.n);
+      if (at == null) continue;
+      canvas.drawCircle(
+          at,
+          9 + 1.6 * math.sqrt(s.count.toDouble()),
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2
+            ..color = Colors.white);
+    }
+    final m = marquee;
+    if (m != null) {
+      canvas.drawRect(m, Paint()..color = Colors.white.withValues(alpha: 0.08));
+      canvas.drawRect(
+          m,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1
+            ..color = Colors.white70);
     }
   }
 

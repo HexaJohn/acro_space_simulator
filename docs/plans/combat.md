@@ -710,6 +710,27 @@ the resolver's `F_def` cover; broken squads fought on. With those fixed, a sweep
 defenders over {0.5, 0.7, 1} × {1, 1.5, 2.2}) put **0.5 × 1.0** within 4% everywhere. **Result:** A 100/100% wins,
 19/24% losses; B 0/0%, 63/63%; C 0/0%, 60/66%. The player's own rifle is not scaled: attending is the edge.
 
+## 7J. Phase 5 spec: Command view and possession
+
+Specified 2026-10-11; defaults *(default)* for review.
+
+**Ships:** Tab between the soldier and a view over the battle; select squads, order them by hand, and jump into
+any of them.
+
+**Command view:** Tab (or the drawer's Command) frames the battle from above, the cursor free. **Select:** click a
+squad's marker (Shift adds), drag a box, **Y** every squad of yours, **Ctrl+1–4** keeps a group and **1–4** recalls it.
+**Order:** right-click an objective sends the selection there; **H** holds them where they stand; **A** hands them
+back to the plan. **Possess:** Tab (or the card's button) with one squad selected joins the fight as one of its
+troopers, where it stands. Esc leaves the view.
+
+**In the battle:** a hand-ordered squad (`Operation.directed`, saved; `SquadOrderCommand`) is left alone by the
+attackers' AI: it marches to its objective and holds it until ordered again or handed back.
+
+**The command card** (bottom right): the selection, its objectives to take, Hold, Follow the plan, Possess.
+
+**Cut *(default)*:** waypoints, pause-and-order, the minimap, U/R/F1–F3/L and the power keys, the build grid (the
+drawer keeps building), rebinding.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

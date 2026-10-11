@@ -65,6 +65,9 @@ sealed class CombatCommand extends SimCommand {
       case 'live':
         return LiveCasualtiesCommand(by, tick, (j['op'] as num).toInt(),
             [for (final v in (j['f'] as List? ?? const [])) (v as num).toInt()]);
+      case 'squads':
+        return SquadOrderCommand(by, tick, (j['op'] as num).toInt(),
+            [for (final v in (j['f'] as List? ?? const [])) (v as num).toInt()], j['target'] as String?);
       case 'liveSquad':
         return LiveSquadCommand(by, tick, (j['op'] as num).toInt(), (j['f'] as num).toInt(),
             own: j['own'] != false, at: j['at'] as String?);
@@ -317,6 +320,28 @@ class LiveCasualtiesCommand extends CombatCommand {
         'tick': tick,
         'op': operationId,
         'f': List<int>.of(formationIds),
+      };
+}
+
+/// Squads ordered by hand from the command view (docs/plans/combat.md §7J):
+/// to an objective, to hold (`#hold`), or back to the plan (null).
+class SquadOrderCommand extends CombatCommand {
+  const SquadOrderCommand(super.issuedBy, super.tick, this.operationId, this.formationIds, this.target);
+  final int operationId;
+  final List<int> formationIds;
+  final String? target;
+
+  @override
+  String get targetAssetId => 'operation:$operationId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'squads',
+        'by': issuedBy.value,
+        'tick': tick,
+        'op': operationId,
+        'f': List<int>.of(formationIds),
+        if (target != null) 'target': target,
       };
 }
 

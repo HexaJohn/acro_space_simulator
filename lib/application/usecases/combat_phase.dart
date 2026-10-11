@@ -138,6 +138,8 @@ class CombatPhase {
         for (final id in c.formationIds) {
           op?.liveCasualty(id);
         }
+      case SquadOrderCommand():
+        registry.lastRefusal = registry.byId(c.operationId)?.directSquads(c.formationIds, c.target);
       case LiveSquadCommand():
         registry.byId(c.operationId)?.liveSquad(c.formationId, own: c.own, at: c.at);
       case AssignOrbitalSupportCommand():

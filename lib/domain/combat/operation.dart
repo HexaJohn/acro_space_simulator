@@ -144,11 +144,13 @@ class Operation {
     this.supplyDropReadyStep = 0,
     this.medevacReadyStep = 0,
     OrbitalSupport? orbital,
+    List<(int, String)>? directed,
     Map<String, double>? garrisonKit,
     this.tuning = const ResolverTuning(),
     this.counters = const CounterTuning.uniform(),
   })  : garrisonKit = garrisonKit ?? const {},
         orbital = orbital ?? OrbitalSupport(),
+        directed = directed ?? [],
         landers = landers ?? [],
         seed = seed ?? combatSeed(targetColonyId, id),
         clock = clock ?? OperationClock(),
@@ -431,6 +433,38 @@ class Operation {
             : (struck.kind == FormationKind.emplacement ? 'the emplacement survived' : 'the defenders pinned'));
     orbital.notices.add('Strike on ${obj.id}: $what (${cep.round()} m scatter).');
   }
+
+  /// Squads the player has ordered by hand from the command view (§7J):
+  /// (formation, objective id or [holdHere]). The attackers' AI leaves them
+  /// alone; each marches to its objective and holds it until released.
+  /// Saved: an order outlives a load.
+  final List<(int, String)> directed;
+  static const String holdHere = '#hold';
+
+  /// Orders [ids] to [target] (an objective id), to hold where they are
+  /// ([holdHere]), or back to the plan (null). Null, or why not.
+  String? directSquads(List<int> ids, String? target) {
+    if (resolved) return 'That operation is over.';
+    if (target != null && target != holdHere) {
+      final o = graph.byId(target);
+      if (o == null) return 'No such objective.';
+    }
+    final t = clock.steps;
+    for (final id in ids) {
+      final f = formationById(id);
+      if (f == null || f.side != CombatSide.attacker || f.kind == FormationKind.emplacement) continue;
+      directed.removeWhere((d) => d.$1 == id);
+      if (target == null) continue;
+      directed.add((id, target));
+      if (target != holdHere && f.at != target && graph.byId(f.at) != null && f.presentAt(f.at, t)) {
+        f.marchTo(target, t, _marchFor(f, f.at, target));
+      }
+    }
+    directed.sort((a, b) => a.$1.compareTo(b.$1));
+    return null;
+  }
+
+  bool _isDirected(int id) => directed.any((d) => d.$1 == id);
 
   /// The squad the joined player fights in (§7H): live, so the resolver
   /// neither fights it nor marches it. Not saved — a load has no bubble.
@@ -977,7 +1011,7 @@ class Operation {
       case OrderKind.fallBack:
         for (final f in formations) {
           if (f.side != CombatSide.attacker || !f.alive || f.broken) continue;
-          if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id)) continue;
+          if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id) || _isDirected(f.id)) continue;
           if (f.at == lzId || graph.byId(f.at) == null) continue;
           f.marchTo(lzId, t, graph.marchS(f.at, lzId));
         }
@@ -994,7 +1028,7 @@ class Operation {
         }
         for (final f in formations) {
           if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
-          if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id)) continue;
+          if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id) || _isDirected(f.id)) continue;
           if (f.at == target.id || graph.byId(f.at) == null || !f.presentAt(f.at, t)) {
             continue;
           }
@@ -1019,7 +1053,7 @@ class Operation {
       if (f.side != CombatSide.attacker || f.morale < tuning.pinnedBelow) continue;
       // A turret stands where it was built; the live squad goes where the
       // player sends it.
-      if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id)) continue;
+      if (f.kind == FormationKind.emplacement || liveOwned.contains(f.id) || _isDirected(f.id)) continue;
       var there = false;
       for (final id in behind) {
         if (f.presentAt(id, t)) there = true;
@@ -1278,6 +1312,7 @@ class Operation {
         if (medevacReadyStep != 0) 'medevacReady': medevacReadyStep,
         if (orderTarget != null) 'orderTarget': orderTarget,
         if (!orbital.isEmpty || orbital.centreBF != null) 'orbital': orbital.toJson(),
+        if (directed.isNotEmpty) 'directed': [for (final d in directed) [d.$1, d.$2]],
         if (garrisonKit.isNotEmpty)
           'garrisonKit': {
             for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
@@ -1341,6 +1376,10 @@ class Operation {
         supplyDropReadyStep: (j['dropReady'] as num?)?.toInt() ?? 0,
         medevacReadyStep: (j['medevacReady'] as num?)?.toInt() ?? 0,
         orbital: OrbitalSupport.fromJson((j['orbital'] as Map?)?.cast<String, dynamic>()),
+        directed: [
+          for (final d in (j['directed'] as List? ?? const []))
+            (((d as List)[0] as num).toInt(), d[1] as String)
+        ],
         garrisonKit: {
           for (final k in const ['ammo', 'fuel', 'guns', 'rations'])
             if ((j['garrisonKit'] as Map?)?[k] is num)

@@ -83,6 +83,18 @@ class _CombatViewState {
   (double, double, double) lastEye = (0, 0, 1.7);
   (double, double, double) lastAim = (1, 0, 0);
 
+  // ---- the command view (§7J) ----
+
+  /// The battle the command view is over; null when it is not open.
+  int? commandOp;
+  final List<int> selected = [];
+  final Map<int, List<int>> groups = {};
+  Offset? dragFrom, dragTo;
+
+  /// The overlay's projection and frame, this frame: what picks read.
+  Offset? Function(double e, double n)? project;
+  CombatFrame? lastFrame;
+
   /// Turn to face this objective a few frames after joining (the walker's
   /// gravity frame settles first).
   String? faceObjective;
@@ -383,6 +395,10 @@ extension _SimulationViewCombat on _SimulationViewState {
     }
 
     double scale(double e, double n) => cam.radiusPx(rel(e, n), 1.0);
+    final st = _combatState
+      ..project = project
+      ..lastFrame = frame;
+    final from = st.dragFrom, to = st.dragTo;
     return Positioned.fill(
       child: IgnorePointer(
         child: CustomPaint(
@@ -392,6 +408,8 @@ extension _SimulationViewCombat on _SimulationViewState {
             project: project,
             scale: scale,
             timeS: _clock.epoch.seconds,
+            selected: st.commandOp == hit.op.id ? st.selected : const [],
+            marquee: from != null && to != null ? Rect.fromPoints(from, to) : null,
           ),
         ),
       ),
@@ -833,11 +851,12 @@ extension _SimulationViewCombat on _SimulationViewState {
     _walkGrounded = true;
   }
 
-  /// Joins [op] as a trooper of its first squad at the LZ (§7G).
-  void _joinFight(Operation op) {
+  /// Joins [op] as a trooper of its first squad at the LZ (§7G) — or, from
+  /// the command view, of [squadId] where it stands (§7J).
+  void _joinFight(Operation op, {int? squadId}) {
     final city = _cityById(op.targetColonyId);
     final r = _rasterFor(op);
-    final squad = _squadAtLz(op);
+    final squad = _squadAtLz(op, prefer: squadId);
     final body = city == null ? null : _universe.current().body(city.body.id);
     if (city == null || r == null || squad == null || body == null) return;
     final st = _combatState
@@ -859,6 +878,14 @@ extension _SimulationViewCombat on _SimulationViewState {
     if (!_walkMode) _toggleWalk();
     _thirdPerson = false;
     _standAtLz(op, city, r, body.radius);
+    // Possessed from the command view: where the squad stands, if it stands
+    // on the battle's ground.
+    final mark = st.lastFrame?.squads.where((s) => s.id == squad.id).firstOrNull;
+    if (squadId != null && mark != null && r.contains(mark.e, mark.n)) {
+      final dir = city.localToBodyFixed(Vec2(mark.e - 4, mark.n - 4), bodyRadiusM: body.radius).normalized;
+      _freecamRelLocal = dir * ((r.radiusAt(mark.e - 4, mark.n - 4) ?? body.radius) + walkEyeHeight);
+    }
+    st.commandOp = null;
     // Your squad is the bubble's while you fight with it (§7H).
     _operations.inbox.enqueue(LiveSquadCommand(const PlayerId('player'), 0, op.id, squad.id));
   }
@@ -1139,6 +1166,257 @@ extension _SimulationViewCombat on _SimulationViewState {
                     style: AppTheme.heading.copyWith(color: AppTheme.warn)),
               ),
             ),
+        ]),
+      ),
+    );
+  }
+
+  // ---- the command view (§7J) ---------------------------------------------------
+
+  bool get _commanding => _combatState.commandOp != null;
+
+  Operation? _commandOpNow() {
+    final id = _combatState.commandOp;
+    final op = id == null ? null : _operations.byId(id);
+    return op == null || op.resolved ? null : op;
+  }
+
+  /// Opens the command view over [op] (leaving the fight if joined).
+  void _enterCommand(Operation op) {
+    if (_liveJoined) _leaveFight();
+    final st = _combatState
+      ..commandOp = op.id
+      ..dragFrom = null
+      ..dragTo = null;
+    st.selected.clear();
+    _watchBattle(op);
+  }
+
+  void _exitCommand() {
+    final st = _combatState
+      ..commandOp = null
+      ..dragFrom = null
+      ..dragTo = null;
+    st.selected.clear();
+    rebuild(() {});
+  }
+
+  /// Tab: the soldier to the command view, the view to the one squad
+  /// selected (possession), or out.
+  void _tabCommand() {
+    final st = _combatState;
+    if (!_commanding) {
+      final op = _liveJoined
+          ? _operations.byId(st.live!.opId)
+          : _operations.operations.where((o) => !o.resolved && o.phase == OperationPhase.engaged).firstOrNull;
+      if (op != null) _enterCommand(op);
+      return;
+    }
+    final op = _commandOpNow();
+    if (op == null) {
+      _exitCommand();
+      return;
+    }
+    if (st.selected.length == 1 && _whyNotJoin(op) == null) {
+      _joinFight(op, squadId: st.selected.single);
+      return;
+    }
+    _exitCommand();
+  }
+
+  /// The player's squads that can take an order.
+  List<int> _orderable(Operation op) => [
+        for (final f in op.formations)
+          if (f.side == CombatSide.attacker && f.kind != FormationKind.emplacement && f.alive) f.id
+      ];
+
+  void _orderSelected(String? target) {
+    final op = _commandOpNow();
+    final st = _combatState;
+    if (op == null || st.selected.isEmpty) return;
+    _operations.inbox.enqueue(SquadOrderCommand(const PlayerId('player'), 0, op.id, [...st.selected], target));
+  }
+
+  /// A command-view key, or null when the view is not open or the key is not
+  /// one of its own.
+  KeyEventResult? _commandKey(KeyEvent e) {
+    if (e is! KeyDownEvent) return null;
+    if (e.logicalKey == LogicalKeyboardKey.tab) {
+      _tabCommand();
+      return KeyEventResult.handled;
+    }
+    final op = _commandOpNow();
+    if (op == null) return null;
+    final st = _combatState;
+    final ctrl = HardwareKeyboard.instance.isControlPressed;
+    final digit = switch (e.logicalKey) {
+      LogicalKeyboardKey.digit1 => 1,
+      LogicalKeyboardKey.digit2 => 2,
+      LogicalKeyboardKey.digit3 => 3,
+      LogicalKeyboardKey.digit4 => 4,
+      _ => null,
+    };
+    if (digit != null) {
+      rebuild(() {
+        if (ctrl) {
+          st.groups[digit] = [...st.selected];
+        } else {
+          st.selected
+            ..clear()
+            ..addAll([for (final id in st.groups[digit] ?? const <int>[]) if (_orderable(op).contains(id)) id]);
+        }
+      });
+      return KeyEventResult.handled;
+    }
+    switch (e.logicalKey) {
+      case LogicalKeyboardKey.escape:
+        _exitCommand();
+      case LogicalKeyboardKey.keyY:
+        rebuild(() => st.selected
+          ..clear()
+          ..addAll(_orderable(op)));
+      case LogicalKeyboardKey.keyH:
+        _orderSelected(Operation.holdHere);
+      case LogicalKeyboardKey.keyP:
+        _orderSelected(null);
+      default:
+        return null;
+    }
+    return KeyEventResult.handled;
+  }
+
+  /// A press on the world in the command view: the left button starts a
+  /// box (or a click), the right orders the selection to the objective
+  /// under it.
+  bool _commandPointerDown(PointerDownEvent e) {
+    if (!_commanding) return false;
+    final st = _combatState;
+    if (e.buttons == kSecondaryButton) {
+      final op = _commandOpNow();
+      final project = st.project;
+      if (op == null || project == null) return true;
+      String? best;
+      var bd = 80.0 * 80.0;
+      for (final o in op.graph.objectives) {
+        final at = project(o.e, o.n);
+        if (at == null) continue;
+        final d = (at - e.localPosition).distanceSquared;
+        if (d < bd) {
+          bd = d;
+          best = o.id;
+        }
+      }
+      if (best != null) _orderSelected(best);
+      return true;
+    }
+    if (e.buttons == kPrimaryButton) {
+      st
+        ..dragFrom = e.localPosition
+        ..dragTo = e.localPosition;
+      return true;
+    }
+    return false;
+  }
+
+  void _commandPointerMove(PointerMoveEvent e) {
+    final st = _combatState;
+    if (!_commanding || st.dragFrom == null) return;
+    rebuild(() => st.dragTo = e.localPosition);
+  }
+
+  void _commandPointerUp(PointerUpEvent e) {
+    final st = _combatState;
+    final from = st.dragFrom, to = st.dragTo;
+    if (!_commanding || from == null) return;
+    st
+      ..dragFrom = null
+      ..dragTo = null;
+    final op = _commandOpNow();
+    final frame = st.lastFrame;
+    final project = st.project;
+    if (op == null || frame == null || project == null) return;
+    final mine = _orderable(op);
+    final shift = HardwareKeyboard.instance.isShiftPressed;
+    final picked = <int>[];
+    if (to == null || (to - from).distance < 6) {
+      // A click: the nearest of your squads within reach.
+      int? best;
+      var bd = 22.0 * 22.0;
+      for (final s in frame.squads) {
+        if (!mine.contains(s.id)) continue;
+        final at = project(s.e, s.n);
+        if (at == null) continue;
+        final d = (at - from).distanceSquared;
+        if (d < bd) {
+          bd = d;
+          best = s.id;
+        }
+      }
+      if (best != null) picked.add(best);
+    } else {
+      final box = Rect.fromPoints(from, to);
+      for (final s in frame.squads) {
+        if (!mine.contains(s.id)) continue;
+        final at = project(s.e, s.n);
+        if (at != null && box.contains(at)) picked.add(s.id);
+      }
+    }
+    rebuild(() {
+      if (!shift) st.selected.clear();
+      for (final id in picked) {
+        if (!st.selected.contains(id)) st.selected.add(id);
+      }
+    });
+  }
+
+  String _placeOf(Operation op, String id) => switch (op.graph.byId(id)?.kind) {
+        ObjectiveKind.lz => 'the LZ',
+        ObjectiveKind.port => 'the port',
+        ObjectiveKind.seat => 'the seat',
+        ObjectiveKind.lifeSupport => 'life support',
+        ObjectiveKind.power => 'the power plant',
+        ObjectiveKind.depot => 'the depot',
+        ObjectiveKind.airfield => 'the airfield',
+        null => id,
+      };
+
+  /// The command card (§7J): the selection and what it can be told.
+  Widget? _commandCard() {
+    final op = _commandOpNow();
+    if (op == null) return null;
+    final st = _combatState;
+    final n = st.selected.length;
+    final directed = {for (final d in op.directed) d.$1: d.$2};
+    Widget button(String key, String label, VoidCallback? on) =>
+        TextButton(key: Key(key), onPressed: on, child: Text(label, style: AppTheme.body));
+    return Positioned(
+      right: 16,
+      bottom: 96,
+      child: Container(
+        key: const Key('command-card'),
+        width: 300,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(color: AppTheme.panel.withValues(alpha: 0.92), borderRadius: BorderRadius.circular(6)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Text('Command · ${n == 0 ? 'nothing selected' : '$n squad${n == 1 ? '' : 's'}'}', style: AppTheme.heading),
+          for (final id in st.selected.take(6))
+            if (op.formationById(id) case final f?)
+              Text(
+                  '  ${f.count} troopers · ${directed[id] == null ? 'following the plan' : directed[id] == Operation.holdHere ? 'holding' : 'taking ${_placeOf(op, directed[id]!)}'}',
+                  style: AppTheme.dim),
+          if (n > 0)
+            Wrap(spacing: 2, children: [
+              for (final o in op.graph.objectives)
+                if (o.kind != ObjectiveKind.lz)
+                  button('command-take-${o.id}', 'Take ${_placeOf(op, o.id)}', () => _orderSelected(o.id)),
+              button('command-hold', 'Hold (H)', () => _orderSelected(Operation.holdHere)),
+              button('command-plan', 'Follow the plan (P)', () => _orderSelected(null)),
+              if (n == 1)
+                button('command-possess', 'Possess (Tab)',
+                    _whyNotJoin(op) == null ? () => _joinFight(op, squadId: st.selected.single) : null),
+            ]),
+          Text('Click or drag to select · Y all · right-click an objective · Ctrl+1–4 keeps a group, 1–4 recalls · '
+              'Esc leaves', style: AppTheme.dim),
         ]),
       ),
     );
@@ -1689,6 +1967,31 @@ extension _SimulationViewCombat on _SimulationViewState {
       }
     }
     if (p['autofire'] != null) _combatState.devAutofire = p['autofire'] == '1';
+    // The command view (§7J): command=1|0, select=all|ID,ID, orderTo=OBJ|hold|plan, possess=ID.
+    if (p['command'] != null && target != null) {
+      final running = _operations.runningAgainst(target.id);
+      if (p['command'] == '1' && running != null) _enterCommand(running);
+      if (p['command'] == '0') _exitCommand();
+      did['command'] = _combatState.commandOp;
+    }
+    final sel = p['select'];
+    final cop = _commandOpNow();
+    if (sel != null && cop != null) {
+      _combatState.selected
+        ..clear()
+        ..addAll(sel == 'all' ? _orderable(cop) : [for (final s in sel.split(',')) if (int.tryParse(s) case final v?) v]);
+      did['select'] = [..._combatState.selected];
+    }
+    final orderTo = p['orderTo'];
+    if (orderTo != null && cop != null) {
+      _orderSelected(orderTo == 'plan' ? null : (orderTo == 'hold' ? Operation.holdHere : orderTo));
+      did['orderTo'] = orderTo;
+    }
+    final possess = int.tryParse(p['possess'] ?? '');
+    if (possess != null && cop != null) {
+      _joinFight(cop, squadId: possess);
+      did['possess'] = possess;
+    }
     if (p['stress'] != null) _combatState.devStress = p['stress'] == '1';
     final squadOrder = p['squad'];
     if (squadOrder != null && _combatState.live != null) {
@@ -1764,6 +2067,14 @@ extension _SimulationViewCombat on _SimulationViewState {
               .roundToDouble(),
       },
       'warp': _clock.warpFactor,
+      'command': {
+        'op': _combatState.commandOp,
+        'selected': [..._combatState.selected],
+        'directed': [
+          for (final op in _operations.operations)
+            for (final d in op.directed) [d.$1, d.$2]
+        ],
+      },
       if (_combatState.live case final l?)
         'live': {
           'hp': l.hp,
