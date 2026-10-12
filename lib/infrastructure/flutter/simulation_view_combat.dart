@@ -2749,13 +2749,14 @@ extension _SimulationViewCombat on _SimulationViewState {
       }
       _cities.add(src);
     }
-    // A debug colony: staffed and stocked whatever its size. A starter kit
-    // on the Moon has homes, power and air for a handful, so the 300 below
-    // settled back to a few, its barracks went unstaffed, and a launch made
-    // a minute later fielded nobody.
+    // A debug colony: staffed, stocked and peopled whatever its size. A
+    // starter kit on the Moon has homes, power and air for a handful, so the
+    // 300 below settled back to a few: its barracks went unstaffed, and the
+    // support staff a base takes ran out a launch at a time.
     src
       ..infiniteRobotics = true
-      ..infiniteRes = true;
+      ..infiniteRes = true
+      ..pinPopulation = true;
     src.stock[Commodity.rations] = 400;
     src.stock[Commodity.guns] = 80;
     src.stock[Commodity.ammo] = 400;

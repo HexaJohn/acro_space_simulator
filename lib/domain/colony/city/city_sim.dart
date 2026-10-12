@@ -561,6 +561,7 @@ class CitySim {
   bool infiniteRes = false; // DEBUG: stockpiles never deplete (show ∞, keep rates)
   bool infiniteDemand = false; // DEBUG: RCI demand pinned to max (zones keep growing)
   bool infiniteRobotics = false; // DEBUG/endgame: buildings need no workers (full staffing)
+  bool pinPopulation = false; // DEBUG: nobody migrates in or out (a fixture's people stay put)
   bool ignoreUnlocks = false; // DEBUG: build anything regardless of population gate
 
   String? landerPad; // spaceport SITE the lander is parked on (occupied), or null
@@ -1935,7 +1936,7 @@ class CitySim {
     // that draw a car (§6.6) or into emigrants. Without them, today's write.
     final migrants = agents.ownsPopulation ? agents.ledger : null;
     // A port the rebels hold is shut both ways (secession §4.1).
-    if (hasSpaceport && loyalty.migrationOpen) {
+    if (hasSpaceport && loyalty.migrationOpen && !pinPopulation) {
       if (population < target && !commsDown) {
         final double to =
             (population + (1.5 + 3.0 * happiness) * dt).clamp(0, target);
