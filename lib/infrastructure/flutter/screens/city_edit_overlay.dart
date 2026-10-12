@@ -115,6 +115,15 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
   @override
   double lotDepthM = 32;
 
+  /// The colony as a flat map — the city studio's plat — over the world
+  /// view, instead of the 3D scene. View state, not saved.
+  bool mapView = false;
+
+  void toggleMap() {
+    mapView = !mapView;
+    notifyListeners();
+  }
+
   /// The palette row currently expanded for detail, by label. One at a
   /// time: the panel is short, and two open rows push the rest off it.
   String? expandedLabel;
@@ -486,6 +495,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
                 _tool(CityEditTool.utility, Icons.factory, 'Build'),
                 _tool(CityEditTool.bulldoze, Icons.clear, 'Clear'),
                 _terrainChip(),
+                _mapChip(),
                 const SizedBox(width: 8),
                 _stat('§', city.funds),
                 _stat('Ore', city.stockOf('ore')),
@@ -646,6 +656,37 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
         child: Text('$label ${value.round()}',
             style: const TextStyle(color: Color(0xFF7FE0A0), fontSize: 11)),
       );
+
+  /// The flat map (the city studio's plat) in place of the 3D view.
+  Widget _mapChip() {
+    final on = controller.mapView;
+    return Padding(
+      key: const ValueKey('city-map-toggle'),
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Tooltip(
+        message: on
+            ? 'Back to the world  (M, or Esc)'
+            : 'The colony as a map  (M) — drag to pan, wheel to zoom, click a building',
+        child: InkWell(
+          onTap: controller.toggleMap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              color: on ? AppTheme.accent.withValues(alpha: 0.22) : null,
+              borderRadius: BorderRadius.circular(5),
+              border: Border.all(color: on ? AppTheme.accent : const Color(0xFF2A3948)),
+            ),
+            child: Row(children: [
+              Icon(on ? Icons.view_in_ar : Icons.map, size: 14, color: on ? AppTheme.accent : const Color(0xFF9FB4CC)),
+              const SizedBox(width: 4),
+              Text(on ? '3D' : 'Map',
+                  style: TextStyle(fontSize: 11, color: on ? AppTheme.accent : const Color(0xFF9FB4CC))),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
 
   /// The free-build switch (see [CityEditController.ignoreTerrain]), on
   /// the strip itself: it changes what every tool does to the ground.

@@ -136,6 +136,9 @@ class CityPlatView extends StatefulWidget {
     required this.camera,
     this.extentM = 4000,
     this.onCameraChanged,
+    this.revision = 0,
+    this.onTapLocal,
+    this.overlay,
   });
 
   /// The colony, or null before one exists.
@@ -146,12 +149,27 @@ class CityPlatView extends StatefulWidget {
   final double extentM;
   final VoidCallback? onCameraChanged;
 
+  /// What the plat was drawn from: when it changes the cache is cut again.
+  /// The studio's colony is generated once and keeps 0; a live colony grows
+  /// under the view, and its host passes something that moves when a road,
+  /// lot or building does.
+  final int revision;
+
+  /// A click on the plat, in colony-local metres (the live view opens the
+  /// site under it).
+  final void Function(double e, double n)? onTapLocal;
+
+  /// Drawn over the plat, in its own frame: given the camera and the size,
+  /// whatever the host lays on top (the live view's battle and missiles).
+  final Widget Function(CityPlatCamera camera, Size size)? overlay;
+
   @override
   State<CityPlatView> createState() => _CityPlatViewState();
 }
 
 class _CityPlatViewState extends State<CityPlatView> {
   _PlatCache? _cache;
+  int _cachedRevision = 0;
   double _scaleStart = 1;
   Offset? _lastFocal;
 
@@ -164,9 +182,10 @@ class _CityPlatViewState extends State<CityPlatView> {
   @override
   Widget build(BuildContext context) {
     final sim = widget.sim;
-    if (sim != null && !identical(_cache?.sim, sim)) {
+    if (sim != null && (!identical(_cache?.sim, sim) || _cachedRevision != widget.revision)) {
       _cache?.dispose();
       _cache = _PlatCache.of(sim);
+      _cachedRevision = widget.revision;
     } else if (sim == null) {
       _cache?.dispose();
       _cache = null;
@@ -209,22 +228,31 @@ class _CityPlatViewState extends State<CityPlatView> {
             widget.onCameraChanged?.call();
           },
           onScaleEnd: (_) => _lastFocal = null,
+          onTapUp: widget.onTapLocal == null
+              ? null
+              : (d) {
+                  final p = cam.toLocal(d.localPosition, size);
+                  widget.onTapLocal!(p.e, p.n);
+                },
           // Its own layer: the studio's panels repaint several times a
           // second, and without the boundary every one of those repainted
           // the plat with them.
-          child: RepaintBoundary(
-            child: CustomPaint(
-              size: size,
-              painter: _PlatPainter(
-                repaint: _cache?.imagesReady,
-                cache: _cache,
-                centreE: cam.centreE,
-                centreN: cam.centreN,
-                metresPerPx: cam.metresPerPx,
-                extentM: widget.extentM,
+          child: Stack(children: [
+            RepaintBoundary(
+              child: CustomPaint(
+                size: size,
+                painter: _PlatPainter(
+                  repaint: _cache?.imagesReady,
+                  cache: _cache,
+                  centreE: cam.centreE,
+                  centreN: cam.centreN,
+                  metresPerPx: cam.metresPerPx,
+                  extentM: widget.extentM,
+                ),
               ),
             ),
-          ),
+            if (widget.overlay case final o?) Positioned.fill(child: IgnorePointer(child: o(cam, size))),
+          ]),
         ),
       );
     });
@@ -458,6 +486,26 @@ class _PlatCache {
       final block = c._blockAt(cE, cY);
       block.boxes.addRect(b.minE, -b.maxN, b.maxE, -b.minN,
           colour.withValues(alpha: 0.55).toARGB32());
+    }
+    // Grid-placed buildings (a colony founded from the cockpit, the flat
+    // builder's utilities): their cells' parcels, filled in the use's tint.
+    for (final e in sim.occupiedCells()) {
+      final poly = sim.parcelForCell(e.key, e.value).polygon;
+      if (poly.length < 3) continue;
+      for (final p in poly) {
+        grow(p.e, p.n);
+      }
+      final b = Box2.of(poly);
+      final cE = (b.minE + b.maxE) / 2, cY = -(b.minN + b.maxN) / 2;
+      final colour = Color(e.value.colorArgb);
+      final cell = c.cells.putIfAbsent(grid.keyOf(cE, cY), _PlatCell.new);
+      cell.lotFill.addFan(poly, colour.withValues(alpha: 0.55).toARGB32());
+      c.plots.moveTo(poly[0].e, -poly[0].n);
+      for (var i = 1; i < poly.length; i++) {
+        c.plots.lineTo(poly[i].e, -poly[i].n);
+      }
+      c.plots.close();
+      c._blockAt(cE, cY).boxes.addRect(b.minE, -b.maxN, b.maxE, -b.minN, colour.withValues(alpha: 0.55).toARGB32());
     }
     final plan = sim.sprawl;
     if (plan != null) {

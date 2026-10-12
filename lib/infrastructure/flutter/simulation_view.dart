@@ -50,6 +50,7 @@ import 'screens/city_game_hud.dart';
 import 'screens/app_theme.dart';
 import 'screens/city_site_actions.dart';
 import 'screens/city_control_ui.dart' show showIndependence;
+import 'screens/city_plat_view.dart';
 import 'screens/colony_markers_painter.dart';
 import 'screens/combat/battle_overlay.dart';
 import 'screens/combat/missile_overlay.dart';
@@ -149,6 +150,7 @@ part 'simulation_view_colony.dart';
 part 'simulation_view_planner.dart';
 part 'simulation_view_combat.dart';
 part 'simulation_view_colony_markers.dart';
+part 'simulation_view_city_map.dart';
 
 /// Build stamp shown bottom-left so a deploy can be confirmed live (cache
 /// busting check). Bump this every rebuild.
@@ -1334,6 +1336,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     final cityKey = _onCityEditKey(e);
     if (cityKey != null) return cityKey;
     if (e is KeyDownEvent) {
+      // M opens the colony as a flat map when there is no craft to fly
+      // (the city studio's key); with one focused it is still manual control.
+      if (e.logicalKey == LogicalKeyboardKey.keyM && _editingCity != null && _focusVessel == null) {
+        _cityEdit.toggleMap();
+        return KeyEventResult.handled;
+      }
       // Toggle manual control with M.
       if (e.logicalKey == LogicalKeyboardKey.keyM) {
         setState(() => _manualControl = !_manualControl);
@@ -1354,6 +1362,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // Esc lets go of a missile strike being aimed (combat.md §7O).
       if (e.logicalKey == LogicalKeyboardKey.escape && _combatState.missileFrom != null) {
         rebuild(_cancelMissileAim);
+        return KeyEventResult.handled;
+      }
+      // Then it puts the map away.
+      if (e.logicalKey == LogicalKeyboardKey.escape && _cityMapOn) {
+        _cityEdit.toggleMap();
         return KeyEventResult.handled;
       }
       // Esc frees a captured mouse — to reach the toolbar, or another
@@ -3566,6 +3579,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // the HUD. Built by the colony part (`_cityPickLayer`), which
                 // owns its gate and which gestures each tool declares.
                 if (_editingCity != null) _cityPickLayer(),
+                // The colony as a flat map (the studio's plat), over the
+                // world and its pick layer, under the toolbar and the HUD.
+                if (_cityMapLayer() case final map?) map,
                 // The missile strike being aimed (combat.md 7O): over the pick
                 // layer, which takes every other click while one is aimed, so its
                 // Launch and Cancel are not ground clicks (found playing it).
