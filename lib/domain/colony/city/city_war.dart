@@ -296,10 +296,14 @@ class UprisingFoughtWrite extends CombatWrite {
 /// The rising is over (§7N): [held] or not, [garrisonLost] of the garrison
 /// killed or wounded, [rebelDead] of the colony's people killed.
 class UprisingEndWrite extends CombatWrite {
-  const UprisingEndWrite({required this.held, required this.garrisonLost, required this.rebelDead});
+  const UprisingEndWrite(
+      {required this.held, required this.garrisonLost, required this.rebelDead, this.fizzled = false});
   final bool held;
   final int garrisonLost;
   final int rebelDead;
+
+  /// Too few turned out to fight at all: quiet again, without a battle.
+  final bool fizzled;
 }
 
 /// A rival's raid on this colony is over (§7N): [raided] — the raiders took
@@ -894,7 +898,7 @@ extension CityWar on CitySim {
         }
         final crushed = w.held && loyalty.occupied && war.garrison != null;
         if (crushed) rebellion *= 0.5;
-        loyalty.uprisingEnded(held: crushed);
+        loyalty.uprisingEnded(held: crushed, fizzled: w.fizzled);
       case RaidEndWrite():
         recordWarDead(w.dead, corpses: true);
         if (w.raided) {

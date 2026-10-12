@@ -715,6 +715,22 @@ void main() {
     expect(w.ops.garrisons.where((g) => g.targetColonyId == 'tgt'), isEmpty);
   });
 
+  test('a colony of a handful cannot rise: the garrison holds without a battle (§7N)', () {
+    final src = source(1), tgt = occupied(80, 4);
+    tgt.population = 2;
+    final w = world([src, tgt]);
+    final t = tgt.colonyTimeS;
+    tgt.loyalty.revolts.addAll([t, t, t]);
+    for (var i = 0; i < 20; i++) {
+      w.tick.execute(w.clock);
+    }
+    expect(w.ops.operations.where((o) => o.kind == OperationKind.uprising), isEmpty);
+    expect(tgt.loyalty.risen, isFalse);
+    expect(tgt.loyalty.allegiance, Allegiance.occupied);
+    expect(tgt.loyalty.uprisingQuietUntilS, greaterThan(tgt.colonyTimeS));
+    expect(tgt.loyalty.notices.last.message, contains('Too few turned out'));
+  });
+
   test('a rival raids its colonial neighbour on its own day (§7N)', () {
     final tgt = moonColony('tgt')
       ..complexity = 0.2

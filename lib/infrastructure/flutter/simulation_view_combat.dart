@@ -647,7 +647,8 @@ extension _SimulationViewCombat on _SimulationViewState {
         FormationKind.infantry => 'troopers',
         FormationKind.regular => 'regulars',
         FormationKind.militia => 'militia',
-        FormationKind.emplacement => f.side == CombatSide.attacker ? 'turret crew' : 'gun emplacement',
+        // The player's own turret crews — the attackers', or a garrison's.
+        FormationKind.emplacement => f.faction == Factions.player ? 'turret crew' : 'gun emplacement',
         FormationKind.armour => 'APC crew',
         FormationKind.air => 'gunship',
       };
@@ -1881,7 +1882,7 @@ extension _SimulationViewCombat on _SimulationViewState {
         final attackers = op.formations.where((f) => f.side == CombatSide.attacker).toList();
         final defenders = op.formations.where((f) => f.side == CombatSide.defender).toList();
         String place(String at) => switch (op.graph.byId(at)?.kind) {
-              ObjectiveKind.lz => 'the landing zone',
+              ObjectiveKind.lz => op.defensive ? 'the gathering point' : 'the landing zone',
               ObjectiveKind.port => 'the port',
               ObjectiveKind.seat => 'the seat',
               ObjectiveKind.lifeSupport => 'life support',

@@ -578,8 +578,10 @@ class CombatPhase {
     );
     final op = planned.operation;
     if (op == null) {
-      // Nothing to fight over, or nobody to fight: the garrison holds.
-      city.war.inbox.add(const UprisingEndWrite(held: true, garrisonLost: 0, rebelDead: 0));
+      // Nothing to fight over, or too few to fight: the garrison holds,
+      // without a battle (found playing it: a colony of nobody rose every
+      // quiet spell, a chip each time).
+      city.war.inbox.add(const UprisingEndWrite(held: true, garrisonLost: 0, rebelDead: 0, fizzled: true));
       return;
     }
     registry.nextOperationId++;

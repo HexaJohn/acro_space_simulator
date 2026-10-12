@@ -832,7 +832,7 @@ class CityLoyalty {
   /// The rising is over (§7N). [held]: the garrison kept the Seat and the
   /// rising is crushed — its revolts cleared, quiet for a while; the
   /// rebellion halving is the colony's. Else the garrison is thrown out.
-  void uprisingEnded({required bool held}) {
+  void uprisingEnded({required bool held, bool fizzled = false}) {
     if (!occupied) {
       uprisingSinceS = null;
       uprisingFought = false;
@@ -846,9 +846,12 @@ class CityLoyalty {
     uprisingFought = false;
     revolts.clear();
     uprisingQuietUntilS = colonyTimeS + uprisingQuietDays * tuning.daySec;
-    _notice(LoyaltyNoticeKind.uprisingCrushed,
-        'Your garrison held the Seat: the rising is crushed, and the colony '
-        'remembers its dead.');
+    _notice(
+        LoyaltyNoticeKind.uprisingCrushed,
+        fizzled
+            ? 'Too few turned out to rise: the colony is quiet under guard, for now.'
+            : 'Your garrison held the Seat: the rising is crushed, and the colony '
+                'remembers its dead.');
   }
 
   /// The colony is taken (combat.md §7A), modelled on rejoining: loyalty at

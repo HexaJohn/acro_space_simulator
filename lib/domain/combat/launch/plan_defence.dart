@@ -31,6 +31,10 @@ const double kDefenceKitDays = 99;
 const int kRaidMinParty = 4;
 const double kRaidShare = 1 / 3;
 
+/// The fewest who make a rising (§7N): under this many, the colony grumbles
+/// and the garrison holds without a fight.
+const int kRisingMinMilitia = 3;
+
 /// Resolve a colony's people defend their homes from raiders with: whatever
 /// they think of the player, the raiders are worse.
 const double kHomeResolve = 0.5;
@@ -111,7 +115,7 @@ PlannedOperation planUprising({
   final r = colonyResolve(
       severity: target.severity, mood: target.mood, wish: target.wish, hunger: target.hunger);
   final militia = militiaRaised(population: target.population, resolve: r);
-  if (militia <= 0) return const PlannedOperation(null, [], 'Nobody turned out.');
+  if (militia < kRisingMinMilitia) return const PlannedOperation(null, [], 'Too few turned out to rise.');
   final armed = militiaArmed(militia: militia, gunsInStock: target.gunsInStock);
   final formations = _attackers(armed, militia - armed, Factions.colony(target.colonyId), target.colonyId,
       militiaMorale(r),
