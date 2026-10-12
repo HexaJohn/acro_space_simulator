@@ -38,6 +38,7 @@ import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/spatial_index.dart';
 import '../../../domain/colony/city/sprawl_plan.dart';
+import '../../../domain/colony/city/trails/trail_field.dart';
 import 'app_theme.dart';
 import 'city_plat_tiles.dart';
 
@@ -170,6 +171,7 @@ class CityPlatView extends StatefulWidget {
 class _CityPlatViewState extends State<CityPlatView> {
   _PlatCache? _cache;
   int _cachedRevision = 0;
+  _TrailPaint? _trails;
   double _scaleStart = 1;
   Offset? _lastFocal;
 
@@ -189,6 +191,18 @@ class _CityPlatViewState extends State<CityPlatView> {
     } else if (sim == null) {
       _cache?.dispose();
       _cache = null;
+    }
+    // The desire paths: cut again as a leg wears them, and every few
+    // seconds for the fading, which moves no revision.
+    final tf = sim?.trails?.field;
+    final tp = _trails;
+    if (tf == null) {
+      _trails = null;
+    } else if (tp == null ||
+        !identical(tp.field, tf) ||
+        tp.rev != tf.wearRev ||
+        tp.age.elapsedMilliseconds > 5000) {
+      _trails = _TrailPaint.of(tf);
     }
     return LayoutBuilder(builder: (context, constraints) {
       final size = constraints.biggest;
@@ -244,6 +258,7 @@ class _CityPlatViewState extends State<CityPlatView> {
                 painter: _PlatPainter(
                   repaint: _cache?.imagesReady,
                   cache: _cache,
+                  trails: _trails,
                   centreE: cam.centreE,
                   centreN: cam.centreN,
                   metresPerPx: cam.metresPerPx,
@@ -553,6 +568,7 @@ class _PlatPainter extends CustomPainter {
   _PlatPainter({
     super.repaint,
     required this.cache,
+    this.trails,
     required this.centreE,
     required this.centreN,
     required this.metresPerPx,
@@ -560,6 +576,7 @@ class _PlatPainter extends CustomPainter {
   });
 
   final _PlatCache? cache;
+  final _TrailPaint? trails;
   final double centreE, centreN, metresPerPx, extentM;
 
   static const _bg = Color(0xFF12161B);
@@ -600,6 +617,14 @@ class _PlatPainter extends CustomPainter {
     canvas.clipRect(view);
 
     _paintGrid(canvas, view, mpp);
+
+    // Desire paths under everything built: worn ground, darker the more
+    // it is worn.
+    if (trails case final t?) {
+      for (final (path, paint) in t.layers) {
+        canvas.drawPath(path, paint);
+      }
+    }
 
     final c = cache;
     if (c != null) {
@@ -811,8 +836,49 @@ class _PlatPainter extends CustomPainter {
   @override
   bool shouldRepaint(_PlatPainter old) =>
       !identical(old.cache, cache) ||
+      !identical(old.trails, trails) ||
       old.centreE != centreE ||
       old.centreN != centreN ||
       old.metresPerPx != metresPerPx ||
       old.extentM != extentM;
+}
+
+/// A colony's desire paths as a few filled paths, one per band of wear
+/// (docs/plans/desire-paths.md §7 "Plat"): a cell a square, in the cache's
+/// y = −north frame.
+class _TrailPaint {
+  _TrailPaint._(this.field, this.rev, this.layers);
+
+  final TrailField field;
+  final int rev;
+  final List<(Path, Paint)> layers;
+  final Stopwatch age = Stopwatch()..start();
+
+  /// Wear below this is ground a rover or two has crossed, not a trail.
+  static const double _faint = 0.12;
+  static const _bands = [0.3, 0.55, 0.8, 1.01];
+  static const _colour = Color(0xFFB08A5A);
+
+  static _TrailPaint of(TrailField f) {
+    final paths = [for (final _ in _bands) Path()];
+    final cell = f.cellM;
+    for (var i = 0; i < f.length; i++) {
+      final w = f.wear[i];
+      if (w < _faint) continue;
+      var b = 0;
+      while (w >= _bands[b]) {
+        b++;
+      }
+      final e0 = f.originE + (i % f.cols) * cell;
+      final n1 = f.originN + (i ~/ f.cols + 1) * cell;
+      paths[b].addRect(Rect.fromLTWH(e0, -n1, cell, cell));
+    }
+    return _TrailPaint._(f, f.wearRev, [
+      for (var b = 0; b < _bands.length; b++)
+        (
+          paths[b],
+          Paint()..color = _colour.withValues(alpha: 0.18 + 0.16 * b),
+        ),
+    ]);
+  }
 }

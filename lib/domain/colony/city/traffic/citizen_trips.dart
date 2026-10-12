@@ -100,6 +100,17 @@ const double kErrandSkimS = 180;
 /// is what brings them back, so the wait must be short beside every dwell.
 const double kTripRetryS = 1;
 
+/// Legs across open ground, where no road serves an end of a trip
+/// (docs/plans/desire-paths.md §7): the colony's desire paths answer, and
+/// lay the leg's wear as they do.
+abstract interface class OffRoadLegs {
+  /// The leg from building slot [from] to building slot [to]: how long it
+  /// takes, and how long it would on a beaten track — what a commute's
+  /// [TrafficStats.tripDone] weighs it against. Null when there is none: no
+  /// trails, a ban, or ground the rover cannot cross.
+  ({double timeS, double freeFlowS})? leg(int from, int to);
+}
+
 /// A trip's leg: out (to work, to an errand) or back home.
 const int _toWork = 0;
 const int _toHome = 1;
@@ -177,6 +188,13 @@ class CitizenTrips implements SpawnSink {
   /// trip departs from the access point as it did before T4a.
   ParkedCarTable? cars;
 
+  /// The desire paths, or null where trips keep to the roads.
+  OffRoadLegs? offRoad;
+
+  /// Seconds of travel the dwell being set starts after: an off-road leg's
+  /// time, while [_offRoadLeg] settles its citizen; 0 otherwise.
+  double _legS = 0;
+
   /// Leg, stage, whether it is a one-way forced trip, the `AgentKind` and
   /// the outbound `TripPurpose` — indices.
   final Uint8List leg, stage, oneWay, kind, purpose;
@@ -204,6 +222,9 @@ class CitizenTrips implements SpawnSink {
   /// they set off, because they own no car, theirs is somewhere else, or
   /// nothing on the network joins the two ends.
   int instantTrips = 0;
+
+  /// Legs taken across open ground instead ([OffRoadLegs]).
+  int offRoadTrips = 0;
 
   int get liveCount => pool.liveCount;
 
@@ -523,7 +544,13 @@ class CitizenTrips implements SpawnSink {
       return true;
     }
     final own = _carAt(i, from);
-    if (own < 0 || !buildings.reachable(from) || !buildings.reachable(to)) {
+    // [from] is −1 for a citizen standing nowhere anyone remembers
+    // ([_whereIs]): they walk, as they always have.
+    final roads =
+        from >= 0 && buildings.reachable(from) && buildings.reachable(to);
+    // No road at one end: the desire paths before the instant walk.
+    if (!roads && from >= 0 && _offRoadLeg(c, i, from, to, p)) return true;
+    if (own < 0 || !roads) {
       _place(c, i, to, p);
       return true;
     }
@@ -555,6 +582,24 @@ class CitizenTrips implements SpawnSink {
     instantTrips++;
     if (p == TripPurpose.commute) commutesSent++;
     _settle(c, i, to, p);
+  }
+
+  /// [c] crosses open ground to building slot [to]: at the far end after
+  /// the leg's time, which their dwell there starts after. False when there
+  /// is no such leg, and then nothing about them has changed.
+  bool _offRoadLeg(int c, int i, int from, int to, TripPurpose p) {
+    final leg = offRoad?.leg(from, to);
+    if (leg == null) return false;
+    sent++;
+    offRoadTrips++;
+    if (p == TripPurpose.commute) {
+      commutesSent++;
+      stats.tripDone(leg.timeS, leg.freeFlowS);
+    }
+    _legS = leg.timeS;
+    _settle(c, i, to, p);
+    _legS = 0;
+    return true;
   }
 
   /// Where [c] now is, and until when: the far end of a leg, whether it was
@@ -667,7 +712,7 @@ class CitizenTrips implements SpawnSink {
       s /= r;
     }
     if (!(s > 0)) s = 0;
-    citizens.schedule(c, nowUs + s * kUsPerSecond);
+    citizens.schedule(c, nowUs + (s + _legS) * kUsPerSecond);
   }
 
   /// The dwell of whatever [c] is doing now: what a citizen who decided to

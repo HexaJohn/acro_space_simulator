@@ -36,6 +36,12 @@ class ParcelNetwork {
   bool roadRooted(String id) => rootedRoads.contains(id);
   bool lotServed(String id) => servedLots.contains(id);
 
+  /// This network with [more] lots served besides — the lots open ground
+  /// reaches while a trip may cross it (docs/plans/desire-paths.md §7).
+  ParcelNetwork alsoServing(Set<String> more) => more.isEmpty
+      ? this
+      : ParcelNetwork._(rootedRoads, {...servedLots, ...more});
+
   static final double _maxHalfWidth =
       RoadClass.values.fold(0.0, (m, c) => math.max(m, c.halfWidth));
 

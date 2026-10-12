@@ -53,6 +53,8 @@ import 'site_access/site_access_book.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
 import 'traffic/city_agents.dart';
+import '../../terrain/terrain_field.dart';
+import 'trails/trail_network.dart';
 
 /// A craft visiting a spaceport — a relief mission or a scheduled delivery. It
 /// descends onto a free pad, dwells ~30 s while loading/unloading (the payload
@@ -246,7 +248,12 @@ enum Law {
   freePublicTransit('Free Public Transit', 'happiness +, funds −'),
   emissionsCap('Emissions Cap', 'pollution −, industry −'),
   wealthTax('Wealth Tax', 'inequality −, funds +, happiness −'),
-  robotTax('Robot Tax / UBI', 'automation unemployment −, funds −, happiness +');
+  robotTax('Robot Tax / UBI', 'automation unemployment −, funds −, happiness +'),
+
+  /// Vehicles keep to the roads (docs/plans/desire-paths.md §4): no trip
+  /// crosses open ground, so the desire paths fade and a lot no road
+  /// reaches is cut off. Appended: saves keep laws by name.
+  offRoadBan('Off-Road Ban', 'vehicles keep to roads, trails fade');
 
   final String label;
   final String effect;
@@ -511,6 +518,15 @@ class CitySim {
   static const double defaultTaxRate = 0.15;
   Govt govt = Govt.democracy;
   final Set<Law> laws = {};
+
+  /// The colony's desire paths (docs/plans/desire-paths.md), or null for a
+  /// colony that keeps to its roads as every colony always has. A roadless
+  /// founding turns them on ([CityStarterKit.found] with `roads: false`).
+  TrailNetwork? trails;
+
+  /// Whether a trip may cross open ground: trails are on and no ban stands.
+  bool get offRoadLegal => trails != null && !laws.contains(Law.offRoadBan);
+
   double crime = 0;
   double corruption = 0;
   double inequality = 0;
@@ -1363,6 +1379,9 @@ class CitySim {
     // Day/night: advance the day phase by the body's rotation rate (see
     // [dayLengthSec]).
     dayPhase = (dayPhase + dt / dayLengthSec) % 1.0;
+
+    // The desire paths first: what they serve is what the tick reads.
+    syncTrails(dt);
 
     final active = activeSpecs.toList();
 
@@ -2301,6 +2320,19 @@ class CitySim {
     band(Law.freePublicTransit, population.toDouble(), 200, 150);
     // Voters demand a robot tax / UBI once automation drives unemployment up.
     band(Law.robotTax, infiniteRobotics ? inequality : 0.0, 0.45, 0.25);
+    // Roads reach nearly everything: the colony keeps to them.
+    if (trails != null) band(Law.offRoadBan, roadServedShare(), 0.90, 0.75);
+  }
+
+  /// The share of built lots the road graph alone serves: 1 with none.
+  double roadServedShare() {
+    final net = roadNetwork();
+    var all = 0, served = 0;
+    for (final (p, _) in parcelBuiltLots()) {
+      all++;
+      if (net.lotServed(p.id)) served++;
+    }
+    return all == 0 ? 1.0 : served / all;
   }
 
   double ease(double cur, double tgt, double dt, double rate) =>
@@ -3990,16 +4022,88 @@ class CitySim {
   CityTrafficReadout get trafficReadout =>
       agents.enabled || agents.pictures > 0 ? agents.readout : roadTraffic;
 
-  ParcelNetwork? _parcelNet;
-  int _parcelNetVersion = -1;
+  ParcelNetwork? _parcelNet, _roadNet;
+  int _parcelNetVersion = -1, _roadNetVersion = -1, _parcelNetTrails = -1;
 
-  /// Road-graph connectivity, rebuilt only when the layout changes.
+  /// What serves a lot: the road graph, rebuilt only when the layout
+  /// changes, and — while a trip may cross open ground — the desire paths
+  /// too (desire-paths.md §7 "Service"), so a roadless colony works.
   ParcelNetwork parcelNetwork() {
-    if (_parcelNet == null || _parcelNetVersion != layout.version) {
-      _parcelNet = ParcelNetwork.of(layout);
+    final tr = trails;
+    final trailKey = tr != null && offRoadLegal ? tr.serviceRev : -1;
+    if (_parcelNet == null ||
+        _parcelNetVersion != layout.version ||
+        _parcelNetTrails != trailKey) {
+      final road = roadNetwork();
+      _parcelNet =
+          trailKey < 0 ? road : road.alsoServing(tr!.servedLots);
       _parcelNetVersion = layout.version;
+      _parcelNetTrails = trailKey;
     }
     return _parcelNet!;
+  }
+
+  /// The road graph's connectivity alone: what the Off-Road Ban leaves.
+  ParcelNetwork roadNetwork() {
+    if (_roadNet == null || _roadNetVersion != layout.version) {
+      _roadNet = ParcelNetwork.of(layout);
+      _roadNetVersion = layout.version;
+    }
+    return _roadNet!;
+  }
+
+  /// Keeps [trails] in step with the plat: its sites, its roads, the ground.
+  void syncTrails(double dt) {
+    final tr = trails;
+    if (tr == null) return;
+    TerrainField? relief;
+    var looked = false;
+    tr.sync(
+      shapeKey: Object.hash(layout.version, parcelBuildings.length,
+          utils.length, grown.length),
+      dtS: dt,
+      sites: () sync* {
+        for (final p in layout.parcels) {
+          final built = parcelBuildings.containsKey(p.id) ||
+              parcelGrownSpec(p.id, p.use) != null;
+          yield TrailSite(p.id, p.polygon, built: built);
+        }
+        for (final e in occupiedCells()) {
+          final p = parcelForCell(e.key, e.value);
+          yield TrailSite(p.id, p.polygon, built: true);
+        }
+      },
+      roads: () sync* {
+        final idx = layout.roadIndex;
+        for (final (_, rec) in idx.indexed) {
+          yield (
+            [for (var i = 0; i < rec.sampleCount; i++) rec.sampleAt(i)],
+            rec.road.halfWidth,
+          );
+        }
+      },
+      heightAt: (e, n) {
+        // The sampler is built on demand, so it is asked for once a fill,
+        // and only by a fill.
+        if (!looked) {
+          relief = body.terrainField;
+          looked = true;
+        }
+        final f = relief;
+        if (f == null) return 0;
+        final dir = localToBodyFixed(Vec2(e, n), bodyRadiusM: body.radius)
+            .normalized;
+        return f.groundRadiusAt(dir.x, dir.y, dir.z) - body.radius;
+      },
+    );
+    // A trail driven enough is a road (desire-paths.md §5 phase 2): a dirt
+    // road graded along it, free, since the wear did the work. One per
+    // look, so a colony's first network grows a road at a time.
+    if (offRoadLegal) {
+      for (final run in tr.dueRoads().take(1)) {
+        if (commitRoad(run, RoadClass.path) != null) tr.roadsLaid++;
+      }
+    }
   }
 
   /// Zone kind string for a parcel use, or null for the non-RCI uses.
@@ -5128,6 +5232,7 @@ class CitySim {
         if (foodSecurity != 1.0) 'foodSecurity': foodSecurity,
         if (taxRate != defaultTaxRate) 'taxRate': taxRate,
         if (laws.isNotEmpty) 'laws': [for (final l in laws) l.name],
+        'trails': ?trails?.toJson(),
         if (rebellion != 0) 'rebellion': rebellion,
         if (crime != 0) 'crime': crime,
         if (corruption != 0) 'corruption': corruption,
@@ -5336,6 +5441,11 @@ class CitySim {
     final savedLaws = j['laws'];
     if (savedLaws is List) {
       sim.laws.addAll(Law.values.where((l) => savedLaws.contains(l.name)));
+    }
+    final savedTrails = j['trails'];
+    if (savedTrails is Map) {
+      sim.trails =
+          TrailNetwork.fromJson(Map<String, dynamic>.from(savedTrails));
     }
     sim.stock
       ..clear()

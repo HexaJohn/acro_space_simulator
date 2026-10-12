@@ -71,6 +71,7 @@ import 'citizen_match.dart';
 import 'citizen_population.dart';
 import 'citizen_table.dart';
 import 'citizen_trips.dart';
+import '../trails/trail_router.dart' show kTrailWornMps;
 import 'edge_delay.dart';
 import 'graph_lineage.dart';
 import 'junction_arbiter.dart';
@@ -850,6 +851,7 @@ class _Core
       ..kerbs = kerbs
       ..stalls = _StallSpawns(siteMover);
     commutes.cars = parked;
+    commutes.offRoad = _TrailLegs(city, buildings);
   }
 
   final CityAgents agents;
@@ -3118,6 +3120,26 @@ final class _StallSpawns implements StallDepartures {
 /// the one behind it cannot get past. Every other program parks off an aisle,
 /// where each stall reaches the drive on its own. The nearest such stall is
 /// the blocker, and a pad is at most two deep (§3.4), so there is only one.
+/// The colony's desire paths as legs between building slots
+/// (docs/plans/desire-paths.md §7): none while a trip may not cross open
+/// ground. A leg lays its wear as it is taken.
+final class _TrailLegs implements OffRoadLegs {
+  _TrailLegs(this.city, this.buildings);
+
+  final CitySim city;
+  final BuildingTable buildings;
+
+  @override
+  ({double timeS, double freeFlowS})? leg(int from, int to) {
+    final tr = city.trails;
+    if (tr == null || !city.offRoadLegal) return null;
+    final r = tr.leg(buildings.siteId[from], buildings.siteId[to]);
+    if (r == null) return null;
+    tr.lay(r);
+    return (timeS: r.timeS, freeFlowS: r.lengthM / kTrailWornMps);
+  }
+}
+
 final class _TandemPlan implements TandemStalls {
   _TandemPlan(this.sites);
 

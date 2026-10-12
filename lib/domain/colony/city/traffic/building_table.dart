@@ -246,6 +246,21 @@ class BuildingTable {
 
   // ---- The sync --------------------------------------------------------------
 
+  /// The lot the lander's crew live on, or null: with desire paths on
+  /// (docs/plans/desire-paths.md §7), the first spaceport, where the capsule
+  /// stands. The colony counts the crew's quarters ([CitySim.landerCrew]) in
+  /// no building, so without this a starter colony's people have no home to
+  /// set out from and never travel; a colony that keeps to its roads keeps
+  /// them homeless here, as it always has.
+  String? _crewLot;
+
+  static String? _firstPort(CitySim city) {
+    for (final p in city.layout.parcels) {
+      if (city.parcelBuildings[p.id]?.type == 'spaceport') return p.id;
+    }
+    return null;
+  }
+
   /// Brings the table up to [city] as it stands, with access on [lg] (null:
   /// no lane graph yet, and no access) read from [plans] (null: no site
   /// plans, so every building is kerbside). Every built site is in
@@ -269,6 +284,7 @@ class BuildingTable {
     syncs++;
     final net = city.parcelNetwork();
     final layout = city.layout;
+    _crewLot = city.trails == null ? null : _firstPort(city);
     for (final p in layout.manualParcels) {
       _lot(city, net, p, lg, plans, again);
     }
@@ -299,6 +315,7 @@ class BuildingTable {
       uf = city.parcelUtil(id);
     }
     final sl = _upsert(id, s, uf, net.lotServed(id));
+    if (id == _crewLot) housing[sl] += CitySim.landerCrew;
     use[sl] = p.use.index;
     if (_fresh) {
       final c = p.centroid;

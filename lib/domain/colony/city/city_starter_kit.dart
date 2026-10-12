@@ -35,6 +35,7 @@ import 'city_sim.dart';
 import 'commodity.dart';
 import 'parcel.dart';
 import 'site_access/site_access_book.dart';
+import 'trails/trail_network.dart';
 import '../../universe/celestial_body.dart';
 
 /// How much rope the colony is given, as one pick on the setup screen.
@@ -188,6 +189,11 @@ class CityStarterKit {
   /// the opening balance. [agentTraffic] founds it with real vehicles on its
   /// roads (docs/plans/agent-traffic.md, D24): the play surface asks for
   /// them, and every other caller keeps the colony as it always was.
+  ///
+  /// [roads] false founds it with no road at all (docs/plans/desire-paths.md):
+  /// its people cross open ground between the sites, and the trails they
+  /// wear are the colony's first network. The play surfaces ask for that;
+  /// the crossroads stays the default for everything built on it.
   static CitySim found({
     required List<CelestialBody> bodies,
     CityConfig config = const CityConfig(),
@@ -195,6 +201,7 @@ class CityStarterKit {
     String id = 'colony-1',
     String name = 'Colony',
     bool agentTraffic = false,
+    bool roads = true,
   }) {
     final sim = CitySim.found(
       start.configure(config),
@@ -211,14 +218,18 @@ class CityStarterKit {
     // the junction exists in the graph, exactly as a player-drawn pair would.
     // No ground probe: at founding there is no terrain service to hand it, and
     // the mode's free-build default ignores grade anyway.
-    sim.commitRoad(
-      const [Vec2(0, -streetHalfLengthM), Vec2(0, streetHalfLengthM)],
-      RoadClass.street,
-    );
-    sim.commitRoad(
-      const [Vec2(-streetHalfLengthM, 0), Vec2(streetHalfLengthM, 0)],
-      RoadClass.street,
-    );
+    if (roads) {
+      sim.commitRoad(
+        const [Vec2(0, -streetHalfLengthM), Vec2(0, streetHalfLengthM)],
+        RoadClass.street,
+      );
+      sim.commitRoad(
+        const [Vec2(-streetHalfLengthM, 0), Vec2(streetHalfLengthM, 0)],
+        RoadClass.street,
+      );
+    } else {
+      sim.trails = TrailNetwork();
+    }
 
     // The spaceport, on a lot cut to its own size in the north-east quadrant.
     // A manual parcel rather than a street lot: the apron is thirty times the
@@ -278,9 +289,25 @@ class CityStarterKit {
     // A warehouse on the first street lot. Ore is capped at 200 without one,
     // which is under two buildings' worth — the opening budget would evaporate
     // on the first tick's cap sweep and the player would never see it.
-    final depot = sim.layout.autoParcels.isEmpty
-        ? null
-        : sim.layout.autoParcels.first;
+    //
+    // With no street there is no street lot: it stands on one of its own just
+    // south of the landing site, its door to the north, where every trail
+    // between the four quadrants passes.
+    Parcel? depot;
+    if (roads) {
+      depot = sim.layout.autoParcels.isEmpty
+          ? null
+          : sim.layout.autoParcels.first;
+    } else {
+      final ws = _warehouse.siteMetres(cellM: CitySim.cellM);
+      final hw = ws.width / 2;
+      const top = -20.0;
+      final bottom = top - ws.depth;
+      depot = sim.layout.addManualParcel(
+        [Vec2(-hw, bottom), Vec2(hw, bottom), Vec2(hw, top), Vec2(-hw, top)],
+        frontage: (Vec2(hw, top), Vec2(-hw, top)),
+      );
+    }
     if (depot != null) sim.placeOnParcel(depot.id, _warehouse);
 
     // Opening balance. Set rather than added: the difficulty IS the starting
@@ -299,6 +326,10 @@ class CityStarterKit {
 
     // The agents build nothing until the colony first advances.
     if (agentTraffic) sim.agents.enabled = true;
+
+    // The trails lay their ground and find what open ground serves before
+    // anything asks which sites are working.
+    sim.syncTrails(0);
 
     // Milestone tier 0 is the founding state. Recorded up front so the ladder
     // starts where the colony does and the first banner the player sees is a

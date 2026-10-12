@@ -111,6 +111,9 @@ Future<void> main() async {
     id: 'city-dev',
     name: 'Dev Colony',
     agentTraffic: const bool.fromEnvironment('AGENTS', defaultValue: true),
+    // Roadless, as the city game founds it (docs/plans/desire-paths.md);
+    // ROADS=true brings the old crossroads back.
+    roads: const bool.fromEnvironment('ROADS'),
   );
 
   developer.registerExtension('ext.acro.screenshot', (method, params) async {
