@@ -409,7 +409,9 @@ const List<CityBuildingSpec> kUtilCatalog = [
       colorArgb: 0xFF64FFDA, group: 'res-x', jobs: 40,
       powerDraw: 35, computeDraw: 1,
       inputs: {Commodity.steel: 0.5}, outputs: {Commodity.electronics: 0.6},
-      pollution: 2.0, unlockPop: 200),
+      pollution: 2.0, unlockPop: 200,
+      // A fab campus: clean-room halls plus utility plant and yard.
+      siteWidthM: 600, siteDepthM: 450),
   // ---- COMPUTE ----
   CityBuildingSpec(type: 'datacenter', label: 'Data Center',
       colorArgb: 0xFF40C4FF, group: 'compute', jobs: 25, powerDraw: 60,
@@ -421,7 +423,9 @@ const List<CityBuildingSpec> kUtilCatalog = [
       colorArgb: 0xFFFF8A65, group: 'aero', jobs: 50,
       powerDraw: 45, computeDraw: 3,
       inputs: {Commodity.tubes: 0.5, Commodity.electronics: 0.3},
-      outputs: {Commodity.rocketParts: 0.4}, pollution: 3.0, unlockPop: 400),
+      outputs: {Commodity.rocketParts: 0.4}, pollution: 3.0, unlockPop: 400,
+      // Long assembly bays for stage-sized parts, plus a test-stand yard.
+      siteWidthM: 700, siteDepthM: 500),
   CityBuildingSpec(type: 'assembly', label: 'Vehicle Assembly Building',
       colorArgb: 0xFFEC407A, group: 'aero',
       jobs: 80, powerDraw: 80, computeDraw: 8,
@@ -434,17 +438,23 @@ const List<CityBuildingSpec> kUtilCatalog = [
       colorArgb: 0xFF8D6E63, group: 'mil', jobs: 35, powerDraw: 25,
       inputs: {Commodity.steel: 0.5, Commodity.electronics: 0.1},
       outputs: {Commodity.guns: 0.3, Commodity.ammo: 1.0},
-      pollution: 3.0, unlockPop: 300),
+      pollution: 3.0, unlockPop: 300,
+      // Machining halls plus a separated, bermed ammunition line.
+      siteWidthM: 500, siteDepthM: 350),
   CityBuildingSpec(type: 'missilefactory', label: 'Missile Plant',
       colorArgb: 0xFFD84315, group: 'mil', jobs: 60, powerDraw: 50,
       computeDraw: 4,
       inputs: {Commodity.tubes: 0.4, Commodity.rocketParts: 0.2,
         Commodity.electronics: 0.2},
-      outputs: {Commodity.missiles: 0.15}, pollution: 4.0, unlockPop: 800),
+      outputs: {Commodity.missiles: 0.15}, pollution: 4.0, unlockPop: 800,
+      // Propellant and warhead buildings need blast-distance spacing.
+      siteWidthM: 900, siteDepthM: 700),
   CityBuildingSpec(type: 'rationsfactory', label: 'Rations Plant',
       colorArgb: 0xFFA1887F, group: 'mil', jobs: 18, powerDraw: 10,
       inputs: {Commodity.food: 1.0}, outputs: {Commodity.rations: 0.8},
-      unlockPop: 200),
+      unlockPop: 200,
+      // One food-packing hall with cold store and truck docks.
+      siteWidthM: 320, siteDepthM: 240),
   CityBuildingSpec(type: 'barracks', label: 'Barracks',
       colorArgb: 0xFF607D8B, group: 'mil', jobs: 30, powerDraw: 12,
       inputs: {Commodity.rations: 0.5, Commodity.guns: 0.05, Commodity.ammo: 0.3},

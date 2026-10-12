@@ -50,6 +50,11 @@ class PlatformFloorMeasureRunner implements FloorMeasureRunner {
       return Future.error(StateError('floor measure runner disposed'));
     }
     final req = _Request(_nextId++, key, bp.toJson(), settings.toJson());
+    // This caller's own completer: every waiter added below belongs to an
+    // older caller who already holds its future. Returning one of those
+    // instead would leave this completer unlistened, and its error (a failed
+    // build, a dispose) would escape to the zone as an uncaught error.
+    final own = req.waiters.single;
     if (key != null) {
       for (var i = 0; i < _queue.length; i++) {
         final old = _queue[i];
@@ -61,9 +66,8 @@ class PlatformFloorMeasureRunner implements FloorMeasureRunner {
       }
     }
     _queue.add(req);
-    final f = req.waiters.last.future;
     _pump();
-    return f;
+    return own.future;
   }
 
   Future<SendPort> _start() => _starting ??= () async {

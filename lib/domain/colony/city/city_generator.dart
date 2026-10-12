@@ -476,6 +476,15 @@ class CityBuild {
   }
 }
 
+/// Plants that stake their own site but that a generated town never builds:
+/// they carry factory floors, and only player-placed buildings get floors
+/// (docs/plans/factory-floors.md §1). Their real site sizes are for the
+/// player's placement.
+const Set<String> kPlayerPlacedPlants = {
+  'electronics', 'rocketfactory', 'gunfactory', 'missilefactory',
+  'rationsfactory',
+};
+
 class CityGenerator {
   const CityGenerator();
 
@@ -2170,7 +2179,11 @@ class CityGenerator {
     // Biggest first, so the ones that need the most room find it while
     // there is still room to find; each tries bearings spread by the golden
     // angle from a random start until its plot is accepted.
-    const placedElsewhere = {'station', 'freightyard', 'farm'};
+    // The factory-floor plants are left to the player ([kPlayerPlacedPlants]).
+    const placedElsewhere = {
+      'station', 'freightyard', 'farm',
+      ...kPlayerPlacedPlants,
+    };
     double area(CityBuildingSpec s) {
       final m = s.siteMetres();
       return m.width * m.depth;

@@ -51,7 +51,8 @@ class FloorRecord {
     this.dirty = true,
   });
 
-  /// The layout as last closed or assigned. While [live] is set, the live
+  /// The layout as last closed or assigned — the store's own copy, never
+  /// shared with a caller or a live sim. While [live] is set, the live
   /// sim's own blueprint is the truth and this is stale.
   FloorBlueprint blueprint;
 
@@ -90,13 +91,20 @@ class FloorRecord {
     return l != null ? l.blueprint : blueprint;
   }
 
-  Map<String, Object?> toJson() => {
-    'bp': currentBlueprint.toJson(),
-    if (measured) 'rates': rates.toJson(),
-    if (designed) 'designed': true,
-    'owner': ?owner?.toJson(),
-    if (dirty || live != null) 'dirty': true,
-  };
+  /// Saving with the editor open: an edit made since [FactoryFloors.open]
+  /// hasn't reached [designed]/[dirty] yet ([FactoryFloors.close] would set
+  /// both), so the save applies it; a floor only looked at keeps its rates.
+  Map<String, Object?> toJson() {
+    final l = live;
+    final edited = l == null ? false : l.layoutRev != _openLayoutRev;
+    return {
+      'bp': currentBlueprint.toJson(),
+      if (measured) 'rates': rates.toJson(),
+      if (designed || edited) 'designed': true,
+      'owner': ?owner?.toJson(),
+      if (dirty || edited) 'dirty': true,
+    };
+  }
 
   static FloorRecord fromJson(Map<String, Object?> j) {
     final r = j['rates'] as Map?;
@@ -169,7 +177,9 @@ class FactoryFloors {
   }) {
     final old = _sites[siteId];
     final rec = FloorRecord(
-      blueprint: bp,
+      // Copied at the boundary: the caller (a template, a library entry, an
+      // editor buffer) may keep mutating its own object.
+      blueprint: bp.copy(),
       rates: rates ?? MeasuredRates.none,
       designed: designed,
       owner: owner ?? old?.owner,
@@ -220,7 +230,9 @@ class FactoryFloors {
     if (rec == null) return null;
     final have = rec.live;
     if (have != null) return have;
-    final sim = build(rec.blueprint);
+    // A builder may keep the blueprint it is given and edit it in place;
+    // hand it a copy so the record's layout only changes on close.
+    final sim = build(rec.blueprint.copy());
     rec.live = sim;
     rec._openLayoutRev = sim.layoutRev;
     return sim;
@@ -267,8 +279,15 @@ class FactoryFloors {
 
   // ---- blueprint library --------------------------------------------------
 
-  /// The colony's saved designs, by name.
-  Map<String, FloorBlueprint> get library => UnmodifiableMapView(_library);
+  /// The colony's saved designs, by name, sorted. Copies: editing one (or
+  /// assigning it to a site whose builder edits in place) can't change the
+  /// saved design.
+  Map<String, FloorBlueprint> get library => UnmodifiableMapView(
+    SplayTreeMap.of({for (final e in _library.entries) e.key: e.value.copy()}),
+  );
+
+  /// One saved design by [name] (a copy), or null.
+  FloorBlueprint? blueprintNamed(String name) => _library[name]?.copy();
 
   /// "Save as blueprint". A name already taken is overwritten.
   void saveBlueprint(String name, FloorBlueprint bp) =>

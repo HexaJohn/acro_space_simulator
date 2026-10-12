@@ -119,6 +119,38 @@ void main() {
       expect(f.needsMeasure, isEmpty);
     });
 
+    test('blueprints are copied at the store boundary', () {
+      // Why: a builder that keeps (and edits) the blueprint it is handed —
+      // as a real floor may — must not change the record's layout before
+      // close, the caller's template, or a saved library design.
+      FactorySim keep(FloorBlueprint bp) => FakeSim(bp); // no copy
+      const belt = Placement(
+        id: 0,
+        kind: EntityKind.belt,
+        pos: TilePos(3, 3),
+      );
+
+      final template = _bp('tpl');
+      final f = FactoryFloors()..assign('s', template, rates: _mill);
+      template.placements.add(belt);
+      expect(f['s']!.blueprint.placements, isEmpty, reason: 'assign copies');
+
+      final sim = f.open('s', keep)!;
+      sim.place(belt);
+      expect(f['s']!.blueprint.placements, isEmpty, reason: 'open copies');
+      f.close('s');
+      expect(f['s']!.blueprint.placements, hasLength(1));
+
+      f.saveBlueprint('Mine', _bp('mine'));
+      f.library['Mine']!.placements.add(belt);
+      f.blueprintNamed('Mine')!.placements.add(belt);
+      expect(f.blueprintNamed('Mine')!.placements, isEmpty);
+      f.assign('t', f.library['Mine']!);
+      f.open('t', keep)!.place(belt);
+      expect(f.library['Mine']!.placements, isEmpty);
+      expect(f.blueprintNamed('nope'), isNull);
+    });
+
     test('blueprint library saves copies by name', () {
       // Why: "Save as blueprint" must snapshot, not alias, the live layout.
       final f = FactoryFloors();
@@ -310,6 +342,31 @@ void main() {
       expect(saved['s']!.dirty, isTrue);
       expect(saved['s']!.live, isNull);
       expect(saved['s']!.blueprint.placements, hasLength(1));
+    });
+
+    test('saving mid-edit keeps the edit designed; a look stays clean', () {
+      // Why: close() is what marks an edit designed, so a save with the
+      // editor open used to write the edited layout as a template, and a
+      // later "reset templates" would throw the player's design away. A
+      // floor only being looked at must keep its rates (not dirty).
+      final f = FactoryFloors()..assign('s', _bp(), rates: _mill);
+      f.open('s', (bp) => FakeSim(bp));
+      var j = f['s']!.toJson();
+      expect(j.containsKey('designed'), isFalse);
+      expect(j.containsKey('dirty'), isFalse, reason: 'looked at, not edited');
+
+      f['s']!.live!.place(
+        const Placement(id: 0, kind: EntityKind.belt, pos: TilePos(1, 1)),
+      );
+      j = f['s']!.toJson();
+      expect(j['designed'], isTrue);
+      expect(j['dirty'], isTrue);
+      final back = FloorRecord.fromJson(
+        jsonDecode(jsonEncode(j)) as Map<String, Object?>,
+      );
+      expect(back.designed, isTrue);
+      expect(back.dirty, isTrue);
+      expect(back.blueprint.placements, hasLength(1));
     });
   });
 }

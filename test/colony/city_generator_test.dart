@@ -119,6 +119,14 @@ void main() {
     expect(claimed, contains('reactor'));
     expect(claimed, contains('solar'));
     expect(claimed, contains('aquifer'));
+    // The factory-floor plants have real site sizes now but are
+    // player-placed (docs/plans/factory-floors.md §1): a generated town must
+    // not stake one.
+    for (final t in kPlayerPlacedPlants) {
+      expect(kUtilCatalog.firstWhere((s) => s.type == t).claimsOwnSite,
+          isTrue, reason: t);
+      expect(claimed, isNot(contains(t)), reason: t);
+    }
     // Every installation's plot is a clearing on the sprawl spec — the
     // plots the plan's highways break at. The sprawl's own plots (its
     // farms and strip malls) come after the plan and lie inside their
