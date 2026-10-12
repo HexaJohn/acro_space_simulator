@@ -64,6 +64,10 @@ class MarketFacts {
     this.population = 0,
     this.foodMult = 1,
     this.surfacePressureKPa,
+    this.airDensity,
+    this.o2Harvestable,
+    this.powerFactors = const {},
+    this.canExport = false,
   });
 
   /// `CelestialBody.id` the colony stands on ('earth', 'mars', 'moon' …).
@@ -93,10 +97,32 @@ class MarketFacts {
   final double foodMult;
 
   /// Surface air pressure, kPa, which with [atmosphere]'s fractions gives
-  /// each gas's partial pressure (an O₂ harvester on Mars' 0.6 kPa of CO₂
-  /// gets ~1% of what it gets from Earth's air). Null = the body's datum
-  /// pressure from its reference data; terraforming passes the live value.
+  /// O₂'s partial pressure (whether the air feeds a colonist for free).
+  /// Null = the body's datum pressure from its reference data;
+  /// terraforming passes the live value.
   final double? surfacePressureKPa;
+
+  /// Surface air density relative to Earth's (`CitySim.sky.airDensity`).
+  /// Null = the body's datum density from its reference data.
+  final double? airDensity;
+
+  /// Whether an O₂ harvester can pull oxygen here (`CitySim.o2Harvestable`:
+  /// O₂ ≥ 2% of air at least 0.05 kg/m³ dense). Where it can, it runs at
+  /// its full nameplate — the sim gates it, it does not scale it. Null =
+  /// the same rule applied to [atmosphere] and [airDensity].
+  final bool? o2Harvestable;
+
+  /// Multiplier on a power spec's nameplate output by spec type
+  /// (`CitySim.powerFactor(type)`; the aggregate fills it, so the sim stays
+  /// the one source of truth). A type not listed falls back to the sim's
+  /// rule with neutral biome and no nuclear winter: 'solar' ×
+  /// [solarFactor], 'wind' × air density (0..3), everything else × 1.
+  final Map<String, double> powerFactors;
+
+  /// Whether the colony can SELL off-world (a working spaceport). Without
+  /// it no export floor holds a price up: a colony that cannot ship to
+  /// Earth cannot get Earth's price for anything.
+  final bool canExport;
 }
 
 /// A colony's local prices: credits per commodity unit, plus the wage and

@@ -17,36 +17,45 @@
 ///   ore (capital) price one unit of what it makes. The cheapest spec the
 ///   colony can build wins. The SITE scales the yield: ice under a Martian
 ///   pole (`waterMult`) makes water cheap and so electrolysis oxygen cheap;
-///   a dry equator makes both dear. An O₂ harvester only works where the air
-///   holds oxygen-bearing gas, in proportion to its partial pressure — on
-///   the airless Moon oxygen must come from electrolysis.
-/// - **Power** is priced the same way from the power plants (solar scaled by
-///   sunlight, the best levelised option wins).
-/// - **The wage** is the local cost of a colonist's life-support basket
-///   (O₂, water, food at REAL per-person consumption, plus housing) times
-///   an economy markup. Wages feed every price and life-support prices feed
-///   the wage, so the two are solved together by FIXED-POINT iteration.
+///   a dry equator makes both dear. Every food recipe — hydroponics too —
+///   is scaled by the site's food multiplier, as `CitySim.biomeMult` scales
+///   all food output. An O₂ harvester runs at full nameplate where
+///   `CitySim.o2Harvestable` says the air holds oxygen, and not at all
+///   elsewhere — on Mars, the Moon and Venus oxygen comes from electrolysis.
+/// - **Power** is priced the same way from the power plants, each scaled by
+///   `CitySim.powerFactor` (the best levelised option wins).
+/// - **The wage** is the local cost of a colonist's SUBSISTENCE basket (O₂,
+///   water, food at REAL per-person consumption) plus housing times an
+///   economy markup: the household's take above subsistence. Wages feed
+///   every price and life-support prices feed the wage, so the two are
+///   solved together by FIXED-POINT iteration.
 /// - **Scarcity** (days of cover in stock) nudges the cost up or down.
 /// - **Trade bounds it**: never above the IMPORT CEILING (the cheapest
 ///   source's price + transport by Δv, `transport_cost.dart`; Earth is
 ///   always a source) and never below the EXPORT FLOOR (the best market it
-///   could sell into, less transport). A good the colony cannot make is
+///   could sell into, less transport — only with [MarketFacts.canExport],
+///   or into a market on its own world). A good the colony cannot make is
 ///   imported, at the ceiling.
 ///
 /// The result: oxygen costs cents on Earth, ~$10/kg at a Martian ice cap,
-/// tens of dollars on a dry Martian plain, and hundreds landed from Earth —
-/// so Mars always breathes its own. Electronics sit at the import ceiling
-/// until the colony can run an electronics plant, then fall.
+/// ~$25-40 on a dry Martian plain or the lunar regolith, and hundreds
+/// landed from Earth — so Mars and the Moon breathe their own. Electronics
+/// sit at the import ceiling until the colony can run an electronics plant,
+/// then fall.
 ///
 /// **Convergence.** Every map in the loop — recipe cost in its input prices
 /// and the wage, the wage in life-support prices, the min over recipes, the
 /// clamp — is monotone non-decreasing, and the clamp bounds every tradeable
 /// price. Starting from zero the iterates therefore rise monotonically to
 /// the LEAST self-consistent price set, the cheap one a colony would
-/// actually find. Where labour's share of life support is below one the
-/// approach is geometric; where it is not (a colony that cannot feed its
-/// own workers), prices pin at their import ceilings and the loop still
-/// stops. Joint products (a refinery's fuel and oxidizer) split their cost
+/// actually find. The approach is geometric at the rate of LABOUR'S SHARE
+/// of the subsistence basket: the worker-seconds it takes to make one
+/// colonist's day of O₂, water and food, over the seconds in a day. With
+/// the catalogue recipes and the real biome table (`CitySim.biomeFx`) that
+/// share stays below one on every real Mars and Moon site down to barren
+/// (food 0.3, water 0.6). Only the volcano biome (food 0.2, water 0.3)
+/// passes one — a colony that cannot feed its own workers — and there
+/// prices pin at their import ceilings and the loop still stops. Joint products (a refinery's fuel and oxidizer) split their cost
 /// by FIXED Earth-value weights, which keeps the map monotone.
 ///
 /// Pure and deterministic: no RNG, maps iterated in fixed list order.
@@ -82,19 +91,22 @@ const double kFoodKgPerPersonDay = 1.8;
 /// until then every world pays Earth rent.
 const double kHousingPerPersonDay = 30;
 
-/// People one wage keeps. 1: the wage covers the worker's own basket and
-/// the economy markup covers the household above subsistence. Higher
-/// values make labour's share of life support exceed one on dry, airless
-/// sites, where the colony could no longer feed its own workforce.
+/// People one wage keeps alive. 1: the wage covers the worker's own
+/// basket; the household above subsistence is the [wageMarkup] on housing.
+/// Labour's share of the basket scales with it.
 const double kPeoplePerWorker = 1;
 
-/// Wage as a multiple of the life-support basket, by economy: how much of
-/// the colony's output the worker's household keeps above subsistence.
-/// Communism pays near the basket; a free market pays the most and lets
-/// prices carry it. With the catalogue's labour-heavy life-support recipes
-/// these keep labour's share of the basket below one on Mars down to a
-/// site water multiplier of ~0.45 (a desert's 0.5 is fine); poorer sites
-/// pin at the import ceiling — the first knob integration tunes.
+/// The economy's markup on the NON-subsistence part of the wage (housing
+/// and what a household buys above staying alive), by economy. Communism
+/// pays near subsistence; a free market pays the most.
+///
+/// Applied only above subsistence, deliberately: a markup on the whole
+/// basket multiplies labour's share of life support by it, and with the
+/// real biome table that pushed every dry Martian and lunar site (desert,
+/// barren) past one, pinning O₂ and food at the import ceiling. A worker
+/// on a poor site is not paid 1.5× his own oxygen; the premium is what he
+/// spends on everything else, priced at Earth rent until habs are priced
+/// from steel at integration.
 double wageMarkup(EconomyKind e) => switch (e) {
       EconomyKind.communism => 1.1,
       EconomyKind.socialism => 1.25,
@@ -107,13 +119,13 @@ double wageMarkup(EconomyKind e) => switch (e) {
 /// wage basket: the air gives it.
 const double kBreathableO2KPa = 16;
 
-/// Earth's sea-level O₂ partial pressure, kPa: the yield an O₂ harvester's
-/// nameplate output assumes.
-const double kEarthO2KPa = 21.2;
+/// `CitySim.o2Harvestable`'s thresholds: O₂ mole fraction, and air density
+/// in kg/m³ (`sky.airDensity × earthDensity`).
+const double kHarvestO2Fraction = 0.02;
+const double kHarvestMinDensityKgM3 = 0.05;
 
-/// Moles of O₂ won from each mole of CO₂ by solid-oxide electrolysis
-/// (2 CO₂ → 2 CO + O₂, the MOXIE process).
-const double kCo2OxygenYield = 0.5;
+/// Earth's sea-level air density, kg/m³ (`CitySim.earthDensity`).
+const double kEarthAirDensityKgM3 = 1.225;
 
 // ---- energy and capital ----------------------------------------------------
 
@@ -126,9 +138,8 @@ const double kKjPerPowerUnitS = 1000;
 /// recovered in its unit cost, like a loan term.
 const double kCapitalRecoveryYears = 10;
 
-/// Wind output scales with air density; capped so a Venus does not run
-/// turbines at 90×.
-const double kMaxWindFactor = 1.5;
+/// Wind output scales with air density, clamped like `CitySim.windFactor`.
+const double kMaxWindFactor = 3.0;
 
 // ---- scarcity ----------------------------------------------------------------
 
@@ -167,9 +178,6 @@ const Set<String> kNonRecipeTypes = {'spaceport', 'terraformer'};
 /// a recycler can't make steel faster than the colony throws things away,
 /// so it never sets steel's price.
 const Set<String> kNonRecipeGroups = {'waste'};
-
-/// Power specs driven by sunlight (scaled by `solarFactor`).
-const Set<String> kSunPowerTypes = {'solar', 'solar-big', 'solarthermal'};
 
 /// Factory intermediates no colony spec makes, valued at the commodity they
 /// stand for until floors' measured recipes price them (wave 3): a pig-iron
@@ -262,6 +270,9 @@ LocalMarket solveLocalMarket(
     void source(String body, double price) {
       final inT = t.perKg(body, facts.bodyId);
       if (inT.isFinite) hi = math.min(hi, price + inT * kg);
+      // Selling off-world needs a working spaceport; a market on the
+      // colony's own world needs none.
+      if (!facts.canExport && body != facts.bodyId) return;
       final outT = t.perKg(facts.bodyId, body);
       if (outT.isFinite) lo = math.max(lo, price - outT * kg);
     }
@@ -279,8 +290,7 @@ LocalMarket solveLocalMarket(
   // ---- fixed point ----
   final markup = wageMarkup(facts.economy);
   double wageFor(Map<String, double> p) {
-    var perPersonDay = kHousingPerPersonDay +
-        kWaterKgPerPersonDay / kgPerUnit(Commodity.water) *
+    var perPersonDay = kWaterKgPerPersonDay / kgPerUnit(Commodity.water) *
             (p[Commodity.water] ?? 0) +
         kFoodKgPerPersonDay / kgPerUnit(Commodity.food) *
             (p[Commodity.food] ?? 0);
@@ -288,7 +298,8 @@ LocalMarket solveLocalMarket(
       perPersonDay += kO2KgPerPersonDay / kgPerUnit(Commodity.oxygen) *
           (p[Commodity.oxygen] ?? 0);
     }
-    return perPersonDay / kColonyDaySec * kPeoplePerWorker * markup;
+    return (perPersonDay * kPeoplePerWorker + kHousingPerPersonDay * markup) /
+        kColonyDaySec;
   }
 
   var prices = {for (final c in goods) c: 0.0};
@@ -430,40 +441,52 @@ final List<CityBuildingSpec> _defaultRecipes = [
 
 /// The body's air as the recipes need it.
 class _Air {
-  const _Air(this.o2KPa, this.co2KPa, this.pressureKPa);
+  const _Air(this.o2KPa, this.density, this.harvestable);
   final double o2KPa;
-  final double co2KPa;
-  final double pressureKPa;
+
+  /// Air density relative to Earth's.
+  final double density;
+
+  /// `CitySim.o2Harvestable`.
+  final bool harvestable;
 
   bool get breathable => o2KPa >= kBreathableO2KPa;
 
-  /// O₂ harvester yield vs its Earth nameplate, 0..1.
-  double get harvesterYield =>
-      ((o2KPa + kCo2OxygenYield * co2KPa) / kEarthO2KPa).clamp(0.0, 1.0);
-
   static _Air of(MarketFacts f) {
-    if (f.atmosphere.isEmpty) return const _Air(0, 0, 0);
-    final p = f.surfacePressureKPa ??
-        (_realSystem.body(BodyId(f.bodyId))?.atmosphere?.seaLevelPressure ??
-                0) /
-            1000;
-    return _Air((f.atmosphere['O2'] ?? 0) * p, (f.atmosphere['CO2'] ?? 0) * p,
-        p);
+    final datum = _realSystem.body(BodyId(f.bodyId))?.atmosphere;
+    final density = f.airDensity ??
+        (f.atmosphere.isEmpty
+            ? 0.0
+            : (datum?.seaLevelDensity ?? 0) / kEarthAirDensityKgM3);
+    final o2 = f.atmosphere['O2'] ?? 0;
+    final harvestable = f.o2Harvestable ??
+        (density * kEarthAirDensityKgM3 > kHarvestMinDensityKgM3 &&
+            o2 >= kHarvestO2Fraction);
+    final p = f.atmosphere.isEmpty
+        ? 0.0
+        : f.surfacePressureKPa ?? (datum?.seaLevelPressure ?? 0) / 1000;
+    return _Air(o2 * p, density, harvestable);
   }
 }
 
+/// `CitySim.powerFactor(type)`: the aggregate's value when it passed one,
+/// else the sim's rule with a neutral biome and no nuclear winter.
 double _powerFactor(CityBuildingSpec s, MarketFacts f, _Air air) {
-  if (kSunPowerTypes.contains(s.type)) return f.solarFactor;
-  if (s.type == 'wind') {
-    return math.min(kMaxWindFactor, air.pressureKPa / (kEarthSurfacePa / 1000));
-  }
-  return 1;
+  final given = f.powerFactors[s.type];
+  if (given != null) return given;
+  return switch (s.type) {
+    'solar' => f.solarFactor,
+    'wind' => air.density.clamp(0.0, kMaxWindFactor).toDouble(),
+    _ => 1.0,
+  };
 }
 
 /// Site multiplier on [s]'s output of [c].
 double _yield(CityBuildingSpec s, String c, MarketFacts f, _Air air) {
+  // The sim gates a harvester on the sky and otherwise runs it at full
+  // nameplate (`CitySim.tick`: `s.type != 'o2harvester' || skyO2`).
   if (s.type == 'o2harvester' && c == Commodity.oxygen) {
-    return air.harvesterYield;
+    return air.harvestable ? 1 : 0;
   }
   return switch (c) {
     Commodity.water => f.waterMult,
@@ -483,9 +506,8 @@ List<CityBuildingSpec> _eligible(
       !kNonRecipeTypes.contains(s.type) &&
       !kNonRecipeGroups.contains(s.group) &&
       s.unlockPop <= f.population &&
-      !(s.type == 'o2harvester' && air.harvesterYield <= 0) &&
-      !(s.type == 'wind' && air.pressureKPa <= 0) &&
-      !(kSunPowerTypes.contains(s.type) && f.solarFactor <= 0);
+      !(s.type == 'o2harvester' && !air.harvestable) &&
+      !(s.powerOutput > 0 && _powerFactor(s, f, air) <= 0);
   final base = all.where(usable).toList();
   final computeSource = base.any((s) => s.computeOutput > 0);
   return [

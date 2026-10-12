@@ -172,7 +172,12 @@ class FirmBook {
       sinceActionS = 0;
       return FirmAction.invest;
     }
-    if (health == FirmHealth.healthy) return FirmAction.none;
+    // Cuts only when actually LOSING: a firm still "strained" by the
+    // hysteresis but back in the black (a +1% margin under the 3% exit)
+    // keeps its staff.
+    if (health == FirmHealth.healthy || profitPerS >= 0) {
+      return FirmAction.none;
+    }
     if (canLayOff) {
       sinceActionS = 0;
       return FirmAction.layoff;

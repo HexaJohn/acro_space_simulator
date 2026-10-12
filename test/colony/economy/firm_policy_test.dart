@@ -51,6 +51,24 @@ void main() {
     expect(kDistressExitMargin, greaterThan(kDistressEnterMargin));
   });
 
+  /// Strained is not losing: a firm the hysteresis still holds "strained"
+  /// but back in the black (+1%, under the 3% exit margin) cuts nobody.
+  /// Once it loses again, the cuts resume.
+  test('a strained firm in profit lays off and idles nothing', () {
+    final b = FirmBook(owner: const Ownership.private('acme'));
+    _run(b, -0.05, 90);
+    expect(b.health, FirmHealth.strained);
+    _run(b, 0.01, 120);
+    expect(b.health, FirmHealth.strained, reason: 'under the exit margin');
+    expect(b.profitPerS, greaterThan(0));
+    expect(b.decide(canLayOff: true, canIdle: true), FirmAction.none);
+    expect(b.decide(canIdle: true), FirmAction.none);
+
+    _run(b, -0.05, 120);
+    expect(b.profitPerS, lessThan(0));
+    expect(b.decide(canLayOff: true, canIdle: true), FirmAction.layoff);
+  });
+
   /// The payback rule: a private firm buys only what pays back within
   /// kFirmPaybackYears game-years.
   test('firmWillBuild = payback within the horizon', () {

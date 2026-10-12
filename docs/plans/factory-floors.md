@@ -220,9 +220,11 @@ Nothing is a firm, and nothing can go bankrupt.
     Transport/kg comes from physics: surface-to-surface Δv → rocket equation →
     propellant/kg at the source's fuel price + vehicle wear. Earth's gravity well dominates.
   - *exportFloor* = best (destination price − transport).
-  - *Wage* = local cost of the life-support basket (O₂, water, food, housing) × an economy
-    markup. It is circular with life-support prices, so solve by fixed-point iteration
-    (it converges because labour is less than 100% of any good's cost).
+  - *Wage* = local cost of the subsistence basket (O₂, water, food) + housing × an economy
+    markup (as built: the markup only applies above subsistence; on the whole basket it
+    pushed labour's share past one on dry Mars/Moon biomes). It is circular with
+    life-support prices, so solve by fixed-point iteration (it converges while labour's
+    share of the basket is below one: every real Mars/Moon biome except the volcano).
   - Needs a `kgPerUnit` per commodity (none today).
   - Expected result: low value-per-kg goods (O₂, water, steel, food) are always made
     locally off Earth, and high value-per-kg goods (chips, medicine) are imported until
