@@ -82,11 +82,43 @@ rocketParts, guns, ammo, rations, missiles) plus the reserved `goods`.
   machines, or a slow decay of uptime), and costs electronics to build.
 
 Arms and belts are always automated, cheap and low power. A floor's **job demand** is the
-sum of its stations' workers, and that replaces the spec's flat `jobs`.
+sum of its station workers and its material handlers (below), and that replaces the spec's
+flat `jobs`.
 
-**Tick.** Fixed sub-step (0.25 s sim time *(default)*). Order: receiving emits → arms
-pick/drop → belts advance → machines craft → shipping consumes. Items are discrete
-counts on belt tiles. 48×36 = 1.7k tiles at 4 Hz is trivial for one floor.
+**Material handling: people and vehicles move freight** (user decision, 2026-10-12).
+Belts and arms cover the short fixed runs, but most freight is moved by **handlers**, as in
+real plants: unloading trucks, staging, feeding machines, clearing output, palletising and
+loading. A fully lights-out plant is possible but rare and expensive.
+- **Load classes.** Each item has one: *hand* (boxes, parts), *pallet* (ore sacks, crates,
+  coils of wire) or *heavy* (steel billets, rocket sections). The class decides which
+  handlers can move the item.
+- **Handlers.** Each is a worker, either on foot or operating equipment:
+
+  | Handler | Moves | Speed | Needs |
+  |---|---|---|---|
+  | Worker on foot | hand, 1 unit | slow | any walkable tile |
+  | Pallet jack | ≤ pallet, 1 pallet | slow | 1-tile aisle |
+  | Forklift | ≤ pallet, 1 pallet, can stack racks | fast | 2-tile aisle, charging bay |
+  | Overhead crane | any incl. heavy | medium | a fixed rail bay (rectangle); ignores floor traffic |
+  | AGV / robot carrier *(late tech)* | ≤ pallet | medium | no operator, marked lanes, power, maintenance |
+
+- **Jobs, not routes.** Machines, docks and chests post **move requests** ("3 ore to
+  smelter #2 input", "clear 1 crate from packer"). A deterministic dispatcher assigns each
+  request to the nearest free capable handler, with ties broken by id. Handlers path on the
+  grid (A* on ≤48×36, cached per target).
+- **Space is the cost.** Belts and machines block walking unless a crossing is placed.
+  Forklift aisles eat floor. Crane bays fix where heavy stations go. So a layout trades
+  floor area for handling capacity, which is exactly the kind of puzzle we want.
+- **Docks are manual by default.** Trucks are unloaded by workers, jacks or forklifts into
+  a staging area. Dock conveyors and AGVs are the expensive automated upgrade.
+- **Template plants** use workers and forklifts at the docks, belts through the core, and a
+  crane over the heavy line. They're a realistic mix, and the design levers in Reward
+  apply to handling too (fewer trips, shorter aisles, a crane instead of two forklifts).
+
+**Tick.** Fixed sub-step (0.25 s sim time *(default)*). Order: receiving emits → requests
+posted → dispatcher assigns → handlers move/pick/drop → arms pick/drop → belts advance →
+machines craft → shipping consumes. Items are discrete counts on belt tiles and in handler
+loads. 1.7k tiles plus ≤ ~40 handlers at 4 Hz is trivial for one floor.
 
 **Coupling to the colony (the only seam into `CitySim`).**
 - A site **with** a floor ignores its spec's flat inputs/outputs. Each colony tick the
@@ -109,7 +141,8 @@ it costs nothing per frame.
 designer can pull, all bounded:
 - *Throughput*: better ratios and fewer starved machines raise output above the template,
   up to the receiving docks' throughput and the plant's power budget.
-- *Labour*: automating stations frees workers for the rest of the colony.
+- *Labour*: automating stations, or handling smarter (cranes, short aisles, belts where
+  trips are frequent), frees workers for the rest of the colony.
 - *Efficiency*: byproduct loops (slag → tubes and the like) mean less raw input per product.
 Target: a good design gets ~1.5× template output, or the same output at half the jobs.
 The cap stops one perfect floor from breaking the colony economy.
@@ -130,17 +163,22 @@ lost. Because only the player demolishes placed plants, that's the only path tha
   whose spec has a factory template (`factoryTemplateFor(spec) != null`, so zoned lots never
   qualify).
 - `FactoryFloorScreen` is a 2D top-down grid editor (CustomPainter): a palette (machines,
-  belts, arms, chests), place / rotate (R) / delete, drag-to-lay belts, and recipe pick on a
-  machine.
+  belts, arms, chests, aisles, crossings, crane bays, racks), place / rotate (R) / delete,
+  drag-to-lay belts and aisles, recipe pick on a machine, and a handler roster (hire a
+  worker, buy a jack, forklift or AGV).
 - Overlays: power, staffing (red = unstaffed station), **bottleneck** (starved / blocked
   machines tinted), and a throughput readout ("1.8 steel/s in, 0.4 crates/s out").
-- Live animation while open: items visibly ride belts. That's the fun.
+- Overlay for handling: a heat map of handler traffic, plus the queue of move requests
+  waiting (a long queue = hire or automate).
+- Live animation while open: items ride belts, and workers and forklifts run their trips.
+  That's the fun.
 - 3D interior / walking in with the first-person walker: **not planned**, a possible later phase.
 
 ## 5. Phases
 
 1. **Floor core (headless).** Grid, belts, arms, machines, docks, recipes, tick,
-   toJson. One template (Steel Mill: ore → steel + tubes crates). Tests: belt
+   toJson, plus **workers on foot**: move requests, dispatcher, grid pathing. (Without
+   them the docks can't unload.) One template (Steel Mill: ore → steel + tubes crates). Tests: belt
    transport, arm handoff, machine starve/block, template throughput = spec rate,
    determinism, save round-trip. **Zero edits to existing files.**
 2. **Editor screen.** `FactoryFloorScreen` + site-menu entry + overlays. A sandbox floor fed
@@ -148,8 +186,9 @@ lost. Because only the player demolishes placed plants, that's the only path tha
 3. **Colony integration.** One small commit into `city_sim.dart`: field, rename/drop/clear
    hooks, save key, one call in `advance`, flat-rate bypass. Coordinate timing with
    whoever is in `city_sim.dart` that day.
-4. **Workers + automation tiers.** Station modes, maintenance, job demand into staffing,
-   brownout slowdown, automation unlocked by milestone or research.
+4. **Vehicles + automation tiers.** Load classes, pallet jacks, forklifts (aisles,
+   charging), overhead crane bays, AGVs; station modes and maintenance; job demand into
+   staffing; brownout slowdown; automation unlocked by milestone or research.
 5. **Aggregate mode + templates for every factory spec.** Off-screen steady-state rates,
    worker-isolate re-measure, perf check with ~30 factories.
 6. **Freight docks** *(after agent-traffic slice 8)*. Receiving only gets what trucks
@@ -171,8 +210,9 @@ Defaults are marked *(default)* above. Each of these changes what gets built:
 2. **Discrete items on belts vs flow rates?** *Rec:* discrete. It is the Factorio feel,
    and it's cheap at this grid size.
 3. **Off-screen fidelity:** measured steady state (rec) vs always-full sim.
-4. **Workers:** abstract slots per station (rec for now) vs visible little workers walking
-   the floor (pretty, phase 4+ polish).
+4. ~~Workers: abstract slots vs visible?~~ **Decided:** workers are simulated handlers who
+   move freight on foot or with jacks, forklifts and cranes. Full automation is a rare,
+   expensive upgrade.
 5. **Grid size:** fixed per tier (rec) vs scaled to real site metres (a 900 m refinery would
    be enormous).
 6. **Is design ever required?** *Rec:* never. A templated floor matches today's output, and
@@ -189,13 +229,17 @@ Files (all new, license header on each):
 - `factory/factory_recipe.dart`: `FactoryRecipe`, `StationKind`, const recipe table
   (ore→iron, iron→steel, iron + slag→tubes, product→crate).
 - `factory/factory_entities.dart`: `Machine`, `Belt`, `Arm`, `Chest`, `DockPort`.
+- `factory/factory_handling.dart`: `MoveRequest`, `Handler` (on-foot kind only in phase 1,
+  but the kind enum is shaped for jack/forklift/crane/AGV), `Dispatcher`, and grid A*.
 - `factory/factory_floor.dart`: `FactoryFloor` (grid + entities + `step(dt)` +
   counters `inPerS` / `outPerS`), and `toJson` / `fromJson`.
 - `factory/factory_templates.dart`: `factoryTemplateFor(CityBuildingSpec)`, Steel Mill
   only; null for everything else, including all zoned specs.
-- `test/colony/factory/`: one test file per behaviour listed in phase 1.
+- `test/colony/factory/`: one test file per behaviour listed in phase 1, plus: a truck
+  load is unloaded by workers into staging, belts block pathing except at crossings, and
+  dispatch is deterministic.
 
-Exit criteria: `flutter test test/colony/factory` is green; the workshop template's measured
+Exit criteria: `flutter test test/colony/factory` is green; the Steel Mill template's measured
 rate is within 5% of the Steel Mill's 2 ore → 1.5 steel + 0.4 tubes/s; a hand-tuned test
 layout beats the template (proving there's a reward to chase) but stays under the 1.5× cap;
 and no existing file is modified.
