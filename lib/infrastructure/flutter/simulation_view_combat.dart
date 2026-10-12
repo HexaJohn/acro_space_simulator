@@ -64,8 +64,15 @@ class _CombatViewState {
   /// The smoothed (drawn − raster) offset under the walker (Spike S item 3).
   double drawnOffset = 0;
 
-  /// Each live unit's ground as drawn, sampled once: units never move.
+  /// How far the drawn mesh stands off the battle's ground, by 4 m cell
+  /// (`e ~/ 4,n ~/ 4`): where a unit is drawn standing. Sampled a few new
+  /// cells a frame and forgotten every [unitGroundFrames], as the terrain
+  /// streams finer or coarser under the battle.
   final Map<String, double> unitGround = {};
+  int unitGroundSamples = 0;
+  int unitGroundAge = 0;
+  static const int unitGroundFrames = 120;
+  static const int unitGroundPerFrame = 12;
 
   /// The colony's flat local frame for the bubble: origin, east, north.
   int frameOp = -1;
@@ -904,6 +911,25 @@ extension _SimulationViewCombat on _SimulationViewState {
   Vector3 _liveBF(CitySim city, BattleRaster r, double radius, double e, double n, double h) =>
       city.localToBodyFixed(Vec2(e, n), bodyRadiusM: (r.radiusAt(e, n) ?? radius) + h);
 
+  /// Where the drawn mesh stands off the battle's ground at [e], [n], m: what
+  /// a unit is drawn standing on. The fight is on the raster; the eye sees
+  /// the mesh, and on a slope a coarse chunk is metres off the raster — found
+  /// playing it once the terrain was meshed at half the density, the squad
+  /// beside the player buried out of sight. Until its cell is sampled, the
+  /// offset under the player.
+  double _drawnOffsetAt(CitySim city, BattleRaster r, double radius, double e, double n) {
+    final st = _combatState;
+    final key = '${(e / 4).floor()},${(n / 4).floor()}';
+    final have = st.unitGround[key];
+    if (have != null) return have;
+    if (st.unitGroundSamples <= 0) return st.drawnOffset;
+    st.unitGroundSamples--;
+    final ground = r.radiusAt(e, n);
+    final drawn = SceneSync.drawnGround?.call(city.localToBodyFixed(Vec2(e, n), bodyRadiusM: radius).normalized);
+    final off = ground == null || drawn == null ? st.drawnOffset : (drawn - ground).clamp(-8.0, 8.0);
+    return st.unitGround[key] = off;
+  }
+
   /// Puts the walker at the LZ, on the battle's ground.
   void _standAtLz(Operation op, CitySim city, BattleRaster r, double radius) {
     final lz = op.graph.byId(op.lzId)!;
@@ -972,7 +998,7 @@ extension _SimulationViewCombat on _SimulationViewState {
       _craftCam = false;
       _perspectiveMode = true;
       _upMode = CameraUpMode.gravity;
-      _range = 120;
+      _range = 60;
       _view = _view.copyWith(elevation: 35 * math.pi / 180, roll: 0);
     });
   }
@@ -1177,14 +1203,19 @@ extension _SimulationViewCombat on _SimulationViewState {
       _standAtLz(op, city, r, body.radius);
     }
     final bodyId = city.body.id.value;
+    if (++st.unitGroundAge >= _CombatViewState.unitGroundFrames) {
+      st
+        ..unitGroundAge = 0
+        ..unitGround.clear();
+    }
+    st.unitGroundSamples = _CombatViewState.unitGroundPerFrame;
     CombatUnitState.units = [
       for (final u in live.units)
         CombatUnitMark(
           '${u.formationId}:${u.member}',
           bodyId,
-          // On the battle's ground (a far unit's drawn mesh is a coarser
-          // chunk than the one the offset was measured on).
-          _liveBF(city, r, body.radius, u.e, u.n, 0),
+          // On the ground as it is drawn under it.
+          _liveBF(city, r, body.radius, u.e, u.n, _drawnOffsetAt(city, r, body.radius, u.e, u.n)),
           attacker: u.side == CombatSide.attacker,
           emplacement: u.kind == FormationKind.emplacement,
           moving: (u.te - u.e).abs() + (u.tn - u.n).abs() > 0.3 || u.formationId == live.drivingFormation,
