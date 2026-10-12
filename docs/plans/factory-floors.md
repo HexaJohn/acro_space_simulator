@@ -193,6 +193,40 @@ through the existing `_carryRenamedLots` / `_dropLostLots` / `clearParcel`.
 Demolishing a plant that has a designed floor asks for confirmation first, since the floor is
 lost. Because only the player demolishes placed plants, that's the only path that loses a floor.
 
+**Ownership and money** (raised by the user, 2026-10-12: *"if they are private corps,
+they must still be able to make money and afford the labor, logistics, materials"*).
+
+*Today:* the treasury (`funds`) earns only worker tax, the Wealth Tax law and milestone
+grants. Buildings are paid in **ore**, workers get **no wages**, and goods have **no
+prices**. `Economy` (capitalism / freeMarket / socialism / communism) is just multipliers.
+Nothing is a firm, and nothing can go bankrupt.
+
+*Model (proposal):*
+- **Owner per plant**: `state` or `private(firmId)`. The default follows `Economy`:
+  communism = all state; socialism = state by default, private allowed; capitalism /
+  freeMarket = private by default, state allowed. Nationalise and privatise are site actions,
+  gated by economy type and possibly laws.
+- **The floor already measures cost.** The sim counts what a period of operation used:
+  worker-hours by role, energy, inputs consumed, item-metres hauled, equipment hours.
+  Pricing those counters gives a **unit cost** per output. A better layout really is cheaper
+  per unit, so the design reward and the money side are the same lever.
+- **Prices** *(proposal)*: each good has a base value from its recipe chain (raw value +
+  labour + energy), times a scarcity factor from the colony's days of cover. Imports
+  (Earth or other colonies) set a ceiling once trade exists.
+- **Private P&L per plant**: revenue = shipped units × price. Costs = inputs × price + wages
+  + power + logistics (a flat per-unit freight fee until trucks, then per truck trip) +
+  equipment upkeep and depreciation. Profit is taxed into `funds` (a new corporate tax line
+  in the Budget drawer). The existing Industrial Subsidy and Robot Tax laws act on it.
+- **When a firm struggles**: it cuts handlers first, then idles stations, then closes. A
+  closed plant is offered to the state (nationalise) or sold to a new firm. With cash and a
+  short payback, it automates instead: real firms buy forklifts when labour is dear.
+- **State plants** have no profit test; their P&L is shown for information. Whether their
+  running deficit is charged to `funds` is an open question (§7).
+
+This is a new economic layer, bigger than factories (it implies wages and prices
+colony-wide). It gets its **own phase after integration**, and probably its own short plan.
+Phase 1 only adds the cost counters, so it isn't blocked.
+
 ## 4. UI
 
 - `showCitySiteMenu` gets a **"Factory floor"** action, shown only for a placed plant
@@ -226,9 +260,12 @@ lost. Because only the player demolishes placed plants, that's the only path tha
 4. **Vehicles + automation tiers.** Load classes, pallet jacks, forklifts (aisles,
    charging), overhead crane bays, AGVs; station modes and maintenance; job demand into
    staffing; brownout slowdown; automation unlocked by milestone or research.
-5. **Aggregate mode + templates for every factory spec.** Off-screen steady-state rates,
+5. **Ownership + P&L.** Owner per plant, prices, wages, private P&L, corporate tax, firm
+   distress (layoffs → idle → close → nationalise/sell), and a state-plant deficit if chosen.
+   Needs answers to §7 Q8-Q11 first.
+6. **Aggregate mode + templates for every factory spec.** Off-screen steady-state rates,
    worker-isolate re-measure, perf check with ~30 factories.
-6. **Freight docks** *(after agent-traffic slice 8)*. Receiving only gets what trucks
+7. **Freight docks** *(after agent-traffic slice 8)*. Receiving only gets what trucks
    deliver, and shipping loads trucks. Dock count then becomes a real design limit.
 
 ## 6. Working in parallel
@@ -257,7 +294,23 @@ Defaults are marked *(default)* above. Each of these changes what gets built:
 
 2 and 3 were accepted at the defaults (discrete items; measured steady state off-screen),
 along with the inline numbers (2 m tile, 0.25 s step, 1.5× cap, ±5% template, 1 lane).
-**Nothing is open. Phase 1 is ready to build.**
+Phase 1 is not blocked by anything below.
+
+**Open: money** (blocks phase 5 only)
+
+8. **How far does money go?** *Rec:* **shadow prices first**. Firms keep a P&L at market
+   prices, and the only real money that moves is corporate tax into `funds` (plus subsidies
+   out). Consumers don't pay, and today's treasury tuning survives. Full circulation
+   (households and state buildings buy goods, wages are spent) is a later, separate
+   economy plan.
+9. **Who designs a private plant?** *Rec:* the player can design any floor, but a private
+   firm only builds the parts it can afford with a payback under ~5 game-years. Anything
+   beyond that needs a subsidy or a state contract. A state plant builds whatever the
+   treasury (ore) covers.
+10. **State plant losses:** charged to `funds` as an "industry deficit" line (rec, so state
+    ownership has a real cost), or free as today?
+11. **Failure:** close → nationalise/sell offer (rec), or let a bankrupt plant sit derelict
+    until the player acts?
 
 ## 8. Phase 1 spec
 
@@ -275,6 +328,9 @@ Files (all new, license header on each):
   but the kind enum is shaped for jack/forklift/crane/AGV), `Dispatcher`, and grid A*.
 - `factory/factory_floor.dart`: `FactoryFloor` (grid + entities + `step(dt)` +
   counters `inPerS` / `outPerS`), and `toJson` / `fromJson`.
+- `factory/factory_ledger.dart`: per-period cost counters (worker-hours by role,
+  energy, inputs consumed, item-metres hauled, equipment hours, outputs shipped). No
+  prices; phase 5 multiplies by them.
 - `factory/factory_templates.dart`: `factoryTemplateFor(CityBuildingSpec)`, Steel Mill
   only; null for everything else, including all zoned specs.
 - `test/colony/factory/`: one test file per behaviour listed in phase 1, plus: a truck
