@@ -80,10 +80,23 @@ and is deterministic.
 press, assembler, chem, packer). The chain is raw → intermediate → product → **packaged
 crate**. Only crates leave through shipping.
 
-**Intermediates stay inside the floor** *(default)*: plates, wire, circuits, frames and so
-on are factory-only item ids, not `Commodity`. The colony stock stays clean. The only new
-colony-facing items are the products already in `commodity.dart` (steel, electronics,
-rocketParts, guns, ammo, rations, missiles) plus the reserved `goods`.
+**Intermediates are real goods, made in place or shipped** (user decision, 2026-10-12).
+Plates, wire, circuits, frames and the like can be made inside the plant that uses them, *or*
+shipped out and received elsewhere, whichever makes more sense for the layout.
+- Any item can go out through a shipping dock (packed as a crate or pallet), and any item
+  can be accepted at a receiving dock. So a plant can specialise: a plate line ships plates,
+  and another plant receives plates and skips smelting.
+- Destination: a **warehouse or shipping hub** (`warehouse`, `freightyard`, the
+  `goodsStoreTypes` set). Until agent-traffic slice 8 that's the colony `stock`, teleport
+  style like every other good. After slice 8, trucks haul them.
+- Intermediates join `commodity.dart`'s existing **COMPONENTS** section, so the stock UI
+  groups them and `stockCap` / warehouse `storageBonus` bound them like everything else.
+  A new intermediate only appears in the stock list once something has made it.
+- Phase 1 defines intermediates in `factory_item.dart` with commodity-style string ids.
+  They are registered into `commodity.dart` in phase 3 (integration), which keeps phase 1
+  to zero edits of existing files.
+- Reward cap with cross-plant flows: the 1.5× is measured per plant against its template
+  on **raw-input-equivalent** value, so splitting a chain across plants can't stack caps.
 
 **Stations: manned vs automated.** Each machine has a mode:
 - *Manual*: needs N workers, no extra power, slow.
@@ -231,16 +244,20 @@ Defaults are marked *(default)* above. Each of these changes what gets built:
 
 1. ~~Which buildings get floors?~~ **Decided:** player-placed plants only, never zoned.
    Engagement is optional and rewarded.
-2. **Discrete items on belts vs flow rates?** *Rec:* discrete. It is the Factorio feel,
-   and it's cheap at this grid size.
-3. **Off-screen fidelity:** measured steady state (rec) vs always-full sim.
+2. ~~Discrete vs flow?~~ **Decided:** discrete items.
+3. ~~Off-screen fidelity?~~ **Decided:** measured steady state.
 4. ~~Workers: abstract slots vs visible?~~ **Decided:** workers are simulated handlers who
    move freight on foot or with jacks, forklifts and cranes. Full automation is a rare,
    expensive upgrade.
 5. ~~Grid size?~~ **Decided:** real scale (2 m tiles, sparse), hall sized within the site
    envelope, and floors can be designed as blueprints before the plant is built.
 6. ~~Is design ever required?~~ **Decided:** never (see 1).
-7. **Intermediates internal-only** (rec) vs new colony commodities you can stockpile/trade.
+7. ~~Intermediates?~~ **Decided:** made in place or shipped to a warehouse / shipping hub
+   and received by other plants; they're COMPONENTS-section commodities.
+
+2 and 3 were accepted at the defaults (discrete items; measured steady state off-screen),
+along with the inline numbers (2 m tile, 0.25 s step, 1.5× cap, ±5% template, 1 lane).
+**Nothing is open. Phase 1 is ready to build.**
 
 ## 8. Phase 1 spec
 
@@ -262,7 +279,8 @@ Files (all new, license header on each):
   only; null for everything else, including all zoned specs.
 - `test/colony/factory/`: one test file per behaviour listed in phase 1, plus: a truck
   load is unloaded by workers into staging, belts block pathing except at crossings, and
-  dispatch is deterministic.
+  dispatch is deterministic, and a plate-only floor ships plates that a second floor
+  receives and turns into steel (cross-plant intermediates).
 
 Exit criteria: `flutter test test/colony/factory` is green; the Steel Mill template's measured
 rate is within 5% of the Steel Mill's 2 ore → 1.5 steel + 0.4 tubes/s; a hand-tuned test
