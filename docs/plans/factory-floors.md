@@ -54,9 +54,19 @@ New package `lib/domain/colony/city/factory/`. It is pure Dart with no Flutter a
 and is deterministic.
 
 **`FactoryFloor`**, one per site id, created when the floor is first opened or by template.
-- Grid of `w × h` tiles, set per spec, not by metres *(default)*: small plants
-  (rations, electronics) 24×18, mid (steelmill, refinery, arms) 36×27, big
-  (rocket parts, missiles) 48×36.
+- **Grid is to real scale** (user decision, 2026-10-12). Tiles are 2 m *(default)*: a pallet
+  is ~1.2 m, so a forklift aisle is 2 tiles (4 m) and a person is 1 tile. The **hall** is
+  the building's rectangle inside the site: by default the site envelope minus the yard
+  (`site_access` `SiteEnvelope` / `fitFootprint`). The player can resize the hall walls within the
+  envelope, and **build cost scales with hall area**, so a compact layout pays.
+  - Scale check: a 200×150 m hall = 100×75 = 7.5k tiles. The whole 1100×800 m steel mill
+    site would be 220k tiles, so the grid is stored **sparse** (only occupied tiles), and
+    belts and machines tick only where they exist.
+  - Pathing at this size: handlers use a coarse aisle/nav graph plus cached flow fields
+    per busy target, not raw per-trip A*.
+  - Specs without real site sizes (electronics, rocket parts, arms, missile and rations
+    factories default to 24 m × footprint) need realistic `siteWidthM/siteDepthM` added in
+    `city_building_spec.dart`. That file isn't one the other agent is in.
 - Dock edges: receiving and shipping strips on the walls, oriented from the site's yard.
 - Entities on the grid:
   - **Machine**: footprint, rotation, recipe, crafting timer, input and output buffers,
@@ -151,6 +161,19 @@ The cap stops one perfect floor from breaking the colony economy.
 spec's current flat rate (±5%). That's the regression test, and it gives new players a
 floor that already works. "Reset to template" is always available.
 
+**Design before building** (user decision, 2026-10-12). A floor design is a
+**`FloorBlueprint`**: a hall size plus entity layout, with no site attached. It can be made:
+- from the build menu, before placing (pick the plant, then "Design floor"), with the hall
+  bounds taken from that spec's default site;
+- by saving a live floor ("Save as blueprint") into a per-colony blueprint library;
+- by starting from the template (every template is just a built-in blueprint).
+
+When the plant is placed, the player picks a blueprint (default: the template), and it is
+stamped onto the site's envelope. If it doesn't fit (a smaller lot), the placement preview
+shows that before the click. Today placed plants appear instantly. A real construction phase
+(floor contents build over time, at a cost scaled by area + machines + vehicles) is a
+natural follow-on but touches `city_sim.dart`, so it belongs to phase 3 or later.
+
 **Persistence.** `'factories': ?factoryFloors.toJson()` on `CitySim`, keyed by site id.
 It is omitted when empty, following the `war` / `trails` pattern. Lot rename and drop go
 through the existing `_carryRenamedLots` / `_dropLostLots` / `clearParcel`.
@@ -177,11 +200,12 @@ lost. Because only the player demolishes placed plants, that's the only path tha
 ## 5. Phases
 
 1. **Floor core (headless).** Grid, belts, arms, machines, docks, recipes, tick,
-   toJson, plus **workers on foot**: move requests, dispatcher, grid pathing. (Without
+   toJson, `FloorBlueprint` + stamp-to-site, sparse 2 m grid, plus **workers on foot**: move requests, dispatcher, grid pathing. (Without
    them the docks can't unload.) One template (Steel Mill: ore → steel + tubes crates). Tests: belt
    transport, arm handoff, machine starve/block, template throughput = spec rate,
    determinism, save round-trip. **Zero edits to existing files.**
-2. **Editor screen.** `FactoryFloorScreen` + site-menu entry + overlays. A sandbox floor fed
+2. **Editor screen.** `FactoryFloorScreen` + site-menu entry + overlays + blueprint
+   library and "Design floor" from the build menu (pre-placement). A sandbox floor fed
    by an infinite receiving dock, so it is playable before integration. Real-input playtest.
 3. **Colony integration.** One small commit into `city_sim.dart`: field, rename/drop/clear
    hooks, save key, one call in `advance`, flat-rate bypass. Coordinate timing with
@@ -213,17 +237,18 @@ Defaults are marked *(default)* above. Each of these changes what gets built:
 4. ~~Workers: abstract slots vs visible?~~ **Decided:** workers are simulated handlers who
    move freight on foot or with jacks, forklifts and cranes. Full automation is a rare,
    expensive upgrade.
-5. **Grid size:** fixed per tier (rec) vs scaled to real site metres (a 900 m refinery would
-   be enormous).
-6. **Is design ever required?** *Rec:* never. A templated floor matches today's output, and
-   a designed one can beat it (and the upside is the reason to bother).
+5. ~~Grid size?~~ **Decided:** real scale (2 m tiles, sparse), hall sized within the site
+   envelope, and floors can be designed as blueprints before the plant is built.
+6. ~~Is design ever required?~~ **Decided:** never (see 1).
 7. **Intermediates internal-only** (rec) vs new colony commodities you can stockpile/trade.
 
 ## 8. Phase 1 spec
 
 Files (all new, license header on each):
-- `factory/factory_grid.dart`: `TilePos`, `Dir4`, occupancy map, footprint place/remove
-  with collision.
+- `factory/factory_grid.dart`: `TilePos`, `Dir4`, sparse occupancy map (2 m tiles),
+  footprint place/remove with collision, hall bounds.
+- `factory/floor_blueprint.dart`: `FloorBlueprint` (hall size + layout, no site),
+  `fitsEnvelope`, `stampOnto(site)`; the toJson the library will use.
 - `factory/factory_item.dart`: item ids (internal intermediates + crate kinds), map
   to `Commodity` for dock in/out.
 - `factory/factory_recipe.dart`: `FactoryRecipe`, `StationKind`, const recipe table
