@@ -261,6 +261,12 @@ extension _SimulationViewCombat on _SimulationViewState {
       if (at == null) continue;
       marks.add(MissileMark(at, cam.radiusPx(world - focus, strikeCepM(kSiloSlantM)),
           'Missile salvo · impact in ${math.max(0, (m.impactEpochS - now)).round()} s'));
+      // The salvo itself: 9 m of missile is a speck from a colony away.
+      final v = snap.vessels[m.vesselId];
+      if (v != null) {
+        final vs = project(centre + Vector3(v.px, v.py, v.pz));
+        if (vs != null) marks.add(MissileMark(vs, 7, 'Salvo', craft: true));
+      }
     }
     final pv = _missilePreview();
     final plan = pv?.plan;

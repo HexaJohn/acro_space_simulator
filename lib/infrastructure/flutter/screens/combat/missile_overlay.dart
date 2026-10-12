@@ -15,13 +15,16 @@ import '../app_theme.dart';
 
 /// One impact point as drawn.
 class MissileMark {
-  const MissileMark(this.at, this.radiusPx, this.label, {this.preview = false});
+  const MissileMark(this.at, this.radiusPx, this.label, {this.preview = false, this.craft = false});
   final Offset at;
   final double radiusPx;
   final String label;
 
   /// Aimed, not yet launched.
   final bool preview;
+
+  /// The salvo in the air, not where it lands: a pip, not a ring.
+  final bool craft;
 }
 
 class MissileOverlayPainter extends CustomPainter {
@@ -47,6 +50,29 @@ class MissileOverlayPainter extends CustomPainter {
             ..color = AppTheme.warn.withValues(alpha: 0.85));
     }
     for (final m in marks) {
+      if (m.craft) {
+        canvas
+          ..drawCircle(m.at, m.radiusPx, Paint()..color = AppTheme.warn)
+          ..drawCircle(
+              m.at,
+              m.radiusPx + 3,
+              Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1.5
+                ..color = AppTheme.danger);
+        final t = TextPainter(
+          textDirection: TextDirection.ltr,
+          text: TextSpan(
+              text: m.label,
+              style: const TextStyle(
+                  color: AppTheme.warn,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  shadows: [Shadow(color: Color(0xCC000000), blurRadius: 3)])),
+        )..layout();
+        t.paint(canvas, m.at + Offset(m.radiusPx + 6, -t.height / 2));
+        continue;
+      }
       final c = m.preview ? AppTheme.warn : AppTheme.danger;
       final r = m.radiusPx.clamp(8.0, 400.0);
       canvas.drawCircle(m.at, r, Paint()..color = c.withValues(alpha: 0.12));

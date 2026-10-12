@@ -188,7 +188,10 @@ class LineNodes {
       // stray arcs: draw a path only when it's OURS (the focused vessel or
       // one orbiting the focused body) or the camera is zoomed out to the
       // path's own scale.
+      // A silo salvo's arc is the point of it (combat.md §7O), at any
+      // range: from a colony 2 km away the zoom-out rule asked for 40.
       final pathRelevant = v.id == focusVesselId ||
+          v.id.startsWith('missile-') ||
           (v.body == focusBodyId && focusBodyId != null) ||
           camera == null ||
           camera.eyeOffset.length > 0.05 * math.max(v.semiMajor, 1.0);
