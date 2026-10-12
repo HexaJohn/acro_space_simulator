@@ -13,7 +13,13 @@ and draw power. Others are manned and need workers from the colony's labour pool
 The layout is the player's, and a good layout is measurably faster than a bad one.
 
 The colony map stays a city builder. The floor is a zoom-in you can ignore: every factory
-ships with a working default layout, so nobody *has* to design one.
+ships with a working default layout, so nobody *has* to design one. **Players who do engage
+are rewarded**: a designed floor can beat the template on output, jobs or power (§3 Reward).
+
+**Only player-placed buildings get floors** (user decision, 2026-10-12). Zoned industry
+grows, levels up and is torn down without the player's say, so a hand-built floor there
+could vanish under them. Placed plants are permanent, deliberate and have a clear job
+("make steel"), so they're worth designing.
 
 ## 2. Today (from the code)
 
@@ -32,9 +38,11 @@ ships with a working default layout, so nobody *has* to design one.
   `goods` commodity are agent-traffic slice 8 (`docs/plans/agent-traffic.md`).
 - **Automation** = the `infiniteRobotics` endgame bool + `Law.robotTax`. `TechTree` in
   `lib/domain/science/` is not wired to the city.
-- **Candidates:** zoned `i-low/med/high` (ore → steel), and utility refinery, steelmill,
-  electronics, rocketfactory, VAB, gun/missile/rations factories, greenhousefactory
-  (`kUtilCatalog` ~386-488).
+- **Candidates:** placed utility plants only: refinery, steelmill, electronics,
+  rocketfactory, gun/missile/rations factories (`kUtilCatalog` ~386-446), later VAB and
+  greenhousefactory. Zoned `i-low/med/high` are out (user decision). Mine/Quarry are pits
+  with no processing, so they're out too. Placed buildings live in `parcelBuildings`
+  (`placeOnParcel` ~5136) or `utils` (grid), and only the player removes them.
 - **Reusable pieces:** `forward_base.dart` / `base_modules.dart` (modules with crew,
   power share and work queue, toJson per module). `site_access` `SiteProgram.yard` already
   places a truck apron and loading bays on industrial lots, which tells us which wall the
@@ -46,8 +54,9 @@ New package `lib/domain/colony/city/factory/`. It is pure Dart with no Flutter a
 and is deterministic.
 
 **`FactoryFloor`**, one per site id, created when the floor is first opened or by template.
-- Grid of `w × h` tiles. Size is set by tier, not metres *(default)*: workshop 16×12,
-  factory 32×24, heavy / utility plant 48×36.
+- Grid of `w × h` tiles, set per spec, not by metres *(default)*: small plants
+  (rations, electronics) 24×18, mid (steelmill, refinery, arms) 36×27, big
+  (rocket parts, missiles) 48×36.
 - Dock edges: receiving and shipping strips on the walls, oriented from the site's yard.
 - Entities on the grid:
   - **Machine**: footprint, rotation, recipe, crafting timer, input and output buffers,
@@ -96,6 +105,15 @@ minutes of detailed running, and re-measured after any edit (run ~5 min of sim h
 on a worker isolate). That is the same answer Factorio's production stats would show, and
 it costs nothing per frame.
 
+**Reward (why engage).** The template is deliberately "fine, not great". Levers a
+designer can pull, all bounded:
+- *Throughput*: better ratios and fewer starved machines raise output above the template,
+  up to the receiving docks' throughput and the plant's power budget.
+- *Labour*: automating stations frees workers for the rest of the colony.
+- *Efficiency*: byproduct loops (slag → tubes and the like) mean less raw input per product.
+Target: a good design gets ~1.5× template output, or the same output at half the jobs.
+The cap stops one perfect floor from breaking the colony economy.
+
 **Templates.** Every factory spec ships a default layout whose measured rate equals the
 spec's current flat rate (±5%). That's the regression test, and it gives new players a
 floor that already works. "Reset to template" is always available.
@@ -103,11 +121,14 @@ floor that already works. "Reset to template" is always available.
 **Persistence.** `'factories': ?factoryFloors.toJson()` on `CitySim`, keyed by site id.
 It is omitted when empty, following the `war` / `trails` pattern. Lot rename and drop go
 through the existing `_carryRenamedLots` / `_dropLostLots` / `clearParcel`.
+Demolishing a plant that has a designed floor asks for confirmation first, since the floor is
+lost. Because only the player demolishes placed plants, that's the only path that loses a floor.
 
 ## 4. UI
 
-- `showCitySiteMenu` gets a **"Factory floor"** action, shown when the spec is industrial
-  (`TrafficRole.isIndustry` or a utility factory).
+- `showCitySiteMenu` gets a **"Factory floor"** action, shown only for a placed plant
+  whose spec has a factory template (`factoryTemplateFor(spec) != null`, so zoned lots never
+  qualify).
 - `FactoryFloorScreen` is a 2D top-down grid editor (CustomPainter): a palette (machines,
   belts, arms, chests), place / rotate (R) / delete, drag-to-lay belts, and recipe pick on a
   machine.
@@ -119,7 +140,7 @@ through the existing `_carryRenamedLots` / `_dropLostLots` / `clearParcel`.
 ## 5. Phases
 
 1. **Floor core (headless).** Grid, belts, arms, machines, docks, recipes, tick,
-   toJson. One template (`i-low` workshop: ore → steel crates). Tests: belt
+   toJson. One template (Steel Mill: ore → steel + tubes crates). Tests: belt
    transport, arm handoff, machine starve/block, template throughput = spec rate,
    determinism, save round-trip. **Zero edits to existing files.**
 2. **Editor screen.** `FactoryFloorScreen` + site-menu entry + overlays. A sandbox floor fed
@@ -145,9 +166,8 @@ kept to one reviewable commit. Phase 6 waits on agent traffic and is owned joint
 
 Defaults are marked *(default)* above. Each of these changes what gets built:
 
-1. **Which buildings get floors?** *Rec:* all `ind` zoned tiers + utility factories
-   (refinery, steelmill, electronics, rocket/gun/missile/rations factories). The VAB and
-   greenhouse come later.
+1. ~~Which buildings get floors?~~ **Decided:** player-placed plants only, never zoned.
+   Engagement is optional and rewarded.
 2. **Discrete items on belts vs flow rates?** *Rec:* discrete. It is the Factorio feel,
    and it's cheap at this grid size.
 3. **Off-screen fidelity:** measured steady state (rec) vs always-full sim.
@@ -167,12 +187,15 @@ Files (all new, license header on each):
 - `factory/factory_item.dart`: item ids (internal intermediates + crate kinds), map
   to `Commodity` for dock in/out.
 - `factory/factory_recipe.dart`: `FactoryRecipe`, `StationKind`, const recipe table
-  (ore→iron plate, plate→steel, steel→crate).
+  (ore→iron, iron→steel, iron + slag→tubes, product→crate).
 - `factory/factory_entities.dart`: `Machine`, `Belt`, `Arm`, `Chest`, `DockPort`.
 - `factory/factory_floor.dart`: `FactoryFloor` (grid + entities + `step(dt)` +
   counters `inPerS` / `outPerS`), and `toJson` / `fromJson`.
-- `factory/factory_templates.dart`: `templateFor(CityBuildingSpec)`, workshop only.
+- `factory/factory_templates.dart`: `factoryTemplateFor(CityBuildingSpec)`, Steel Mill
+  only; null for everything else, including all zoned specs.
 - `test/colony/factory/`: one test file per behaviour listed in phase 1.
 
 Exit criteria: `flutter test test/colony/factory` is green; the workshop template's measured
-rate is within 5% of `i-low`'s 0.3 ore → 0.2 steel/s; and no existing file is modified.
+rate is within 5% of the Steel Mill's 2 ore → 1.5 steel + 0.4 tubes/s; a hand-tuned test
+layout beats the template (proving there's a reward to chase) but stays under the 1.5× cap;
+and no existing file is modified.
