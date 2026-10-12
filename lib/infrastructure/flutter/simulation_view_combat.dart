@@ -2972,8 +2972,9 @@ extension _SimulationViewCombat on _SimulationViewState {
       ..infiniteRobotics = true
       ..infiniteRes = true
       ..pinPopulation = true
-      // Through the lunar night too: its solar farm makes nothing then, and
-      // its barracks stopped (found playing it).
+      // Through the lunar night too, and with the silo's compute: a starter
+      // kit has no data centre, and a silo's 2 of compute it cannot supply
+      // throttled every building in the town to nothing (found playing it).
       ..infinitePower = true;
     src.stock[Commodity.rations] = 400;
     src.stock[Commodity.guns] = 80;

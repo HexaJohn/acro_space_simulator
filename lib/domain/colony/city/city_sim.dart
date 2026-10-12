@@ -562,7 +562,7 @@ class CitySim {
   bool infiniteDemand = false; // DEBUG: RCI demand pinned to max (zones keep growing)
   bool infiniteRobotics = false; // DEBUG/endgame: buildings need no workers (full staffing)
   bool pinPopulation = false; // DEBUG: nobody migrates in or out (a fixture's people stay put)
-  bool infinitePower = false; // DEBUG: every building powered, day or night
+  bool infinitePower = false; // DEBUG: every building powered and computed, day or night
   bool ignoreUnlocks = false; // DEBUG: build anything regardless of population gate
 
   String? landerPad; // spaceport SITE the lander is parked on (occupied), or null
@@ -1422,8 +1422,9 @@ class CitySim {
     }
     housing += landerCrew;
     final powerRatio = powerDraw <= 0 ? 1.0 : (powerOut / powerDraw).clamp(0.0, 1.0);
-    final computeRatio =
-        computeDemand <= 0 ? 1.0 : (computeSupply / computeDemand).clamp(0.0, 1.0);
+    final computeRatio = infinitePower || computeDemand <= 0
+        ? 1.0
+        : (computeSupply / computeDemand).clamp(0.0, 1.0);
     // Troopers away at war are residents, but they work no job here.
     final workforce = math.min(math.max(0, population.floor() - troopersAway), jobs);
     // Staffing: a building runs at full only if the city has the workers. Global
