@@ -280,7 +280,7 @@ Phase 1 only adds the cost counters, so it isn't blocked.
    staffing; brownout slowdown; automation unlocked by milestone or research.
 5. **Ownership + P&L.** Owner per plant, prices, wages, private P&L, corporate tax, firm
    distress (layoffs → idle → close → nationalise/sell), and a state-plant deficit if chosen.
-   Needs answers to §7 Q8-Q11 first.
+   Follows the economy plan.
 6. **Aggregate mode + templates for every factory spec.** Off-screen steady-state rates,
    worker-isolate re-measure, perf check with ~30 factories.
 7. **Freight docks** *(after agent-traffic slice 8)*. Receiving only gets what trucks
@@ -314,21 +314,20 @@ Defaults are marked *(default)* above. Each of these changes what gets built:
 along with the inline numbers (2 m tile, 0.25 s step, 1.5× cap, ±5% template, 1 lane).
 Phase 1 is not blocked by anything below.
 
-**Open: money** (blocks phase 5 only)
+**Money** (decided 2026-10-12, all at the recommendations)
 
-8. **How far does money go?** *Rec:* **shadow prices first**. Firms keep a P&L at market
-   prices, and the only real money that moves is corporate tax into `funds` (plus subsidies
-   out). Consumers don't pay, and today's treasury tuning survives. Full circulation
-   (households and state buildings buy goods, wages are spent) is a later, separate
-   economy plan.
-9. **Who designs a private plant?** *Rec:* the player can design any floor, but a private
-   firm only builds the parts it can afford with a payback under ~5 game-years. Anything
-   beyond that needs a subsidy or a state contract. A state plant builds whatever the
-   treasury (ore) covers.
-10. **State plant losses:** charged to `funds` as an "industry deficit" line (rec, so state
-    ownership has a real cost), or free as today?
-11. **Failure:** close → nationalise/sell offer (rec), or let a bankrupt plant sit derelict
-    until the player acts?
+8. ~~How far does money go?~~ **Shadow prices first.** Firms keep a P&L at local market
+   prices. The only real money that moves is corporate tax into `funds` and subsidies out.
+   Full circulation is a separate, later economy plan.
+9. ~~Who designs a private plant?~~ **The player designs any floor.** A private firm builds
+   only the parts with a payback under ~5 game-years. The rest needs a subsidy or a state
+   contract. A state plant builds whatever the treasury (ore) covers.
+10. ~~State plant losses?~~ **Charged to `funds`** as an "industry deficit" Budget line.
+11. ~~Failure?~~ Layoffs → idle stations → **close**, then an offer to nationalise or sell
+    to a new firm.
+
+Nothing is open. Phase 1 is ready. The economy plan (pricing, wages, transport,
+`kgPerUnit`) is written before phase 5.
 
 ## 8. Phase 1 spec
 
