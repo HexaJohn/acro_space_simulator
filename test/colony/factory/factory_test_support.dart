@@ -102,7 +102,9 @@ class CappedGivePort implements FactoryColonyPort {
 
 /// Commodity units the floor can't account for, by commodity (empty when it
 /// conserves): items held anywhere on it − what crafts made + shipped −
-/// received. Every edit and every sub-step must keep this empty.
+/// received, less the units booked ahead of their item (a part-paid item
+/// still on the floor, or paid for and not yet on it). Every edit and every
+/// sub-step must keep this empty.
 Map<String, double> conservationError(FactoryFloor f) {
   final net = <String, double>{};
   void add(String item, double n) {
@@ -114,6 +116,8 @@ Map<String, double> conservationError(FactoryFloor f) {
   f.craftNet.forEach((k, v) => add(k, -v.toDouble()));
   f.ledger.shipped.forEach((c, u) => net[c] = (net[c] ?? 0) + u);
   f.ledger.received.forEach((c, u) => net[c] = (net[c] ?? 0) - u);
+  f.shippedAhead.forEach((c, u) => net[c] = (net[c] ?? 0) - u);
+  f.receivedAhead.forEach((c, u) => net[c] = (net[c] ?? 0) + u);
   net.removeWhere((_, v) => v.abs() < 1e-6);
   return net;
 }

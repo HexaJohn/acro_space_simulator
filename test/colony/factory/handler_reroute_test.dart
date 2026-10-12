@@ -64,6 +64,16 @@ void main() {
     final port = InfiniteColonyPort();
     stepUntilCarrying(f, port);
     wallInPacker(f);
+    final carried = f.handlers.single.carryingCount;
+    expect(carried, greaterThan(0));
+    // One sub-step: he finds himself walled off and picks a new target.
+    f.step(0.25, port);
+    final h = f.handlers.single;
+    expect(h.state, HandlerState.carrying,
+        reason: 're-targeted, not set down');
+    expect(handlerJobs(f)[h.id]!.$2[3], chest,
+        reason: 'the chest is the one store he can reach with room');
+    expect(f.floorPiles, isEmpty);
     final storedBefore = f.contentsOf(chest)['steel'] ?? 0;
     for (var i = 0; i < 4 * 30; i++) {
       f.step(0.25, port);
@@ -71,8 +81,10 @@ void main() {
     }
     expect(f.handlers.single.state, isNot(HandlerState.carrying),
         reason: 'not stuck holding it forever');
-    expect(f.contentsOf(chest)['steel'] ?? 0, greaterThan(storedBefore - 1),
-        reason: 'the load went back into the chest');
+    expect(f.floorPiles, isEmpty, reason: 'nothing was set down');
+    expect(f.contentsOf(chest)['steel'] ?? 0,
+        greaterThanOrEqualTo(storedBefore + carried),
+        reason: 'the whole load went into the chest');
     expect(conservationError(f), isEmpty);
   });
 

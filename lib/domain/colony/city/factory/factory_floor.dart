@@ -194,6 +194,8 @@ class FactoryFloor implements FactorySim {
       f._piles[_pileId(pile.at)] = pile;
     }
     m(j['cx']).forEach((k, v) => f._craftNet[k] = (v as num).toInt());
+    m(j['pp']).forEach((k, v) => f._prepaid[k] = (v as num).toDouble());
+    m(j['ow']).forEach((k, v) => f._owed[k] = (v as num).toDouble());
     return f;
   }
 
@@ -221,6 +223,20 @@ class FactoryFloor implements FactorySim {
 
   /// Items crafts made minus items they used up, by item id (sorted).
   final SplayTreeMap<String, int> _craftNet = SplayTreeMap();
+
+  /// Commodity units already given to the colony (booked in
+  /// `ledger.shipped`) for an item that is still on the floor: a removed
+  /// shipping dock's part-paid front item. The next shipment of that
+  /// commodity uses this credit up before asking the colony again, so the
+  /// colony never gets the same units twice. Saved under 'pp'.
+  final SplayTreeMap<String, double> _prepaid = SplayTreeMap();
+
+  /// Commodity units already taken from the colony (booked in
+  /// `ledger.received`) for an item not yet on the floor: a removed
+  /// receiving dock's part-paid item. The next receipt of that commodity
+  /// uses this credit up before taking from the colony again. Saved under
+  /// 'ow'.
+  final SplayTreeMap<String, double> _owed = SplayTreeMap();
 
   /// In id order.
   final List<FloorHandler> _handlers = [];
@@ -371,6 +387,53 @@ class FactoryFloor implements FactorySim {
   /// built (a running craft's inputs are still [itemsOnFloor], not here).
   Map<String, int> get craftNet => {..._craftNet};
 
+  /// Commodity units booked in `ledger.shipped` for items still on the
+  /// floor, by commodity: shipping docks' part-paid front items plus the
+  /// prepaid credit removed docks left behind. Conservation reads
+  /// held + shipped − [shippedAhead] − received + [receivedAhead] − craftNet.
+  Map<String, double> get shippedAhead {
+    final out = SplayTreeMap<String, double>.of(_prepaid);
+    for (final p in _shipList) {
+      final s = _ship[p.id];
+      if (s == null || s.paid <= 0 || s.queue.isEmpty) continue;
+      final c = FactoryItems.byId(s.queue.first)?.commodity;
+      if (c != null) out[c] = (out[c] ?? 0) + s.paid;
+    }
+    out.removeWhere((_, v) => v <= 0);
+    return out;
+  }
+
+  /// Commodity units booked in `ledger.received` for items not yet on the
+  /// floor, by commodity: receiving docks' part-paid items plus the credit
+  /// removed docks left behind (see [shippedAhead]).
+  Map<String, double> get receivedAhead {
+    final out = SplayTreeMap<String, double>.of(_owed);
+    for (final p in _recvList) {
+      final s = _recv[p.id];
+      final item = p.item;
+      if (s == null || s.paid <= 0 || item == null) continue;
+      final c = FactoryItems.byId(item)?.commodity;
+      if (c != null) out[c] = (out[c] ?? 0) + s.paid;
+    }
+    out.removeWhere((_, v) => v <= 0);
+    return out;
+  }
+
+  /// Uses up to [need] units of [credit]'s [commodity], returning how many.
+  static double _useCredit(
+      SplayTreeMap<String, double> credit, String commodity, double need) {
+    final have = credit[commodity] ?? 0;
+    if (have <= 0 || need <= 0) return 0;
+    final use = have < need ? have : need;
+    final left = have - use;
+    if (left > _eps) {
+      credit[commodity] = left;
+    } else {
+      credit.remove(commodity);
+    }
+    return use;
+  }
+
   /// Goods set down on the open floor, by tile (row-major order).
   Map<TilePos, Map<String, int>> get floorPiles {
     final ps = _piles.values.toList()
@@ -465,6 +528,8 @@ class FactoryFloor implements FactorySim {
       if (_queue.isNotEmpty) 'q': [for (final r in _queue) r.toJson()],
       if (_piles.isNotEmpty) 'pl': [for (final p in _piles.values) p.toJson()],
       if (_craftNet.isNotEmpty) 'cx': {..._craftNet},
+      if (_prepaid.isNotEmpty) 'pp': {..._prepaid},
+      if (_owed.isNotEmpty) 'ow': {..._owed},
       'led': _ledger.toJson(),
     };
   }
@@ -527,6 +592,8 @@ class FactoryFloor implements FactorySim {
       final front = _frontOf(p);
       // Never take from the colony what can't be set down.
       if (!_depositTile(front, def.id, commit: false)) continue;
+      // Units a removed receiving dock already took count first.
+      s.paid += _useCredit(_owed, def.commodity, def.commodityUnits - s.paid);
       final need = def.commodityUnits - s.paid;
       if (need > _eps) {
         var got = port.take(def.commodity, need);
@@ -557,8 +624,11 @@ class FactoryFloor implements FactorySim {
           s.paid = 0;
           continue;
         }
+        // Units a removed shipping dock already gave count first.
+        s.paid +=
+            _useCredit(_prepaid, def.commodity, def.commodityUnits - s.paid);
         final need = def.commodityUnits - s.paid;
-        var got = port.give(def.commodity, need);
+        var got = need > _eps ? port.give(def.commodity, need) : 0.0;
         if (got.isNaN || got < 0) got = 0;
         if (got > need) got = need;
         if (got > 0) {
@@ -1380,7 +1450,8 @@ class FactoryFloor implements FactorySim {
   /// (a running craft's inputs handed back — the craft never finished),
   /// belt items, an arm's swing, a store, a shipping queue. Units a dock
   /// already took from or gave to the colony for a part-paid item stay
-  /// booked in the ledger.
+  /// booked in the ledger and become floor credit ([_prepaid] / [_owed])
+  /// the next dock of that commodity uses up first.
   ItemBag _evict(Placement p) {
     final bag = ItemBag();
     void addBag(ItemBag b) {
@@ -1421,11 +1492,22 @@ class FactoryFloor implements FactorySim {
     }
     final sd = _ship[p.id];
     if (sd != null) {
+      final c = sd.queue.isEmpty
+          ? null
+          : FactoryItems.byId(sd.queue.first)?.commodity;
+      if (c != null && sd.paid > 0) _prepaid[c] = (_prepaid[c] ?? 0) + sd.paid;
       for (final i in sd.queue) {
         bag.add(i, 1);
       }
       sd.queue.clear();
       sd.paid = 0;
+    }
+    final rd = _recv[p.id];
+    final ri = p.item;
+    if (rd != null && ri != null && rd.paid > 0) {
+      final c = FactoryItems.byId(ri)?.commodity;
+      if (c != null) _owed[c] = (_owed[c] ?? 0) + rd.paid;
+      rd.paid = 0;
     }
     return bag;
   }

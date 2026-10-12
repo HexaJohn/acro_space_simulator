@@ -54,6 +54,122 @@ void main() {
     expect(conservationError(f), isEmpty);
   });
 
+  test('removing the target of a load in hand re-targets it to a store', () {
+    final l = Lay();
+    l.add(EntityKind.receivingDock, 0, 0, item: 'steel');
+    final chest = l.add(EntityKind.chest, 2, 0);
+    final packer = l.add(EntityKind.machine, 9, 2,
+        recipe: SteelRecipes.packSteel.id, mode: MachineMode.manual);
+    final f = FactoryFloor.fromBlueprint(l.blueprint(14, 9, walkers: 1));
+    final port = StockColonyPort(stock: {'steel': 4});
+    for (var i = 0; i < 4 * 60; i++) {
+      f.step(0.25, port);
+      if (f.handlers.single.state == HandlerState.carrying) break;
+    }
+    final h0 = f.handlers.single;
+    expect(h0.state, HandlerState.carrying);
+    expect(handlerJobs(f)[h0.id]!.$2[3], packer);
+    final carried = h0.carryingCount;
+    final before = f.itemsOnFloor;
+    expect(f.remove(packer).ok, isTrue);
+    expect(f.itemsOnFloor, before);
+    expect(conservationError(f), isEmpty);
+    final h = f.handlers.single;
+    expect(h.state, HandlerState.carrying, reason: 'still in his hands');
+    expect(h.carryingCount, carried);
+    expect(handlerJobs(f)[h.id]!.$2[3], chest,
+        reason: 'the chest has room and he can reach it');
+    expect(f.floorPiles, isEmpty, reason: 'not set down');
+    f.step(60, port);
+    expect(f.handlers.single.state, HandlerState.idle);
+    expect(f.floorPiles, isEmpty);
+    expect(f.contentsOf(chest)['steel'], 4,
+        reason: 'every steel taken is back in the chest');
+    expect(conservationError(f), isEmpty);
+  });
+
+  test('removing a shipping dock keeps its part-paid units booked', () {
+    final l = Lay();
+    l.add(EntityKind.receivingDock, 0, 0, item: 'crate:steel');
+    l.beltRow(2, 5, 0);
+    final dock = l.add(EntityKind.shippingDock, 6, 0);
+    final f = FactoryFloor.fromBlueprint(l.blueprint(8, 2));
+    final port = CappedGivePort(15);
+    f.step(120, port);
+    expect(f.shippedAhead['steel'], 5, reason: 'half the front crate went');
+    expect(conservationError(f), isEmpty);
+    expect(f.remove(dock).ok, isTrue);
+    expect(conservationError(f), isEmpty,
+        reason: 'the part-paid half stays booked as prepaid credit');
+    final again = f.place(Placement(
+        id: 0, kind: EntityKind.shippingDock, pos: const TilePos(6, 0)));
+    expect(again.ok, isTrue);
+    port.given['steel'] = 0; // the warehouse makes room for 15 more
+    f.step(120, port);
+    expect(port.given['steel'], 15);
+    expect(f.ledger.shipped['steel'], 30);
+    expect(conservationError(f), isEmpty,
+        reason: 'the next crate used the prepaid half, not a fresh 10');
+    expect(f.shippedAhead['steel'] ?? 0, 0,
+        reason: '30 shipped is exactly three crates');
+  });
+
+  test('removing a receiving dock keeps its part-paid units owed', () {
+    final l = Lay();
+    l.add(EntityKind.receivingDock, 0, 0, item: 'crate:steel');
+    final chest = l.add(EntityKind.chest, 2, 0);
+    final f = FactoryFloor.fromBlueprint(l.blueprint(4, 2));
+    final port = StockColonyPort(stock: {'steel': 25});
+    f.step(10, port);
+    expect(f.contentsOf(chest)['crate:steel'], 2);
+    expect(f.receivedAhead['steel'], 5);
+    final dock = f.blueprint.placements
+        .firstWhere((p) => p.kind == EntityKind.receivingDock)
+        .id;
+    expect(f.remove(dock).ok, isTrue);
+    expect(conservationError(f), isEmpty,
+        reason: 'the 5 units taken are owed to the floor, not lost');
+    expect(f.place(Placement(
+            id: 0,
+            kind: EntityKind.receivingDock,
+            pos: const TilePos(0, 0),
+            item: 'crate:steel'))
+        .ok, isTrue);
+    port.stock['steel'] = 5;
+    f.step(10, port);
+    expect(f.contentsOf(chest)['crate:steel'], 3,
+        reason: 'the owed half plus 5 more make the third crate');
+    expect(port.stock['steel'], 0);
+    expect(f.ledger.received['steel'], 30);
+    expect(conservationError(f), isEmpty);
+  });
+
+  test('a partial-grant port conserves through dock edits and a save', () {
+    final f = FactoryFloor.fromBlueprint(factoryTemplateFor('steelmill')!);
+    final port = CappedGivePort(40);
+    f.step(240, port);
+    final docks = [
+      for (final p in f.blueprint.placements)
+        if (p.kind == EntityKind.shippingDock ||
+            p.kind == EntityKind.receivingDock)
+          p,
+    ];
+    expect(docks, isNotEmpty);
+    for (final d in docks) {
+      expect(f.remove(d.id).ok, isTrue);
+      expect(conservationError(f), isEmpty, reason: 'removed ${d.id}');
+      f.step(5, port);
+      expect(f.place(d.copyWith(id: 0)).ok, isTrue);
+      expect(conservationError(f), isEmpty, reason: 'replaced ${d.id}');
+    }
+    final g = FactoryFloor.fromJson(f.toJson());
+    expect(g.shippedAhead, f.shippedAhead);
+    expect(g.receivedAhead, f.receivedAhead);
+    port.given.clear();
+    g.step(120, port);
+    expect(conservationError(g), isEmpty);
+  });
+
   test('re-recipeing the source of a load in hand keeps the load', () {
     final (f, _, walker, source) = carryingMill();
     final before = f.itemsOnFloor;
