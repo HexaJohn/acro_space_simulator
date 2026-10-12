@@ -17,6 +17,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_loyalty.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_war.dart';
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/parcel.dart';
 import 'package:acro_space_simulator/domain/combat/operation_registry.dart';
@@ -157,6 +158,12 @@ void main() {
     expect(ops.lastRefusal, contains('out of range'));
     expect(ops.missiles, isEmpty);
     expect(src.stockOf(Commodity.missiles), 6, reason: 'paid for at the silo, then found out of reach');
+  });
+
+  test('a colony with a Missile Silo gives its base the silo gate (found playing it)', () {
+    final src = firing();
+    expect(src.sourceSnapshot().buildings, contains('silo'),
+        reason: 'the silo strike is gated on it; without it no base ever had one');
   });
 
   test('a shot in the air survives a save', () {

@@ -598,7 +598,12 @@ extension CityWar on CitySim {
     for (final d in war.deployed) {
       if (d.siteId == kSupportSite) supportAway += d.count;
     }
-    const gated = ['barracks', 'base', 'gunfactory', 'hospital', 'spaceport'];
+    // Every building a base module or a commander power is gated on
+    // (base_modules.dart, the gunship and the silo strike). The Airfield and
+    // the Missile Silo were missing, so in play no base ever had either: the
+    // gunship, the airpad and the silo strike could only be granted by the
+    // dev hook (found playing it).
+    const gated = ['airfield', 'barracks', 'base', 'gunfactory', 'hospital', 'silo', 'spaceport'];
     final have = <String>[];
     for (final (_, s) in buildingParcels()) {
       if (gated.contains(s.type) && !have.contains(s.type)) have.add(s.type);
