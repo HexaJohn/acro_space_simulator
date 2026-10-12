@@ -1,0 +1,164 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the PolyForm Noncommercial License 1.0.0.
+// To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
+
+/// The shapes the colony economy layer trades in
+/// (docs/plans/factory-floors.md §3 "Ownership and money", §7 Q8-Q11).
+///
+/// Decided by the user (2026-10-12):
+/// - SHADOW PRICES first: firms keep a P&L at local market prices; the only
+///   real money moving is corporate tax into `funds` and subsidies out.
+/// - The player designs any floor; a private firm builds only parts that pay
+///   back within [kFirmPaybackYears]; the rest needs a subsidy.
+/// - A state plant's loss is charged to `funds` as an industry deficit.
+/// - A failing firm lays off, idles stations, then closes and is offered for
+///   nationalisation or sale.
+///
+/// Prices are LOCAL and DERIVED, never hand-set: a colony's price for a good
+/// is its local production cost × scarcity, held between the export floor
+/// and the import ceiling (source price + transport by Δv and the rocket
+/// equation). Money is in credits, the same unit as `CitySim.funds`;
+/// integration calibrates the scale.
+library;
+
+/// Game-years a private firm will wait for an investment to pay back.
+const double kFirmPaybackYears = 5;
+
+enum OwnerKind { state, private }
+
+class Ownership {
+  const Ownership.state() : kind = OwnerKind.state, firmId = null;
+  const Ownership.private(String this.firmId) : kind = OwnerKind.private;
+
+  final OwnerKind kind;
+  final String? firmId;
+
+  bool get isState => kind == OwnerKind.state;
+
+  Map<String, Object?> toJson() => {'k': kind.name, 'f': ?firmId};
+  static Ownership fromJson(Map<String, Object?> j) =>
+      OwnerKind.values.byName(j['k'] as String) == OwnerKind.state
+          ? const Ownership.state()
+          : Ownership.private(j['f'] as String);
+}
+
+/// The colony's ideology, as the economy needs it. Mirrors `CitySim`'s
+/// `Economy` enum by NAME (kept separate so this layer doesn't import the
+/// aggregate).
+enum EconomyKind { capitalism, freeMarket, socialism, communism }
+
+/// Everything about a colony a price depends on. Built by the aggregate at
+/// integration; built by hand in tests.
+class MarketFacts {
+  const MarketFacts({
+    required this.bodyId,
+    required this.economy,
+    this.solarFactor = 1,
+    this.waterMult = 1,
+    this.oreMult = 1,
+    this.atmosphere = const {},
+    this.stock = const {},
+    this.demandPerS = const {},
+    this.supplyPerS = const {},
+    this.population = 0,
+  });
+
+  /// `CelestialBody.id` the colony stands on ('earth', 'mars', 'moon' …).
+  final String bodyId;
+  final EconomyKind economy;
+
+  /// Sunlight relative to Earth's at 1 AU (`CitySim.solarFactor`).
+  final double solarFactor;
+
+  /// Site yield multipliers (`biomeFx.water`, `biomeFx.ore`): ice near a
+  /// Martian pole makes water cheap; a dry equator makes it dear.
+  final double waterMult;
+  final double oreMult;
+
+  /// Gas mole fractions of the body's air (terraforming tracks the real
+  /// inventory): 'O2', 'CO2', 'N2' …; empty = airless.
+  final Map<String, double> atmosphere;
+
+  /// Units in stock, and the colony's steady consumption and production.
+  final Map<String, double> stock;
+  final Map<String, double> demandPerS;
+  final Map<String, double> supplyPerS;
+
+  final int population;
+}
+
+/// A colony's local prices: credits per commodity unit, plus the wage and
+/// the power price every unit cost is built from.
+class PriceBook {
+  const PriceBook({
+    required this.prices,
+    required this.wagePerWorkerS,
+    required this.powerPerKJ,
+    this.importCeiling = const {},
+    this.exportFloor = const {},
+  });
+
+  final Map<String, double> prices;
+
+  /// Credits per staffed worker-second.
+  final double wagePerWorkerS;
+
+  /// Credits per kilojoule of electricity.
+  final double powerPerKJ;
+
+  /// The bounds each price was clamped to (for the UI's "why this price").
+  final Map<String, double> importCeiling;
+  final Map<String, double> exportFloor;
+
+  double price(String commodity) => prices[commodity] ?? 0;
+}
+
+/// A plant's P&L over a period (credits; positive = income).
+class PlantPnL {
+  const PlantPnL({
+    required this.seconds,
+    required this.revenue,
+    required this.inputs,
+    required this.wages,
+    required this.power,
+    required this.logistics,
+    required this.equipment,
+    required this.tax,
+  });
+
+  static const PlantPnL zero = PlantPnL(
+      seconds: 0, revenue: 0, inputs: 0, wages: 0, power: 0, logistics: 0,
+      equipment: 0, tax: 0);
+
+  final double seconds;
+  final double revenue;
+  final double inputs;
+  final double wages;
+  final double power;
+  final double logistics;
+  final double equipment;
+
+  /// Corporate tax owed (private) — what moves into `funds`. Zero for state.
+  final double tax;
+
+  double get costs => inputs + wages + power + logistics + equipment;
+  double get preTax => revenue - costs;
+  double get profit => preTax - tax;
+
+  Map<String, Object?> toJson() => {
+        's': seconds, 'rev': revenue, 'in': inputs, 'wage': wages,
+        'pow': power, 'log': logistics, 'eq': equipment, 'tax': tax,
+      };
+}
+
+/// What a firm does about its books this period (phase 5 policy).
+enum FirmAction { none, invest, layoff, idleStations, close }
+
+/// Where a plant's operator stands.
+enum FirmHealth { healthy, strained, distressed, closed }
+
+/// Credits per kg to move cargo from one body's surface to another's.
+abstract interface class TransportCostModel {
+  double perKg(String fromBodyId, String toBodyId);
+}

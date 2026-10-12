@@ -293,6 +293,25 @@ in `city_site_actions.dart`, so they can run alongside the traffic-laws / desire
 work without conflicts. Phase 3 is the only one that touches `city_sim.dart`, and it is
 kept to one reviewable commit. Phase 6 waits on agent traffic and is owned jointly.
 
+### Waves (user go-ahead 2026-10-12: build waves 0-3, then confirm)
+
+- **Wave 0, interfaces** (serial, done). `factory/`: `factory_grid`, `factory_item`,
+  `factory_recipe`, `factory_handling`, `factory_entities` (layout `Placement`),
+  `floor_blueprint`, `factory_ledger`, `factory_colony_port` (`FactoryColonyPort` plus
+  `InfiniteColonyPort` / `StockColonyPort`), `factory_sim_api` (`FactorySim` view, editor,
+  step and `MeasuredRates`). `economy/economy_contracts.dart`.
+- **Wave 1, in parallel.**
+  - A: floor core and on-foot handlers (phase 1).
+  - B: editor against a fake `FactorySim` (phase 2).
+  - C: economy domain: prices, wages, Δv transport, `kgPerUnit`, P&L, firm policy (phase 5
+    domain).
+  - D: measurement harness and real site sizes (phase 6 part).
+- **Wave 2.** Vehicles and automation on top of A (phase 4), then templates for every
+  plant; editor wired to the real floor plus the vehicle palette.
+- **Wave 3, single integration.** A `CitySim` port, corporate tax and deficit lines,
+  site menu, commodity registration and the save key, then tuning and a real-input
+  playtest.
+
 ## 7. Decisions for the user
 
 Defaults are marked *(default)* above. Each of these changes what gets built:
