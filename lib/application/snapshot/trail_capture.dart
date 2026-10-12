@@ -14,6 +14,7 @@
 /// clears where a terrain edit reaches.
 library;
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../domain/colony/city/city_sim.dart';
@@ -29,6 +30,7 @@ class CityTrailFrame {
     required this.bodyId,
     required this.ribbons,
     required this.rovers,
+    this.tubes = const [],
   });
 
   final String colonyId;
@@ -41,6 +43,11 @@ class CityTrailFrame {
   /// Per rover `[px, py, pz, fx, fy, fz]`: its centre on the ground and its
   /// heading, body-fixed.
   final Float64List rovers;
+
+  /// The pedestrian tubes (desire-paths.md §9): per tube its axis `[x, y,
+  /// z, …]`, body-fixed, [kTubeHeightM] over the ground, a point every ten
+  /// metres or so. The SAME list until a tube is built.
+  final List<Float64List> tubes;
 }
 
 /// Worn runs as polylines: per ribbon, its points `[x, y, z, …]` body-fixed
@@ -55,6 +62,9 @@ class TrailRibbons {
 
 /// Wear under which a cell is not drawn: a rover or two's tracks.
 const double kTrailDrawnWear = 0.15;
+
+/// Metres a tube's axis stands over the ground: a rover passes under.
+const double kTubeHeightM = 5;
 
 class TrailCapture {
   static final Expando<_Cache> _cache = Expando('trailCapture');
@@ -92,6 +102,23 @@ class TrailCapture {
       c.ribbons = _ribbons(f, net.takenRoutes, onGround);
     }
 
+    if (c.tubeRev != net.tubeRev || !identical(c.tubeField, f)) {
+      c.tubeRev = net.tubeRev;
+      c.tubeField = f;
+      c.tubes = [
+        for (final t in net.tubes)
+          _tubeAxis(t, (local) {
+            final cell = f.cellAt(local.e, local.n);
+            final key = cell < 0
+                ? 'tube/${local.e.round()},${local.n.round()}'
+                : 'trail/${f.centreE(cell).round()},${f.centreN(cell).round()}';
+            return dirOf(local) *
+                (groundFor(key, cell < 0 ? local : f.centreOf(cell)) +
+                    kTubeHeightM);
+          }),
+      ];
+    }
+
     final poses = net.roversAt(city.agents.timeUs);
     final rovers = Float64List(poses.length ~/ 4 * 6);
     for (var k = 0, o = 0; k + 3 < poses.length; k += 4, o += 6) {
@@ -116,7 +143,35 @@ class TrailCapture {
       bodyId: bodyId,
       ribbons: c.ribbons,
       rovers: rovers,
+      tubes: c.tubes,
     );
+  }
+
+  /// [line]'s axis, a point at least every ten metres along it, each put
+  /// in the air by [atLocal].
+  static Float64List _tubeAxis(
+      List<Vec2> line, Vector3 Function(Vec2 local) atLocal) {
+    final pts = <Vector3>[];
+    for (var k = 0; k < line.length; k++) {
+      if (k == 0) {
+        pts.add(atLocal(line[0]));
+        continue;
+      }
+      final a = line[k - 1], b = line[k];
+      final n = math.max(1, (a.distanceTo(b) / 10).ceil());
+      for (var s = 1; s <= n; s++) {
+        pts.add(atLocal(Vec2(
+            a.e + (b.e - a.e) * s / n, a.n + (b.n - a.n) * s / n)));
+      }
+    }
+    final out = Float64List(pts.length * 3);
+    for (var k = 0; k < pts.length; k++) {
+      out
+        ..[k * 3] = pts[k].x
+        ..[k * 3 + 1] = pts[k].y
+        ..[k * 3 + 2] = pts[k].z;
+    }
+    return out;
   }
 
   /// The worn runs of [routes] that are not road, each cell drawn once: a
@@ -172,4 +227,7 @@ class _Cache {
   int wearRev = -1;
   final Stopwatch age = Stopwatch()..start();
   TrailRibbons ribbons = TrailRibbons.empty;
+  int tubeRev = -1;
+  TrailField? tubeField;
+  List<Float64List> tubes = const [];
 }

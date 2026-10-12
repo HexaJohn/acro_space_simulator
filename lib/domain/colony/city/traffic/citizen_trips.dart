@@ -108,7 +108,11 @@ abstract interface class OffRoadLegs {
   /// takes, and how long it would on a beaten track — what a commute's
   /// [TrafficStats.tripDone] weighs it against. Null when there is none: no
   /// trails, a ban, or ground the rover cannot cross.
-  ({double timeS, double freeFlowS})? leg(int from, int to, int nowUs);
+  ///
+  /// [roads] says both ends are reachable by road: then only a walk short
+  /// enough to beat driving is offered.
+  ({double timeS, double freeFlowS})? leg(int from, int to, int nowUs,
+      {required bool roads});
 }
 
 /// A trip's leg: out (to work, to an errand) or back home.
@@ -548,8 +552,10 @@ class CitizenTrips implements SpawnSink {
     // ([_whereIs]): they walk, as they always have.
     final roads =
         from >= 0 && buildings.reachable(from) && buildings.reachable(to);
-    // No road at one end: the desire paths before the instant walk.
-    if (!roads && from >= 0 && _offRoadLeg(c, i, from, to, p)) return true;
+    // The desire paths before the instant walk: across open ground where
+    // no road reaches an end, and on foot (or by tube) where the doors are
+    // near enough to walk between.
+    if (from >= 0 && _offRoadLeg(c, i, from, to, p, roads)) return true;
     if (own < 0 || !roads) {
       _place(c, i, to, p);
       return true;
@@ -587,8 +593,8 @@ class CitizenTrips implements SpawnSink {
   /// [c] crosses open ground to building slot [to]: at the far end after
   /// the leg's time, which their dwell there starts after. False when there
   /// is no such leg, and then nothing about them has changed.
-  bool _offRoadLeg(int c, int i, int from, int to, TripPurpose p) {
-    final leg = offRoad?.leg(from, to, nowUs);
+  bool _offRoadLeg(int c, int i, int from, int to, TripPurpose p, bool roads) {
+    final leg = offRoad?.leg(from, to, nowUs, roads: roads);
     if (leg == null) return false;
     sent++;
     offRoadTrips++;

@@ -39,7 +39,7 @@ import 'trail_capture.dart';
 // Site access on the frame (docs/plans/site-access.md §5.2), part of its
 // vocabulary like the patches.
 export 'city_site_frame.dart' show CitySiteFrame, SiteChunkGeometry;
-export 'trail_capture.dart' show CityTrailFrame, TrailRibbons;
+export 'trail_capture.dart' show CityTrailFrame, TrailRibbons, kTubeHeightM;
 
 // The patch classes live in their own file (the columns are a fair amount of
 // code) but are part of the frame's vocabulary, so they come with it.

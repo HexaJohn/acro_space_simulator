@@ -13,6 +13,7 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../parcel.dart';
 import 'trail_field.dart';
@@ -133,4 +134,60 @@ double _offLine(Vec2 p, Vec2 a, Vec2 b) {
   if (l2 <= 1e-12) return p.distanceTo(a);
   final t = (((p.e - a.e) * de + (p.n - a.n) * dn) / l2).clamp(0.0, 1.0);
   return p.distanceTo(Vec2(a.e + de * t, a.n + dn * t));
+}
+
+/// Foot wear past which a walked line is a tube's (desire-paths.md §9).
+const double kTubeWear = 0.7;
+
+/// The shortest tube worth building, metres.
+const double kTubeMinM = 20;
+
+/// The walked runs of [walks] beaten enough to be tubes, longest first, as
+/// simplified polylines. A run is offered only when BOTH its ends attach,
+/// each to a built site's door ([doorCells]) or to a tube: a tube must lead
+/// from somewhere to somewhere, never stand alone in the open.
+List<List<Vec2>> tubeRuns(
+    TrailField f, Iterable<TrailRoute> walks, Set<int> doorCells) {
+  bool attaches(Int32List cells, int k) {
+    final i = cells[k];
+    // A door, or a tube in the cells around it: the cell before a run that
+    // continues a tube is that tube, and is one of them.
+    return doorCells.contains(i) || f.nearTube(i);
+  }
+
+  final runs = <List<int>>[];
+  for (final r in walks) {
+    final cells = r.cells;
+    var start = -1;
+    void close(int end) {
+      if (start < 0) return;
+      final a = start, b = end;
+      start = -1;
+      if (b - a < 1) return;
+      if (!attaches(cells, a) || !attaches(cells, b)) return;
+      runs.add([for (var k = a; k <= b; k++) cells[k]]);
+    }
+
+    for (var k = 0; k < cells.length; k++) {
+      final i = cells[k];
+      final ok = f.footWear[i] >= kTubeWear && !f.tube(i) && !f.blocked(i);
+      if (ok) {
+        if (start < 0) start = k;
+      } else {
+        close(k - 1);
+      }
+    }
+    close(cells.length - 1);
+  }
+  runs.sort((a, b) => b.length.compareTo(a.length));
+  final taken = <int>{};
+  final out = <List<Vec2>>[];
+  for (final run in runs) {
+    if (run.any(taken.contains)) continue;
+    final pts = [for (final i in run) f.centreOf(i)];
+    if (_length(pts) < kTubeMinM) continue;
+    taken.addAll(run);
+    out.add(simplify(pts, 2));
+  }
+  return out;
 }

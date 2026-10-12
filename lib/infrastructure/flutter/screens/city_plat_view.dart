@@ -197,15 +197,17 @@ class _CityPlatViewState extends State<CityPlatView> {
     }
     // The desire paths: cut again as a leg wears them, and every few
     // seconds for the fading, which moves no revision.
-    final tf = sim?.trails?.field;
+    final net = sim?.trails;
+    final tf = net?.field;
     final tp = _trails;
-    if (tf == null) {
+    if (net == null || tf == null) {
       _trails = null;
     } else if (tp == null ||
         !identical(tp.field, tf) ||
         tp.rev != tf.wearRev ||
+        tp.tubeRev != net.tubeRev ||
         tp.age.elapsedMilliseconds > 5000) {
-      _trails = _TrailPaint.of(tf);
+      _trails = _TrailPaint.of(tf, net.tubes, net.tubeRev);
     }
     // The lie of the land: sampled a few hundred points a frame until the
     // lattice is whole, then traced once.
@@ -798,6 +800,18 @@ class _PlatPainter extends CustomPainter {
       }
     }
 
+    // Pedestrian tubes, over everything on the ground: they stand over it.
+    if (trails case final t? when t.tubes != null) {
+      canvas.drawPath(
+          t.tubes!,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..strokeWidth = math.max(4.0, 3.0 * mpp)
+            ..color = const Color(0xCC9FE8F0));
+    }
+
     // The site's origin: the colony centre.
     final cross = 6 * mpp;
     final origin = Paint()
@@ -1043,11 +1057,16 @@ class _PlatPainter extends CustomPainter {
 /// (docs/plans/desire-paths.md §7 "Plat"): a cell a square, in the cache's
 /// y = −north frame.
 class _TrailPaint {
-  _TrailPaint._(this.field, this.rev, this.layers);
+  _TrailPaint._(this.field, this.rev, this.layers, this.tubes, this.tubeRev);
 
   final TrailField field;
   final int rev;
   final List<(Path, Paint)> layers;
+
+  /// The pedestrian tubes as one path, or null with none; and the revision
+  /// they were cut at.
+  final Path? tubes;
+  final int tubeRev;
   final Stopwatch age = Stopwatch()..start();
 
   /// Wear below this is ground a rover or two has crossed, not a trail.
@@ -1055,27 +1074,44 @@ class _TrailPaint {
   static const _bands = [0.3, 0.55, 0.8, 1.01];
   static const _colour = Color(0xFFB08A5A);
 
-  static _TrailPaint of(TrailField f) {
+  static _TrailPaint of(TrailField f, List<List<Vec2>> tubeLines, int tubeRev) {
     final paths = [for (final _ in _bands) Path()];
+    final foot = Path();
     final cell = f.cellM;
     for (var i = 0; i < f.length; i++) {
       final w = f.wear[i];
-      if (w < _faint) continue;
+      final e0 = f.originE + (i % f.cols) * cell;
+      final n1 = f.originN + (i ~/ f.cols + 1) * cell;
+      // Walkers' tracks, fainter and paler, where no rover has worn more.
+      if (w < _faint) {
+        if (f.footWear[i] >= 0.3 && !f.tube(i)) {
+          foot.addRect(Rect.fromLTWH(e0, -n1, cell, cell));
+        }
+        continue;
+      }
       var b = 0;
       while (w >= _bands[b]) {
         b++;
       }
-      final e0 = f.originE + (i % f.cols) * cell;
-      final n1 = f.originN + (i ~/ f.cols + 1) * cell;
       paths[b].addRect(Rect.fromLTWH(e0, -n1, cell, cell));
     }
+    Path? tubes;
+    for (final t in tubeLines) {
+      if (t.length < 2) continue;
+      final p = tubes ??= Path();
+      p.moveTo(t.first.e, -t.first.n);
+      for (var k = 1; k < t.length; k++) {
+        p.lineTo(t[k].e, -t[k].n);
+      }
+    }
     return _TrailPaint._(f, f.wearRev, [
+      (foot, Paint()..color = const Color(0x40C8D2DC)),
       for (var b = 0; b < _bands.length; b++)
         (
           paths[b],
           Paint()..color = _colour.withValues(alpha: 0.18 + 0.16 * b),
         ),
-    ]);
+    ], tubes, tubeRev);
   }
 }
 

@@ -4140,7 +4140,7 @@ class CitySim {
     if (tr == null) return;
     tr.sync(
       shapeKey: Object.hash(layout.version, parcelBuildings.length,
-          utils.length, grown.length),
+          utils.length, grown.length, tr.tubeRev),
       dtS: dt,
       sites: () sync* {
         for (final p in layout.parcels) {
@@ -4170,6 +4170,13 @@ class CitySim {
     if (offRoadLegal) {
       for (final run in tr.dueRoads().take(1)) {
         if (commitRoad(run, RoadClass.path) != null) tr.roadsLaid++;
+      }
+    }
+    // A walk beaten enough on a world with no air to walk in is a tube
+    // (§9): pressurised, raised, and joined at both ends.
+    if (!breathable) {
+      for (final run in tr.dueTubes().take(1)) {
+        tr.addTube(run);
       }
     }
   }

@@ -53,6 +53,7 @@ const double kTrailWearFloor = 0.01;
 /// [TrailField.flags] bits.
 const int kTrailBlocked = 1; // inside a building's footprint
 const int kTrailRoad = 2; // under a road's carriageway
+const int kTrailTube = 4; // under a pedestrian tube (desire-paths.md §9)
 
 class TrailField {
   TrailField({
@@ -63,6 +64,7 @@ class TrailField {
     this.cellM = kTrailCellM,
   })  : height = Float32List(cols * rows),
         wear = Float32List(cols * rows),
+        footWear = Float32List(cols * rows),
         flags = Uint8List(cols * rows);
 
   /// The field that covers [box] with [kTrailMarginM] to spare, clamped to
@@ -93,8 +95,12 @@ class TrailField {
   /// Natural ground, metres above the body datum, per cell centre.
   final Float32List height;
 
-  /// 0 bare ground … 1 a beaten track.
+  /// 0 bare ground … 1 a beaten track: the rovers'.
   final Float32List wear;
+
+  /// The same for walkers (§9): a foot track, which on an airless world
+  /// becomes a tube.
+  final Float32List footWear;
 
   /// [kTrailBlocked], [kTrailRoad].
   final Uint8List flags;
@@ -130,6 +136,20 @@ class TrailField {
 
   bool blocked(int i) => flags[i] & kTrailBlocked != 0;
   bool road(int i) => flags[i] & kTrailRoad != 0;
+  bool tube(int i) => flags[i] & kTrailTube != 0;
+
+  /// Whether [i] is a tube cell or beside one (eight neighbours).
+  bool nearTube(int i) {
+    final c = i % cols, r = i ~/ cols;
+    for (var dr = -1; dr <= 1; dr++) {
+      for (var dc = -1; dc <= 1; dc++) {
+        final cc = c + dc, rr = r + dr;
+        if (cc < 0 || rr < 0 || cc >= cols || rr >= rows) continue;
+        if (tube(rr * cols + cc)) return true;
+      }
+    }
+    return false;
+  }
 
   /// Samples the ground through [heightAt] on a lattice [stride] cells
   /// apart and fills the cells between bilinearly. A relief sample costs
@@ -167,6 +187,7 @@ class TrailField {
     required Iterable<List<Vec2>> footprints,
     required Iterable<Vec2> doors,
     required Iterable<(List<Vec2> samples, double halfWidthM)> roads,
+    Iterable<List<Vec2>> tubes = const [],
   }) {
     for (var i = 0; i < length; i++) {
       flags[i] = 0;
@@ -182,6 +203,18 @@ class TrailField {
       final reach = hw + cellM * 0.5;
       for (final p in samples) {
         _stamp(p, reach, kTrailRoad);
+      }
+    }
+    // A tube is a line of cells: stamped every few metres along it.
+    for (final t in tubes) {
+      for (var k = 1; k < t.length; k++) {
+        final a = t[k - 1], b = t[k];
+        final d = a.distanceTo(b);
+        final n = math.max(1, (d / (cellM * 0.4)).ceil());
+        for (var s = 0; s <= n; s++) {
+          _stamp(Vec2(a.e + (b.e - a.e) * s / n, a.n + (b.n - a.n) * s / n),
+              cellM * 0.5, kTrailTube);
+        }
       }
     }
     shapeRev++;
@@ -233,9 +266,11 @@ class TrailField {
   }
 
   /// A finished leg's wear, laid on each of [cells] once.
-  void lay(List<int> cells, {double amount = kTrailWearPerLeg}) {
+  void lay(List<int> cells,
+      {double amount = kTrailWearPerLeg, bool foot = false}) {
+    final w = foot ? footWear : wear;
     for (final i in cells) {
-      wear[i] += amount * (1 - wear[i]);
+      w[i] += amount * (1 - w[i]);
     }
     if (cells.isNotEmpty) wearRev++;
   }
@@ -246,11 +281,13 @@ class TrailField {
     final k = math.pow(0.5, dtS / kTrailHalfLifeS).toDouble();
     // Fading is slow and even: a route cached against the last deposit is
     // still the right one, so decay alone does not move [wearRev].
-    for (var i = 0; i < length; i++) {
-      final w = wear[i];
-      if (w == 0) continue;
-      final next = w * k;
-      wear[i] = next < kTrailWearFloor ? 0 : next;
+    for (final w in [wear, footWear]) {
+      for (var i = 0; i < length; i++) {
+        final v = w[i];
+        if (v == 0) continue;
+        final next = v * k;
+        w[i] = next < kTrailWearFloor ? 0 : next;
+      }
     }
   }
 
@@ -258,10 +295,12 @@ class TrailField {
   /// a regrown field keeps the trails it had.
   void adoptWear(TrailField other) {
     for (var i = 0; i < other.length; i++) {
-      final w = other.wear[i];
-      if (w == 0) continue;
+      final w = other.wear[i], fw = other.footWear[i];
+      if (w == 0 && fw == 0) continue;
       final j = cellAt(other.centreE(i), other.centreN(i));
-      if (j >= 0) wear[j] = w;
+      if (j < 0) continue;
+      wear[j] = w;
+      footWear[j] = fw;
     }
     wearRev++;
   }
@@ -269,20 +308,25 @@ class TrailField {
   /// The worn cells only, as `[e0, n0, cols, rows, i, w, i, w, …]` with wear
   /// rounded to 1/1000: a starter colony's trails are a few hundred cells.
   Map<String, dynamic> toJson() {
-    final worn = <num>[];
-    for (var i = 0; i < length; i++) {
-      final w = wear[i];
-      if (w < kTrailWearFloor) continue;
-      worn
-        ..add(i)
-        ..add((w * 1000).round());
+    List<num> sparse(Float32List w) {
+      final out = <num>[];
+      for (var i = 0; i < length; i++) {
+        if (w[i] < kTrailWearFloor) continue;
+        out
+          ..add(i)
+          ..add((w[i] * 1000).round());
+      }
+      return out;
     }
+
+    final foot = sparse(footWear);
     return {
       'e0': originE,
       'n0': originN,
       'cols': cols,
       'rows': rows,
-      'worn': worn,
+      'worn': sparse(wear),
+      if (foot.isNotEmpty) 'foot': foot,
     };
   }
 
@@ -293,11 +337,16 @@ class TrailField {
       cols: (j['cols'] as num).toInt(),
       rows: (j['rows'] as num).toInt(),
     );
-    final worn = (j['worn'] as List?) ?? const [];
-    for (var k = 0; k + 1 < worn.length; k += 2) {
-      final i = (worn[k] as num).toInt();
-      if (i >= 0 && i < f.length) f.wear[i] = (worn[k + 1] as num) / 1000;
+    void read(Object? list, Float32List into) {
+      final l = list is List ? list : const [];
+      for (var k = 0; k + 1 < l.length; k += 2) {
+        final i = (l[k] as num).toInt();
+        if (i >= 0 && i < f.length) into[i] = (l[k + 1] as num) / 1000;
+      }
     }
+
+    read(j['worn'], f.wear);
+    read(j['foot'], f.footWear);
     return f;
   }
 }

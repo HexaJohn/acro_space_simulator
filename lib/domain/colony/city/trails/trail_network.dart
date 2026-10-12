@@ -53,6 +53,13 @@ const int _takenCap = 128;
 /// Legs drawn under way at once, at most.
 const int _activeCap = 256;
 
+/// The farthest apart two doors are walked between rather than driven
+/// (desire-paths.md §9), metres.
+const double kWalkMaxM = 300;
+
+/// Colony seconds between looks for a walk beaten enough to be a tube.
+const double _tubeCadenceS = 60;
+
 /// A leg being driven: its route, and when it set off and for how long, in
 /// agent µs.
 class TrailLeg {
@@ -94,6 +101,23 @@ class TrailNetwork {
   /// Dirt roads laid along trails so far ([dueRoads]' callers count them).
   int roadsLaid = 0;
 
+  /// The walks taken lately, by (start, goal), as [_taken] is the drives.
+  final Map<int, TrailRoute> _walks = {};
+
+  /// Pedestrian tubes (§9), colony metres, in the order they were built.
+  final List<List<Vec2>> tubes = [];
+
+  /// Moves with every tube built.
+  int tubeRev = 0;
+  int _shapeTubeRev = -1;
+  double _sinceTube = 0;
+
+  /// The door cells of the built sites, as of the last [sync].
+  Set<int> _doorCells = const {};
+
+  /// Walks taken so far.
+  int walks = 0;
+
   /// The routes driven lately, least recently first: what the scene
   /// draws a trail along (trail_capture.dart), and [dueRoads] reads.
   Iterable<TrailRoute> get takenRoutes => _taken.values;
@@ -121,6 +145,7 @@ class TrailNetwork {
     _sinceShapes += dtS;
     _sinceDecay += dtS;
     _sincePromote += dtS;
+    _sinceTube += dtS;
     final f0 = _field;
     if (f0 != null && _sinceDecay >= _decayCadenceS) {
       f0.decay(_sinceDecay);
@@ -129,9 +154,11 @@ class TrailNetwork {
     if (f0 != null &&
         f0.heightsReady &&
         shapeKey == _shapeKey &&
+        tubeRev == _shapeTubeRev &&
         _sinceShapes < _shapeCadenceS) {
       return;
     }
+    _shapeTubeRev = tubeRev;
     _shapeKey = shapeKey;
     _sinceShapes = 0;
 
@@ -156,6 +183,7 @@ class TrailNetwork {
       _routes.clear();
       // Their cells were the old field's.
       _taken.clear();
+      _walks.clear();
     }
     if (!f.heightsReady) f.fillHeights(heightAt);
     // A field loaded from a save comes without its router.
@@ -175,7 +203,12 @@ class TrailNetwork {
           if (s.built) doors[s.id]!
       ],
       roads: roads(),
+      tubes: tubes,
     );
+    _doorCells = {
+      for (final s in all)
+        if (s.built) f.cellAt(doors[s.id]!.e, doors[s.id]!.n),
+    }..remove(-1);
 
     // Service: a lot is reached when the cell at its door is, or any cell
     // just outside one of its edges.
@@ -192,14 +225,15 @@ class TrailNetwork {
 
   /// The leg from site [from] to site [to] over open ground, or null when
   /// either has no door here or the ground between cannot be crossed.
-  TrailRoute? leg(String from, String to) {
+  TrailRoute? leg(String from, String to, {double? walkMps}) {
     final f = _field, router = _router;
     if (f == null || router == null) return null;
     final a = doors[from], b = doors[to];
     if (a == null || b == null) return null;
     final i = f.cellAt(a.e, a.n), j = f.cellAt(b.e, b.n);
     if (i < 0 || j < 0) return null;
-    final key = i * f.length + j;
+    // Walks and drives cached apart: one pair, two ways across.
+    final key = (i * f.length + j) * 2 + (walkMps == null ? 0 : 1);
     final hit = _routes[key];
     if (hit != null &&
         hit.$1 == f.shapeRev &&
@@ -207,13 +241,41 @@ class TrailNetwork {
       cacheHits++;
       return hit.$3;
     }
-    final r = router.route(i, j);
+    final r = router.route(i, j, walkMps: walkMps);
     _routes[key] = (f.shapeRev, f.wearRev, r);
     return r;
   }
 
+  /// The trip from site [from] to [to] over open ground: a walk at
+  /// [walkMps] when their doors are within [kWalkMaxM], else a drive when
+  /// [vehicles] may leave the roads (no Off-Road Ban) and [drives] wants
+  /// one; null when neither.
+  ({TrailRoute route, bool walk})? trip(String from, String to,
+      {required double walkMps, required bool vehicles, bool drives = true}) {
+    final a = doors[from], b = doors[to];
+    if (a == null || b == null) return null;
+    if (a.distanceTo(b) <= kWalkMaxM) {
+      final w = leg(from, to, walkMps: walkMps);
+      if (w != null) return (route: w, walk: true);
+    }
+    if (!vehicles || !drives) return null;
+    final r = leg(from, to);
+    return r == null ? null : (route: r, walk: false);
+  }
+
   /// [route] was taken: its cells take the wear of one leg.
-  void lay(TrailRoute route, {int startUs = 0}) {
+  void lay(TrailRoute route, {int startUs = 0, bool foot = false}) {
+    if (foot) {
+      walks++;
+      final f = _field;
+      if (f == null || route.cells.isEmpty) return;
+      f.lay(route.cells, foot: true);
+      final key = route.cells.first * f.length + route.cells.last;
+      _walks.remove(key);
+      _walks[key] = route;
+      if (_walks.length > _takenCap) _walks.remove(_walks.keys.first);
+      return;
+    }
     legs++;
     offRoadM += route.lengthM;
     // A leg is drawn while it is driven; the oldest go first once a town
@@ -262,6 +324,21 @@ class TrailNetwork {
   /// The trails beaten enough to be roads, as polylines to lay a dirt road
   /// along, longest first — every [_promoteCadenceS] of colony time, and
   /// empty in between (docs/plans/desire-paths.md §5 phase 2).
+  /// The walks beaten enough to be tubes (§9), longest first, every
+  /// [_tubeCadenceS]; each attaches at both ends.
+  List<List<Vec2>> dueTubes() {
+    final f = _field;
+    if (f == null || _sinceTube < _tubeCadenceS) return const [];
+    _sinceTube = 0;
+    return tubeRuns(f, _walks.values, _doorCells);
+  }
+
+  /// [line] built as a tube: the next [sync] lays it into the field.
+  void addTube(List<Vec2> line) {
+    tubes.add(List.unmodifiable(line));
+    tubeRev++;
+  }
+
   List<List<Vec2>> dueRoads() {
     final f = _field;
     if (f == null || _sincePromote < _promoteCadenceS) return const [];
@@ -360,8 +437,31 @@ class TrailNetwork {
   static bool _sameSet(Set<String> a, Set<String> b) =>
       a.length == b.length && a.containsAll(b);
 
-  Map<String, dynamic>? toJson() => _field?.toJson();
+  Map<String, dynamic>? toJson() {
+    final f = _field?.toJson();
+    if (f == null) return null;
+    return {
+      ...f,
+      if (tubes.isNotEmpty)
+        'tubes': [
+          for (final t in tubes) [for (final p in t) ...[p.e, p.n]]
+        ],
+    };
+  }
 
-  static TrailNetwork fromJson(Map<String, dynamic> j) =>
-      TrailNetwork(field: TrailField.fromJson(j));
+  static TrailNetwork fromJson(Map<String, dynamic> j) {
+    final n = TrailNetwork(field: TrailField.fromJson(j));
+    final saved = j['tubes'];
+    if (saved is List) {
+      for (final t in saved) {
+        if (t is! List) continue;
+        n.tubes.add(List.unmodifiable([
+          for (var k = 0; k + 1 < t.length; k += 2)
+            Vec2((t[k] as num).toDouble(), (t[k + 1] as num).toDouble())
+        ]));
+      }
+      n.tubeRev = n.tubes.length;
+    }
+    return n;
+  }
 }

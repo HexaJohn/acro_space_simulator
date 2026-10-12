@@ -29,6 +29,28 @@ const double kTrailRoadMps = 12;
 /// what the Apollo rover was rated for (25°).
 const double kTrailMaxGrade = 0.45;
 
+/// Walkers (desire-paths.md §9): in a suit across an airless world, on
+/// foot where the air can be breathed, and inside a tube, which is ramped,
+/// so its slope does not slow them.
+const double kWalkSuitMps = 0.9;
+const double kWalkAirMps = 1.3;
+const double kTubeMps = 1.4;
+
+/// The steepest ground a walker climbs.
+const double kWalkMaxGrade = 0.6;
+
+/// Seconds for a walker at [openMps] on open ground to step from [i] to
+/// [j], [d] metres apart: a worn foot track is half again as quick, a tube
+/// quicker still and level.
+double trailWalkS(TrailField f, int i, int j, double d, double openMps) {
+  if (f.tube(i) && f.tube(j)) return d / kTubeMps;
+  final grade = (f.height[j] - f.height[i]).abs() / d;
+  if (grade > kWalkMaxGrade) return double.infinity;
+  final slow = 1 - 0.5 * grade / kWalkMaxGrade;
+  final w = 0.5 * (f.footWear[i] + f.footWear[j]);
+  return d / (openMps * (1 + 0.5 * w) * slow);
+}
+
 /// How much of its speed a rover keeps at [kTrailMaxGrade]: 1 − this.
 const double _gradeSlow = 0.6;
 
@@ -77,7 +99,9 @@ class TrailRouter {
 
   /// The quickest route from cell [start] to cell [goal], or null when the
   /// ground between them cannot be crossed (or either is off the field).
-  TrailRoute? route(int start, int goal) {
+  /// [walkMps] makes it a WALKER's route at that open-ground speed
+  /// ([trailWalkS]); null, a rover's.
+  TrailRoute? route(int start, int goal, {double? walkMps}) {
     final f = field;
     if (start < 0 || goal < 0) return null;
     if (start == goal) return TrailRoute(Int32List.fromList([start]), 0, 0);
@@ -89,10 +113,11 @@ class TrailRouter {
     // Octile distance at a worn track's speed: a road beats it, so this is
     // not strictly a lower bound there, and the route can miss a road
     // shortcut by a few seconds. That buys a search a fraction the size.
+    final hMps = walkMps == null ? kTrailWornMps : kTubeMps;
     double h(int i) {
       final dc = (i % cols - gc).abs(), dr = (i ~/ cols - gr).abs();
       final lo = math.min(dc, dr), hi = math.max(dc, dr);
-      return (lo * diag + (hi - lo) * cell) / kTrailWornMps;
+      return (lo * diag + (hi - lo) * cell) / hMps;
     }
 
     final heap = _Heap();
@@ -119,7 +144,9 @@ class TrailRouter {
             (f.blocked(r * cols + nc) || f.blocked(nr * cols + c))) {
           continue;
         }
-        final s = trailStepS(f, i, j, isDiag ? diag : cell);
+        final s = walkMps == null
+            ? trailStepS(f, i, j, isDiag ? diag : cell)
+            : trailWalkS(f, i, j, isDiag ? diag : cell, walkMps);
         if (s == double.infinity) continue;
         final gj = gi + s;
         if (_seen[j] == stamp && _g[j] <= gj) continue;

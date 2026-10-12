@@ -71,7 +71,8 @@ import 'citizen_match.dart';
 import 'citizen_population.dart';
 import 'citizen_table.dart';
 import 'citizen_trips.dart';
-import '../trails/trail_router.dart' show kTrailWornMps;
+import '../trails/trail_router.dart'
+    show kTrailWornMps, kTubeMps, kWalkAirMps, kWalkSuitMps;
 import '../traffic_laws.dart';
 import 'edge_delay.dart';
 import 'graph_lineage.dart';
@@ -3156,13 +3157,23 @@ final class _TrailLegs implements OffRoadLegs {
   final BuildingTable buildings;
 
   @override
-  ({double timeS, double freeFlowS})? leg(int from, int to, int nowUs) {
+  ({double timeS, double freeFlowS})? leg(int from, int to, int nowUs,
+      {required bool roads}) {
     final tr = city.trails;
-    if (tr == null || !city.offRoadLegal) return null;
-    final r = tr.leg(buildings.siteId[from], buildings.siteId[to]);
-    if (r == null) return null;
-    tr.lay(r, startUs: nowUs);
-    return (timeS: r.timeS, freeFlowS: r.lengthM / kTrailWornMps);
+    if (tr == null) return null;
+    // Walking is never banned; driving off the road is, by the Off-Road
+    // Ban, and is no answer at all where a road serves both ends.
+    final t = tr.trip(buildings.siteId[from], buildings.siteId[to],
+        walkMps: city.breathable ? kWalkAirMps : kWalkSuitMps,
+        vehicles: city.offRoadLegal,
+        drives: !roads);
+    if (t == null) return null;
+    final r = t.route;
+    tr.lay(r, startUs: nowUs, foot: t.walk);
+    return (
+      timeS: r.timeS,
+      freeFlowS: r.lengthM / (t.walk ? kTubeMps : kTrailWornMps),
+    );
   }
 }
 

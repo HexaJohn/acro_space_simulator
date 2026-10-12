@@ -26,6 +26,8 @@ class _TrailDraw {
   fs.Node? parent;
   TrailRibbons? built;
   fs.Node? ribbon;
+  List<Float64List>? builtTubes;
+  fs.Node? tube;
   fs.InstancedMesh? solid, glazing;
   fs.Node? solidNode, glazingNode;
   final TrafficBuffer poses = TrafficBuffer();
@@ -33,13 +35,14 @@ class _TrailDraw {
   void drop() {
     final p = parent;
     if (p != null) {
-      for (final n in [ribbon, solidNode, glazingNode]) {
+      for (final n in [ribbon, tube, solidNode, glazingNode]) {
         if (n != null) p.remove(n);
       }
     }
-    ribbon = solidNode = glazingNode = null;
+    ribbon = tube = solidNode = glazingNode = null;
     solid = glazing = null;
     built = null;
+    builtTubes = null;
   }
 }
 
@@ -76,6 +79,17 @@ extension _TrailNodes on CityNodes {
           )..castsShadow = false;
           root.node.add(node);
           d.ribbon = node;
+        }
+      }
+      if (!identical(d.builtTubes, f.tubes)) {
+        final old = d.tube;
+        if (old != null) root.node.remove(old);
+        d.tube = null;
+        d.builtTubes = f.tubes;
+        final node = _tubeNode(f.tubes, root.anchorBF);
+        if (node != null) {
+          root.node.add(node);
+          d.tube = node;
         }
       }
       _placeRovers(d, f.rovers, root);
@@ -118,6 +132,69 @@ extension _TrailNodes on CityNodes {
       }
     }
     return CityNodes._geometryOf(m.build());
+  }
+
+  /// The tubes as one node: a glass barrel round each axis, and a concrete
+  /// pier down to the ground every other point (some twenty metres).
+  fs.Node? _tubeNode(List<Float64List> tubes, Vector3 anchorBF) {
+    if (tubes.isEmpty) return null;
+    final glass = MeshBuilder(), piers = MeshBuilder();
+    const radius = 1.4, sides = 8, pierHalf = 0.4;
+    for (final pts in tubes) {
+      final n = pts.length ~/ 3;
+      if (n < 2) continue;
+      Vector3 at(int i) => Vector3(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+      List<int>? prev;
+      for (var i = 0; i < n; i++) {
+        final p = at(i);
+        final up = p.normalized;
+        var t = at(i + 1 < n ? i + 1 : i) - at(i > 0 ? i - 1 : i);
+        if (t.length < 1e-9) continue;
+        t = t.normalized;
+        final side = t.cross(up).normalized;
+        final lift = side.cross(t).normalized;
+        final c = p - anchorBF;
+        final ring = <int>[];
+        for (var k = 0; k < sides; k++) {
+          final a = 2 * math.pi * k / sides;
+          final out = side * math.cos(a) + lift * math.sin(a);
+          ring.add(glass.vertex(
+              CityNodes._scenePos(c + out * radius), out, k / sides, i / 4));
+        }
+        if (prev != null) {
+          for (var k = 0; k < sides; k++) {
+            final k1 = (k + 1) % sides;
+            glass.quad(prev[k], prev[k1], ring[k1], ring[k]);
+          }
+        }
+        prev = ring;
+        // A pier under every other point, from the ground to the barrel.
+        if (i.isEven) {
+          final top = c - up * radius;
+          final foot = c - up * kTubeHeightM;
+          final s2 = side * pierHalf, t2 = t * pierHalf;
+          final corners = [s2 + t2, s2 - t2, -s2 - t2, -s2 + t2];
+          for (var k = 0; k < 4; k++) {
+            final a = corners[k], b = corners[(k + 1) % 4];
+            final nrm = (a + b).normalized;
+            final v0 = piers.vertex(CityNodes._scenePos(foot + a), nrm, 0, 0);
+            final v1 = piers.vertex(CityNodes._scenePos(foot + b), nrm, 1, 0);
+            final v2 = piers.vertex(CityNodes._scenePos(top + b), nrm, 1, 1);
+            final v3 = piers.vertex(CityNodes._scenePos(top + a), nrm, 0, 1);
+            piers.quad(v0, v1, v2, v3);
+          }
+        }
+      }
+    }
+    final g = CityNodes._geometryOf(glass.build());
+    final pg = CityNodes._geometryOf(piers.build());
+    final prims = <fs.MeshPrimitive>[
+      if (pg != null) fs.MeshPrimitive(pg, CityMaterials.facade),
+      if (g != null) fs.MeshPrimitive(g, CityMaterials.glazing),
+    ];
+    if (prims.isEmpty) return null;
+    return fs.Node(mesh: fs.Mesh.primitives(primitives: prims))
+      ..castsShadow = true;
   }
 
   /// The rovers on their legs: the six-wheeled rover, standing on the
