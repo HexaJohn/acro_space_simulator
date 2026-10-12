@@ -203,3 +203,36 @@ re-reads it on every sub-step and hands each consumer its own field; no global
 - Each law's effect moves its own number in a twin run, with everything else equal.
 - With no law enacted, the digests are unchanged.
 - Laws round-trip a save by name.
+
+## 9. Pedestrian tubes (user, 2026-10-12)
+
+**What the user asked for.** Dirt roads must not get tubes. On a hostile world a tube is
+what a short walk wears into, the way a long drive wears into a dirt road.
+- A tube must connect to a building or to another tube: no tube islands.
+- Tubes are elevated like viaducts, for pedestrians only.
+- A dense lunar colony grows a spider web of tubes between its structures, over a more
+  ordered grid of roads below.
+
+**Model.**
+- **Mode by distance.** A leg between doors under 300 m apart in a straight line is a
+  walk *(default)*; a longer one is a rover leg, as now.
+- **Walkers.** They cross open ground at 0.9 m/s in suits on an airless world, 1.3 m/s
+  where the air is breathable *(default)*, up to a 60% grade. Inside a tube they walk at
+  1.4 m/s whatever the slope, since tubes are ramped.
+- **Foot wear.** Walks lay their own channel, `footWear`, beside the rovers' wear. It fades
+  the same way.
+- **Tube promotion,** on airless worlds only.
+  - A walked route beaten past 0.7 over at least 20 m becomes a tube, free *(default)*.
+  - It is built only when BOTH ends attach, each to a built site's door cell or within a
+    cell of an existing tube. A route beaten end to end goes door to door, so it attaches;
+    a beaten stretch in the middle of nowhere waits.
+  - One tube per 60 s look *(default)*.
+  - Tubes are laid 5 m up on piers every 20 m. They pass over roads and open ground,
+    never through a building.
+- **Breathable worlds** get worn footpaths and no tubes.
+- **Road tubes.** The existing tube along PAVED sealed streets stays for now *(default)*.
+  Whether to drop it once the tube web lands is an open question for the user.
+- **Drawing.**
+  - 3D: a glass barrel on concrete piers.
+  - Plat: a pale cyan line over the roads.
+  - Walkers are not drawn yet; inside a tube they are hidden anyway.

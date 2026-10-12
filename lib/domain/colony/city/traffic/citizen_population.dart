@@ -418,7 +418,11 @@ class CitizenPopulation {
   /// The share of arrivals who hold a licence, by the world they arrive on
   /// (§6.6).
   double get _ownership =>
-      sealed ? AgentTuning.carOwnershipSealed : AgentTuning.carOwnership;
+      (sealed ? AgentTuning.carOwnershipSealed : AgentTuning.carOwnership) *
+      ownershipScale;
+
+  /// The colony's Vehicle Licensing (`TrafficPolicy.ownershipScale`).
+  double ownershipScale = 1;
 
   /// [json] as a counter: a whole number at least 0, or 0.
   static int _countOf(Object? json) {

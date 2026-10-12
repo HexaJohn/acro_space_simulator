@@ -6,6 +6,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:acro_space_simulator/application/snapshot/trail_capture.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_config.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_starter_kit.dart';
@@ -165,6 +166,38 @@ void main() {
         if (f.wear[i] > 0.3) worn++;
       }
       expect(worn, greaterThan(30), reason: 'cells worn into a trail');
+    });
+
+    test('hands the scene its trails on the ground, and its rovers', () {
+      final r = city.body.radius;
+      TrailCapture.holdMs = 0;
+      final frame = TrailCapture.frameFor(city, 'moon',
+          groundFor: (key, local) => r + 2,
+          dirOf: (local) =>
+              city.localToBodyFixed(local, bodyRadiusM: r).normalized)!;
+      expect(frame.ribbons.points, isNotEmpty);
+      for (final pts in frame.ribbons.points) {
+        for (var k = 0; k < pts.length; k += 3) {
+          final len = math.sqrt(
+              pts[k] * pts[k] + pts[k + 1] * pts[k + 1] + pts[k + 2] * pts[k + 2]);
+          expect(len, closeTo(r + 2, 0.01), reason: 'on the ground');
+        }
+      }
+      // Unchanged wear: the same ribbons, so the scene keeps its mesh.
+      final again = TrailCapture.frameFor(city, 'moon',
+          groundFor: (key, local) => r + 2,
+          dirOf: (local) =>
+              city.localToBodyFixed(local, bodyRadiusM: r).normalized)!;
+      expect(identical(again.ribbons, frame.ribbons), isTrue);
+      // A leg set off now is a rover on the way.
+      final net = city.trails!;
+      final route = net.takenRoutes.last;
+      net.lay(route, startUs: city.agents.timeUs);
+      final withRover = TrailCapture.frameFor(city, 'moon',
+          groundFor: (key, local) => r + 2,
+          dirOf: (local) =>
+              city.localToBodyFixed(local, bodyRadiusM: r).normalized)!;
+      expect(withRover.rovers.length, greaterThanOrEqualTo(6));
     });
 
     test('grades a dirt road along its most beaten trail', () {

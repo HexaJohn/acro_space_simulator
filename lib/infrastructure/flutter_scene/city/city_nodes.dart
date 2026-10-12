@@ -99,6 +99,7 @@ export 'city_tile_mesher.dart'
 export 'city_tile_bucketing.dart' show ColonyTangentBasis;
 
 part 'agent_nodes.dart';
+part 'trail_nodes.dart';
 
 /// One generated archetype, uploaded.
 class _CityMesh {
@@ -1297,6 +1298,8 @@ class CityNodes {
     sw.reset();
     _syncTraffic(snap, origin, moved, focusWorld);
     _syncAgents(snap, origin, moved, focusWorld);
+    // The desire paths and their rovers (trail_nodes.dart), under the roots.
+    _syncTrails(snap);
     phaseMs['city.traffic'] = sw.elapsedMicroseconds / 1000;
     sw.reset();
     _syncCursor(snap, origin, moved);
@@ -3178,6 +3181,8 @@ class CityNodes {
       _scene.remove(root.node);
     }
     _roots.clear();
+    // The trails hung under them: forgotten, to be cut again on new roots.
+    _trailLayer.byColony.clear();
     // The tiles went with the roots: the next cut is every body's first.
     _instant.reset();
     _instantSites.reset();

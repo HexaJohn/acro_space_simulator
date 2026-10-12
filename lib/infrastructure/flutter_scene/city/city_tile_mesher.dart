@@ -1817,11 +1817,15 @@ class CityTileMeshJob {
             arcOffset: spanArc,
           );
         }
-        // Cars at the kerb, where the road keeps one to park at.
+        // Cars at the kerb, where the road keeps one to park at. Not while
+        // agents run: then the cars are real people's, parked where they
+        // parked, and a street baked solid with cars told a colony of six
+        // it had hundreds (docs/plans/desire-paths.md §1).
         if (paved &&
             cls.hasPavement &&
             parks &&
             r.knobs.onStreetParking &&
+            !r.knobs.agentSignals &&
             rb.curbCars > 0) {
           rb.curbCars -= CityTileMesher.curbParkingFor(
               rb.curbSolid, rb.curbGlass, sp, road, anchorBF,
@@ -1832,7 +1836,10 @@ class CityTileMeshJob {
         // A sealed road has no pavement (`walked` above), so the tube is the
         // only thing a kerb cut can break here: it rises over each drive on
         // its own kerb and the drive passes under (§10.2 Q8 option (a)).
-        if (road.sealed) {
+        // Not along a dirt track: a desire path graded into a road is a
+        // rover's way, and its walkers' tubes are their own network
+        // (docs/plans/desire-paths.md §9).
+        if (road.sealed && paved) {
           PedestrianTube.emit(rb.tubeSolid, rb.tubeGlass,
               pts: sp,
               halfWidthM: road.halfWidthM,

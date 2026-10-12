@@ -34,10 +34,12 @@ import 'city_patch_columns.dart';
 import 'city_site_frame.dart';
 import 'city_traffic_frame.dart';
 import 'traffic_capture.dart';
+import 'trail_capture.dart';
 
 // Site access on the frame (docs/plans/site-access.md §5.2), part of its
 // vocabulary like the patches.
 export 'city_site_frame.dart' show CitySiteFrame, SiteChunkGeometry;
+export 'trail_capture.dart' show CityTrailFrame, TrailRibbons;
 
 // The patch classes live in their own file (the columns are a fair amount of
 // code) but are part of the frame's vocabulary, so they come with it.
@@ -2615,6 +2617,11 @@ class WorldSnapshot {
   /// Transient: not serialised, since a JSON frame is not a save.
   final List<CityTrafficFrame> cityTraffic;
 
+  /// Every colony's desire paths and the rovers on them
+  /// (docs/plans/desire-paths.md §5 phase 3), by reference; empty for a
+  /// colony that keeps to its roads. Transient, like [cityTraffic].
+  final List<CityTrailFrame> cityTrails;
+
   /// Every colony's site access plans, their heights and keys
   /// (docs/plans/site-access.md §5.2), by reference: a colony whose book has
   /// published nothing has none, and neither has a hand-built frame (the
@@ -2644,6 +2651,7 @@ class WorldSnapshot {
     this.roadsRevision = const {},
     this.junctions = const [],
     this.cityTraffic = const [],
+    this.cityTrails = const [],
     this.sites = const [],
     this.atmospheres = const [],
   }) : patches = patches ?? CityPatchColumns.empty;
@@ -2670,6 +2678,7 @@ class WorldSnapshot {
         roadsRevision: roadsRevision,
         junctions: junctions,
         cityTraffic: cityTraffic,
+        cityTrails: cityTrails,
         sites: sites,
         atmospheres: atmospheres,
       );
@@ -2723,6 +2732,7 @@ class WorldSnapshot {
     }
     final roads = <RoadSnapshot>[];
     final cityTraffic = <CityTrafficFrame>[];
+    final cityTrails = <CityTrailFrame>[];
     final junctions = <JunctionSnapshot>[];
     final roadsRevision = <String, int>{};
     final sites = <CitySiteFrame>[];
@@ -3156,6 +3166,10 @@ class WorldSnapshot {
           cityTraffic.add(TrafficCapture.frameFor(city, body.id.value, roads,
               sites: siteFrame));
         }
+        // Its desire paths, draped on the ground the rest of it stands on.
+        final trails = TrailCapture.frameFor(city, body.id.value,
+            groundFor: groundFor, dirOf: dirOf);
+        if (trails != null) cityTrails.add(trails);
       }
     }
     return WorldSnapshot(
@@ -3182,6 +3196,7 @@ class WorldSnapshot {
       roadsRevision: roadsRevision,
       junctions: junctions,
       cityTraffic: cityTraffic,
+      cityTrails: cityTrails,
       sites: sites,
       patches: patches.build(),
       events: events,

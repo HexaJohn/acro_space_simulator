@@ -72,6 +72,7 @@ import 'citizen_population.dart';
 import 'citizen_table.dart';
 import 'citizen_trips.dart';
 import '../trails/trail_router.dart' show kTrailWornMps;
+import '../traffic_laws.dart';
 import 'edge_delay.dart';
 import 'graph_lineage.dart';
 import 'junction_arbiter.dart';
@@ -1024,6 +1025,8 @@ class _Core
   // ---- The tick ------------------------------------------------------------
 
   void advance(double dt) {
+    // The laws before anything parks: the prime adopts and places cars.
+    _applyPolicy();
     prime();
     // §6.2's one-tick contract, both ends of it. At the TOP: whatever moved
     // `population` that the agents did not — a revolt, a disaster, a relief
@@ -1148,9 +1151,30 @@ class _Core
     queue.delays = delays.published;
   }
 
+  /// What the colony's traffic laws ask (docs/plans/desire-paths.md §8), as
+  /// last handed to the consumers below.
+  TrafficPolicy _policy = TrafficPolicy.lawless;
+
+  /// The laws as they stand now, into the mover, the arrivals, the kerbs
+  /// and the route costs; nothing at all while they have not changed.
+  void _applyPolicy() {
+    final p = city.trafficPolicy;
+    if (p == _policy) return;
+    final rebuildCost = p.junctionScale != _policy.junctionScale;
+    _policy = p;
+    mover.speedScale = p.speedScale;
+    population.ownershipScale = p.ownershipScale;
+    final g = lg;
+    if (rebuildCost && g != null) {
+      final c = cost = RouteCost(g, junctionScale: p.junctionScale);
+      queue.bind(c);
+    }
+  }
+
   /// One sub-step, in §5.2's order.
   void _subStep() {
     final now = clock.timeUs;
+    _applyPolicy();
     // This sub-step's access events, and nothing older: the property test
     // reads the log after every sub-step (§5.5).
     events.beginStep();
@@ -1295,7 +1319,7 @@ class _Core
     // is carried across as a waiting route is (§7.6), and what could not be
     // carried is planned again from the site's out-joins.
     if (rm != null) _remapSiteHeld(rm);
-    final c = cost = RouteCost(next);
+    final c = cost = RouteCost(next, junctionScale: _policy.junctionScale);
     queue.bind(c);
     stats.bind(next);
     // A refreshed graph keeps its measured delays; a rebuilt one starts
@@ -1745,6 +1769,7 @@ class _Core
   /// (§6.6's 150 m). Travel arc along one edge, which beside a house IS the
   /// walk to the car.
   int _homeKerb(int buildingSlot) {
+    if (!_policy.kerbParking) return -1;
     final r = _accessRowOf(buildingSlot);
     if (r < 0) return -1;
     final edge = buildings.accEdge[r];
@@ -2051,7 +2076,8 @@ class _Core
     final g = lg;
     final sl = SlotPool.slotOf(handle);
     final el = g == null ? -1 : table.elem[sl];
-    if (g != null && el >= 0 && el < g.laneCount) {
+    // A Parking Ordinance keeps the kerb clear: garaged instead.
+    if (_policy.kerbParking && g != null && el >= 0 && el < g.laneCount) {
       final slot = kerbs.reserveAhead(el, table.destS[sl].toDouble(), handle);
       if (slot >= 0) {
         _one[0] = el;
@@ -2494,7 +2520,7 @@ class _Core
       t = buildings.accT[r].toDouble();
       side = buildings.accBits[r] & kAccLeft == 0 ? 1 : 0;
     }
-    if (edge < 0) return false;
+    if (edge < 0 || !_policy.kerbParking) return false;
     final slot = kerbs.nearestFree(edge, t, side);
     if (slot < 0) return false;
     parked.moveToKerb(car, kerbs.slotEdge(slot), slot, kerbs.slotSide(slot));

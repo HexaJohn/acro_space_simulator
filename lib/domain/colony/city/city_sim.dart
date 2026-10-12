@@ -54,6 +54,7 @@ import 'sprawl_plan.dart';
 import 'commodity.dart';
 import 'traffic/city_agents.dart';
 import '../../terrain/terrain_field.dart';
+import 'traffic_laws.dart';
 import 'trails/trail_network.dart';
 
 /// A craft visiting a spaceport — a relief mission or a scheduled delivery. It
@@ -253,7 +254,17 @@ enum Law {
   /// Vehicles keep to the roads (docs/plans/desire-paths.md §4): no trip
   /// crosses open ground, so the desire paths fade and a lot no road
   /// reaches is cut off. Appended: saves keep laws by name.
-  offRoadBan('Off-Road Ban', 'vehicles keep to roads, trails fade');
+  offRoadBan('Off-Road Ban', 'vehicles keep to roads, trails fade'),
+
+  // The traffic laws (docs/plans/desire-paths.md §4, §8): what they ask of
+  // the vehicles is `TrafficPolicy.of`, and the crashes they prevent are
+  // `TrafficSafety`.
+  trafficCode('Traffic Code', 'right of way: crashes −−, junctions quicker, funds −'),
+  speedLimits('Speed Limits', 'crashes −, injuries −, trips slower'),
+  parkingOrdinance('Parking Ordinance', 'no kerb parking: cars park in lots'),
+  pedestrianPriority(
+      'Pedestrian Priority', 'crashes −, junctions slower, happiness +'),
+  vehicleLicensing('Vehicle Licensing', 'crashes −, fewer cars, funds +');
 
   final String label;
   final String effect;
@@ -526,6 +537,14 @@ class CitySim {
 
   /// Whether a trip may cross open ground: trails are on and no ban stands.
   bool get offRoadLegal => trails != null && !laws.contains(Law.offRoadBan);
+
+  /// What the traffic laws ask of the colony's vehicles, read afresh: the
+  /// agents take it every sub-step.
+  TrafficPolicy get trafficPolicy => TrafficPolicy.of(laws);
+
+  /// The colony's crashes (docs/plans/desire-paths.md §8).
+  TrafficSafety safety = TrafficSafety();
+  double _safetyRoadM = -1, _safetyOffRoadM = -1;
 
   double crime = 0;
   double corruption = 0;
@@ -1382,6 +1401,7 @@ class CitySim {
 
     // The desire paths first: what they serve is what the tick reads.
     syncTrails(dt);
+    _trafficSafetyTick(dt);
 
     final active = activeSpecs.toList();
 
@@ -1832,8 +1852,12 @@ class CitySim {
         warDeaths += pop * 0.0008; // standing-army attrition
       }
     }
-    deathRate =
-        (hungerDeaths + diseaseDeaths + warDeaths + radDeaths) * forgiveMult;
+    deathRate = (hungerDeaths +
+            diseaseDeaths +
+            warDeaths +
+            radDeaths +
+            safety.deathRate(dt)) *
+        forgiveMult;
     final died = deathRate * dt;
     // E8 (docs/plans/agent-traffic.md §12.1 step 12, §6.2's one-tick
     // contract). The rate above is unchanged; only who SPENDS it moves. With
@@ -2209,8 +2233,34 @@ class CitySim {
     return coverage * 0.1; // up to +10% happiness at full transit coverage
   }
 
+  /// The distance driven since the last tick, on roads and across open
+  /// ground, into the crash model.
+  void _trafficSafetyTick(double dt) {
+    final road = agents.stats.totalDrivenM;
+    final off = trails?.offRoadM ?? 0;
+    // The first tick after a load only sets the marks: the distance before
+    // it was the saved run's.
+    if (_safetyRoadM < 0) {
+      _safetyRoadM = road;
+      _safetyOffRoadM = off;
+      return;
+    }
+    final dRoad = road - _safetyRoadM, dOff = off - _safetyOffRoadM;
+    _safetyRoadM = road;
+    _safetyOffRoadM = off;
+    safety.advance(dt, dRoad > 0 ? dRoad : 0, dOff > 0 ? dOff : 0,
+        trafficPolicy);
+  }
+
+  /// What the colony's crashes cost its mood: a crash a day for every fifty
+  /// people is a 4% dip, and none costs more than 8%.
+  double trafficMood() =>
+      (safety.crashesPerDay / math.max(50.0, population) * 2).clamp(0.0, 0.08);
+
   double lawHappiness() {
     var h = 0.0;
+    h -= trafficMood();
+    if (has(Law.pedestrianPriority)) h += 0.02;
     if (has(Law.freeHealthcare)) h += 0.12;
     if (has(Law.freePublicTransit)) h += 0.08;
     if (has(Law.homelessShelters)) h += 0.05;
@@ -2231,6 +2281,11 @@ class CitySim {
     if (has(Law.wealthTax)) f += 0.8 * scale;
     if (has(Law.industrialSubsidy)) f -= 0.3 * scale;
     if (has(Law.robotTax)) f -= 0.5 * scale; // UBI payouts cost the treasury
+    // Traffic: a code wants policing, licences bring fees in.
+    if (has(Law.trafficCode)) f -= 0.4 * scale;
+    if (has(Law.speedLimits)) f -= 0.1 * scale;
+    if (has(Law.pedestrianPriority)) f -= 0.1 * scale;
+    if (has(Law.vehicleLicensing)) f += 0.3 * scale;
     return f;
   }
 
@@ -2322,6 +2377,13 @@ class CitySim {
     band(Law.robotTax, infiniteRobotics ? inequality : 0.0, 0.45, 0.25);
     // Roads reach nearly everything: the colony keeps to them.
     if (trails != null) band(Law.offRoadBan, roadServedShare(), 0.90, 0.75);
+    // Crashes make the case for rules of the road; a big town wants its
+    // walkers safe and its drivers licensed.
+    band(Law.trafficCode, safety.crashesPerDay, 2, 0.5);
+    band(Law.speedLimits, safety.crashesPerDay, 4, 1);
+    band(Law.pedestrianPriority, population.toDouble(), 300, 250);
+    band(Law.vehicleLicensing, population.toDouble(), 800, 650);
+    band(Law.parkingOrdinance, population.toDouble(), 1500, 1200);
   }
 
   /// The share of built lots the road graph alone serves: 1 with none.
@@ -5239,6 +5301,7 @@ class CitySim {
         if (taxRate != defaultTaxRate) 'taxRate': taxRate,
         if (laws.isNotEmpty) 'laws': [for (final l in laws) l.name],
         'trails': ?trails?.toJson(),
+        'safety': ?safety.toJson(),
         if (rebellion != 0) 'rebellion': rebellion,
         if (crime != 0) 'crime': crime,
         if (corruption != 0) 'corruption': corruption,
@@ -5447,6 +5510,11 @@ class CitySim {
     final savedLaws = j['laws'];
     if (savedLaws is List) {
       sim.laws.addAll(Law.values.where((l) => savedLaws.contains(l.name)));
+    }
+    final savedSafety = j['safety'];
+    if (savedSafety is Map) {
+      sim.safety =
+          TrafficSafety.fromJson(Map<String, dynamic>.from(savedSafety));
     }
     final savedTrails = j['trails'];
     if (savedTrails is Map) {

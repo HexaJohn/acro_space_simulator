@@ -109,6 +109,10 @@ class TrafficStats {
   /// the first.
   double tripRatio = 1;
 
+  /// Metres driven on the roads since the colony's agents started: what the
+  /// crash model reads (docs/plans/desire-paths.md §8).
+  double totalDrivenM = 0;
+
   /// Seconds a completed trip took, averaged the same way.
   double avgTripS = 0;
 
@@ -259,6 +263,7 @@ class TrafficStats {
     if (lg == null) return;
     final alpha = 1 -
         Lut.expNeg(AgentTuning.congestionEpochS / AgentTuning.congestionWindowS);
+    totalDrivenM += mover.drivenM;
     _emaDriven += alpha * (mover.drivenM - _emaDriven);
     _emaLimit += alpha * (mover.limitM - _emaLimit);
     congestionIndex =

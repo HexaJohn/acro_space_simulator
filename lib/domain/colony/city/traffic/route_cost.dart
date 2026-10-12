@@ -137,7 +137,9 @@ class RouteCost {
       this.conCost, this.edgeEndE, this.edgeEndN, this.hPerM);
 
   /// The prices of [lg].
-  factory RouteCost(LaneGraph lg) {
+  /// [junctionScale] multiplies every junction's penalty: the colony's
+  /// Traffic Code and Pedestrian Priority (`TrafficPolicy.junctionScale`).
+  factory RouteCost(LaneGraph lg, {double junctionScale = 1}) {
     final nE = lg.edgeCount, nC = lg.connectorCount;
     final perM = Float64List(nE), time = Float64List(nE);
     var hPerM = double.infinity;
@@ -189,8 +191,9 @@ class RouteCost {
       final kind = lg.kindOf(lg.edgeTo[e]);
       final road = e < ctl.edgeStops.length;
       final j = junctionPenaltyS(kind,
-          stops: road && ctl.edgeStops[e] == 1,
-          yields: road && ctl.edgeYields[e] == 1);
+              stops: road && ctl.edgeStops[e] == 1,
+              yields: road && ctl.edgeYields[e] == 1) *
+          junctionScale;
       for (var i = lg.moveStart[e]; i < lg.moveStart[e + 1]; i++) {
         final o = lg.moveOut[i];
         final de = startE[o] - endE[e], dn = startN[o] - endN[e];

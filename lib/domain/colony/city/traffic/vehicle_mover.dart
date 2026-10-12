@@ -208,6 +208,11 @@ class VehicleMover {
 
   /// [edgeDrivenM] and [edgeLimitM] over the whole network.
   double drivenM = 0;
+
+  /// Every desired speed's multiplier: the colony's Speed Limits
+  /// (`TrafficPolicy.speedScale`). The free times the delays are measured
+  /// against keep the posted limits, so a slower town reads as delay.
+  double speedScale = 1;
   double limitM = 0;
 
   // ---- The delay table's books (§4.2, edge_delay.dart) ------------------------
@@ -529,12 +534,13 @@ class VehicleMover {
   double _conV0(int c, double f) {
     final lg = graph;
     final a = lg.edgeLimit[lg.conFromEdge(c)], b = lg.edgeLimit[lg.conToEdge(c)];
-    final v = (a < b ? a : b) * f;
+    final v = (a < b ? a : b) * f * speedScale;
     final cap = lg.conVmax[c];
     return v < cap ? v : cap.toDouble();
   }
 
-  double _laneV0(int lane, double f) => graph.edgeLimit[graph.laneEdge[lane]] * f;
+  double _laneV0(int lane, double f) =>
+      graph.edgeLimit[graph.laneEdge[lane]] * f * speedScale;
 
   /// The leader of the vehicle at the front of its element: the last
   /// vehicle on the next elements of its route, a line it may not cross,

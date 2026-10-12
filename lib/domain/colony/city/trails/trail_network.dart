@@ -94,6 +94,10 @@ class TrailNetwork {
   /// Dirt roads laid along trails so far ([dueRoads]' callers count them).
   int roadsLaid = 0;
 
+  /// The routes driven lately, least recently first: what the scene
+  /// draws a trail along (trail_capture.dart), and [dueRoads] reads.
+  Iterable<TrailRoute> get takenRoutes => _taken.values;
+
   /// The legs under way, oldest first: what a rover is drawn driving.
   final List<TrailLeg> active = [];
 

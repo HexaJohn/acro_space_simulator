@@ -301,6 +301,18 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         _socialBar('Inequality', sim.inequality, const Color(0xFFE3A857)),
         _socialBar('Rebellion', sim.rebellion, AppTheme.danger),
         _socialBar('Disease', sim.disease, const Color(0xFF9CCC65)),
+        // Crashes (docs/plans/desire-paths.md §8): ten a day is a full bar.
+        _socialBar('Crashes', (sim.safety.crashesPerDay / 10).clamp(0.0, 1.0),
+            const Color(0xFFFFB74D)),
+        Padding(
+          padding: const EdgeInsets.only(left: 84, bottom: 2),
+          child: Text(
+              '${sim.safety.crashesPerDay.toStringAsFixed(1)} a day · '
+              '${sim.safety.crashes} so far · '
+              '${sim.safety.injured.round()} hurt · '
+              '${sim.safety.killed.round()} killed',
+              style: AppTheme.body.copyWith(fontSize: 11)),
+        ),
         const SizedBox(height: 12),
         const Text('LOYALTY', style: AppTheme.heading),
         const SizedBox(height: 6),
