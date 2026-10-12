@@ -2350,9 +2350,19 @@ extension _SimulationViewCombat on _SimulationViewState {
                   target
                     ..infinitePower = true
                     ..stock[Commodity.missiles] = 20;
-                  rebuild(() => st.debugNote = placed
-                      ? 'A Missile Silo stands in ${target.name}. Click it: "Launch a missile strike".'
-                      : 'No free lot for a silo.');
+                  // Aiming at once, as its site row's "Launch a missile
+                  // strike" would: a street lot's silo is easy to lose.
+                  rebuild(() {
+                    st.debugNote = placed
+                        ? 'A Missile Silo stands in ${target.name}, and a strike is being aimed from it: '
+                            'click the ground.'
+                        : 'No free lot for a silo.';
+                    if (placed) {
+                      st
+                        ..missileFrom = target.id
+                        ..missileAimDir = null;
+                    }
+                  });
                 }),
       button('Skip 30 s of battle', () => run({'step': '30'}, (_) => 'Skipped 30 s.')),
       if (st.debugNote case final note?)
