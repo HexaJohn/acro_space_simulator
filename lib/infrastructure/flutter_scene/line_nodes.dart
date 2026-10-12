@@ -228,6 +228,10 @@ class LineNodes {
           frac = [
             for (var i = 0; i < world.length; i++) ((i - i0) % m + m) % m / m,
           ];
+        } else if (v.id.startsWith('missile-')) {
+          // A salvo's arc ends where it lands (§7O): drawn whole to the
+          // ring, not faded out before it.
+          frac = [for (var i = 0; i < world.length; i++) 1.0];
         } else {
           final m = world.length - 1;
           frac = [for (var i = 0; i <= m; i++) 1.0 - i / m];
