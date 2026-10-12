@@ -72,9 +72,81 @@ class FactoryItems {
       id: 'crate:tubes', label: 'Tube Crate', loadClass: LoadClass.pallet,
       kgPerUnit: 800, commodity: 'tubes', commodityUnits: 10);
 
+  // ---- Every colony good, loose and packed (wave 2) ----
+  // Defined ONCE here so parallel chains never register the same id twice.
+  // A loose item is ONE commodity unit (mass from economy/commodity_mass.dart);
+  // a pack is several, sized to what a real handler moves as one load.
+  // Chains add only their own intermediates, prefixed '<plant>:'.
+
+  static const water = FactoryItem(
+      id: 'water', label: 'Water', loadClass: LoadClass.hand, kgPerUnit: 1);
+  /// An IBC tote: a tonne of water on a pallet.
+  static const toteWater = FactoryItem(
+      id: 'tote:water', label: 'Water Tote', loadClass: LoadClass.pallet,
+      kgPerUnit: 1000, commodity: 'water', commodityUnits: 1000);
+  static const food = FactoryItem(
+      id: 'food', label: 'Food', loadClass: LoadClass.hand, kgPerUnit: 1);
+  /// A pallet of boxed food, half a tonne.
+  static const crateFood = FactoryItem(
+      id: 'crate:food', label: 'Food Pallet', loadClass: LoadClass.pallet,
+      kgPerUnit: 500, commodity: 'food', commodityUnits: 500);
+  static const oxygen = FactoryItem(
+      id: 'oxygen', label: 'Oxygen', loadClass: LoadClass.hand, kgPerUnit: 1);
+  /// A cylinder bundle: 100 kg of O₂ in a racked pack.
+  static const packOxygen = FactoryItem(
+      id: 'pack:oxygen', label: 'O₂ Cylinder Pack',
+      loadClass: LoadClass.pallet, kgPerUnit: 400, commodity: 'oxygen',
+      commodityUnits: 100);
+  static const medicine = FactoryItem(
+      id: 'medicine', label: 'Medicine', loadClass: LoadClass.hand,
+      kgPerUnit: 1);
+  static const crateMedicine = FactoryItem(
+      id: 'crate:medicine', label: 'Medicine Case', loadClass: LoadClass.hand,
+      kgPerUnit: 25, commodity: 'medicine', commodityUnits: 25);
+  /// A tonne of propellant in a tote: pallet work.
+  static const fuel = FactoryItem(
+      id: 'fuel', label: 'Fuel', loadClass: LoadClass.pallet, kgPerUnit: 1000);
+  static const oxidizer = FactoryItem(
+      id: 'oxidizer', label: 'Oxidizer', loadClass: LoadClass.pallet,
+      kgPerUnit: 1000);
+  static const electronics = FactoryItem(
+      id: 'electronics', label: 'Electronics', loadClass: LoadClass.hand,
+      kgPerUnit: 10);
+  static const crateElectronics = FactoryItem(
+      id: 'crate:electronics', label: 'Electronics Crate',
+      loadClass: LoadClass.pallet, kgPerUnit: 100, commodity: 'electronics',
+      commodityUnits: 10);
+  /// Engine and avionics sections: a hoist or a crane, never a back.
+  static const rocketParts = FactoryItem(
+      id: 'rocketParts', label: 'Rocket Parts', loadClass: LoadClass.heavy,
+      kgPerUnit: 100);
+  static const guns = FactoryItem(
+      id: 'guns', label: 'Guns', loadClass: LoadClass.hand, kgPerUnit: 4);
+  static const crateGuns = FactoryItem(
+      id: 'crate:guns', label: 'Arms Crate', loadClass: LoadClass.hand,
+      kgPerUnit: 40, commodity: 'guns', commodityUnits: 10);
+  static const ammo = FactoryItem(
+      id: 'ammo', label: 'Ammo', loadClass: LoadClass.hand, kgPerUnit: 12);
+  static const crateAmmo = FactoryItem(
+      id: 'crate:ammo', label: 'Ammo Pallet', loadClass: LoadClass.pallet,
+      kgPerUnit: 600, commodity: 'ammo', commodityUnits: 50);
+  static const rations = FactoryItem(
+      id: 'rations', label: 'Rations', loadClass: LoadClass.hand,
+      kgPerUnit: 1);
+  static const crateRations = FactoryItem(
+      id: 'crate:rations', label: 'Ration Pallet', loadClass: LoadClass.pallet,
+      kgPerUnit: 200, commodity: 'rations', commodityUnits: 200);
+  static const missiles = FactoryItem(
+      id: 'missiles', label: 'Missile', loadClass: LoadClass.heavy,
+      kgPerUnit: 1000);
+
   static final Map<String, FactoryItem> table = {
     for (final i in const [
       ore, pigIron, slag, steelBillet, steel, tubes, crateSteel, crateTubes,
+      water, toteWater, food, crateFood, oxygen, packOxygen, medicine,
+      crateMedicine, fuel, oxidizer, electronics, crateElectronics,
+      rocketParts, guns, crateGuns, ammo, crateAmmo, rations, crateRations,
+      missiles,
     ])
       i.id: i,
   };
