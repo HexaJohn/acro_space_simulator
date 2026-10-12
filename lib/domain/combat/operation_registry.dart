@@ -176,8 +176,19 @@ class OperationRegistry {
   /// registry: a save taken between a click and the next tick keeps the click.
   final CommandInbox inbox = CommandInbox();
 
-  /// Why the last launch was refused, for the planner. Not saved.
-  String? lastRefusal;
+  /// Why the last refused order was refused (a launch, a strike, a power);
+  /// null after one that went through. Not saved.
+  String? get lastRefusal => _lastRefusal;
+  set lastRefusal(String? why) {
+    _lastRefusal = why;
+    if (why != null) refusals++;
+  }
+
+  String? _lastRefusal;
+
+  /// Orders refused this session: what a view counts to say each refusal
+  /// once, even the same one twice running. Not saved.
+  int refusals = 0;
 
   /// Resolved operations kept for after-action reports.
   static const int keepResolved = 8;

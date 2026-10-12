@@ -114,6 +114,9 @@ class _CombatViewState {
 
   /// What the debug panel's last combat button did, for its note.
   String? debugNote;
+
+  /// [OperationRegistry.refusals] already said.
+  int refusalsSeen = 0;
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -123,6 +126,22 @@ extension _SimulationViewCombat on _SimulationViewState {
       _combatViewStates[this] ??= _CombatViewState();
 
   OperationRegistry get _operations => _session.operations;
+
+  /// A refused order, said once where the player sees it: a launch the
+  /// colonies could no longer field when it reached them, a strike with no
+  /// round aboard. Applied a tick after the click, so no sheet can say it.
+  void _announceRefusal() {
+    final n = _operations.refusals;
+    if (n == _combatState.refusalsSeen) return;
+    _combatState.refusalsSeen = n;
+    final why = _operations.lastRefusal;
+    if (why == null || !mounted) return;
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+      key: const Key('combat-refusal'),
+      content: Text(why),
+      duration: const Duration(seconds: 4),
+    ));
+  }
 
   /// The site-sheet row that opens the planner, on a port the rebels hold.
   List<Widget> _combatSiteRows(CitySim city, String site, CityBuildingSpec spec) {
@@ -2065,8 +2084,8 @@ extension _SimulationViewCombat on _SimulationViewState {
           target == null || l!.allegiance == Allegiance.independent
               ? null
               : () => run({'fixture': 'independent'},
-                  (_) => 'Independent. Open its panel and pick Force. '
-                      'Garrison Town beside it has 3 barracks.')),
+                  (_) => 'Independent. Click the red Independent chip in the top bar, '
+                      'then Force. Garrison Town beside it has 3 barracks.')),
       button(
           'It rises (pop 300)',
           target == null || !l!.occupied
@@ -2690,6 +2709,13 @@ extension _SimulationViewCombat on _SimulationViewState {
       }
       _cities.add(src);
     }
+    // A debug colony: staffed and stocked whatever its size. A starter kit
+    // on the Moon has homes, power and air for a handful, so the 300 below
+    // settled back to a few, its barracks went unstaffed, and a launch made
+    // a minute later fielded nobody.
+    src
+      ..infiniteRobotics = true
+      ..infiniteRes = true;
     src.stock[Commodity.rations] = 400;
     src.stock[Commodity.guns] = 80;
     src.stock[Commodity.ammo] = 400;

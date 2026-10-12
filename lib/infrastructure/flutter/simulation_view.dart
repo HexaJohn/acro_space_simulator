@@ -1989,6 +1989,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     // ground baking off the main thread; a gamepad's share of the input (§7K).
     _stepLive(frameDt);
     final pad = _padStep(frameDt);
+    _announceRefusal();
 
     // Freecam flight: WASD in the camera frame, Q/E down/up, Shift boosts.
     // Speed scales with zoom range so it feels right from surface to map.
@@ -3449,7 +3450,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                         // panel (top-right) — same toggle, opposite corners
                         // so neither crowds the other.
                         if (_showDebugPanel) Positioned(top: 8, left: 8, child: _perfPanel()),
-                        if (_showDebugPanel) Positioned(top: 8, right: 8, child: _debugPanel()),
+                        // Under the colony's top bar in a colony view.
+                        if (_showDebugPanel)
+                          Positioned(top: widget.cityMode ? 72 : 8, right: 8, child: _debugPanel()),
                         // Encounter-planner panel (top-right; slides left of
                         // the debug panel when both are open).
                         if (_plannerActive)
