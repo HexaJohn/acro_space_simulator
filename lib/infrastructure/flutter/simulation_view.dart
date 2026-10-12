@@ -3316,7 +3316,6 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   if (_colonyMarkers(_sceneWorld) case final markers?) markers,
                   if (_battleOverlay(_sceneWorld) case final battle?) battle,
                   if (_missileOverlay(_sceneWorld) case final missiles?) missiles,
-                  if (_missileCard() case final card?) card,
                   if (_liveHud() case final hud?) hud,
                   if (_commandCard() case final card?) card,
                   // Reflection-capture debug overlay (bottom-left, above the
@@ -3567,6 +3566,10 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // the HUD. Built by the colony part (`_cityPickLayer`), which
                 // owns its gate and which gestures each tool declares.
                 if (_editingCity != null) _cityPickLayer(),
+                // The missile strike being aimed (combat.md 7O): over the pick
+                // layer, which takes every other click while one is aimed, so its
+                // Launch and Cancel are not ground clicks (found playing it).
+                if (_missileCard() case final card?) card,
                 // City mode's own few controls, in place of the flight
                 // stack: over the pick layer, so a held tool cannot swallow
                 // a click on Save, and UNDER the toolbar and the HUD, so a
