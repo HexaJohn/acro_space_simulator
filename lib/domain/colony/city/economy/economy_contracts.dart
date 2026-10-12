@@ -62,6 +62,8 @@ class MarketFacts {
     this.demandPerS = const {},
     this.supplyPerS = const {},
     this.population = 0,
+    this.foodMult = 1,
+    this.surfacePressureKPa,
   });
 
   /// `CelestialBody.id` the colony stands on ('earth', 'mars', 'moon' …).
@@ -86,6 +88,15 @@ class MarketFacts {
   final Map<String, double> supplyPerS;
 
   final int population;
+
+  /// Site yield multiplier on food (`biomeFx.food`), like [waterMult].
+  final double foodMult;
+
+  /// Surface air pressure, kPa, which with [atmosphere]'s fractions gives
+  /// each gas's partial pressure (an O₂ harvester on Mars' 0.6 kPa of CO₂
+  /// gets ~1% of what it gets from Earth's air). Null = the body's datum
+  /// pressure from its reference data; terraforming passes the live value.
+  final double? surfacePressureKPa;
 }
 
 /// A colony's local prices: credits per commodity unit, plus the wage and
