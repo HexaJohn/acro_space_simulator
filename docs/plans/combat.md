@@ -866,6 +866,14 @@ as a strike. Each salvo costs the firing colony 4 missiles; one salvo per silo a
 **Cut *(default)*:** interception (the AA turrets answer the rebels' abstract missile only), boost and reentry
 (the salvo leaves the silo at burnout), drag (on a body with air the arc is flown as if airless), other bodies.
 
+**Built** cdac4ea, with fixes b011ded, c4879c0, 5c7ecac (line), c3c47e1 (Launch), 79ad299 (gates). **Played on the
+Moon with real input:** a strike on a point aimed by clicking the ground, the arc and "2.1 km, 51 s of flight"
+drawn before Launch; the salvo flew with its pip, the craft line from it to the ring, and a countdown; it landed and
+cut its crater. Found playing it: the aiming card's Launch was under the ground-pick layer; the craft line was drawn
+only near the focused craft, at 35% alpha, and inertial (off the ring by the body's turn) — now always, full colour,
+over the ground it crosses; and no base in play ever had a silo or an airfield behind it (the source snapshot left
+both out of the gates), so the operation silo strike and the gunship had only ever been seen granted by the dev hook.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.
