@@ -2337,6 +2337,23 @@ extension _SimulationViewCombat on _SimulationViewState {
                             'colonial neighbour on its body.';
                   });
                 }),
+      button(
+          'Give it a Missile Silo',
+          target == null || target.buildingParcels().any((b) => b.$2.type == 'silo')
+              ? null
+              : () {
+                  // §7O: a silo, 20 missiles, and the compute and power it
+                  // needs (a starter kit has neither to spare).
+                  final silo = kUtilCatalog.firstWhere((s) => s.type == 'silo');
+                  final placed = [...target.layout.autoParcels]
+                      .any((lot) => !target.parcelBuildings.containsKey(lot.id) && target.placeOnParcel(lot.id, silo));
+                  target
+                    ..infinitePower = true
+                    ..stock[Commodity.missiles] = 20;
+                  rebuild(() => st.debugNote = placed
+                      ? 'A Missile Silo stands in ${target.name}. Click it: "Launch a missile strike".'
+                      : 'No free lot for a silo.');
+                }),
       button('Skip 30 s of battle', () => run({'step': '30'}, (_) => 'Skipped 30 s.')),
       if (st.debugNote case final note?)
         Padding(padding: const EdgeInsets.fromLTRB(4, 2, 4, 6), child: Text(note, style: dim)),
