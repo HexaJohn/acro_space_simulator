@@ -233,7 +233,7 @@ class LineNodes {
           frac = [for (var i = 0; i <= m; i++) 1.0 - i / m];
         }
         final (pts, cols) = _fadedStrip(world, frac,
-            v.id == focusVesselId ? _pathColor : _pathDimColor, origin, camera);
+            v.id == focusVesselId || v.id.startsWith('missile-') ? _pathColor : _pathDimColor, origin, camera);
         _setSpec('path/${v.id}', seen, pts, _pathColor,
             width: 2.0, perVertexColor: cols);
       }

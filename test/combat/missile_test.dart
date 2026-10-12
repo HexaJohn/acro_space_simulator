@@ -26,7 +26,6 @@ import 'package:acro_space_simulator/domain/multiplayer/command.dart';
 import 'package:acro_space_simulator/domain/multiplayer/player.dart';
 import 'package:acro_space_simulator/domain/orbits/soi_transition_service.dart';
 import 'package:acro_space_simulator/domain/shared/vector3.dart';
-import 'package:acro_space_simulator/domain/simulation/epoch.dart';
 import 'package:acro_space_simulator/domain/simulation/simulation_clock.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
 import 'package:acro_space_simulator/domain/vessel/vessel.dart';
@@ -114,12 +113,15 @@ void main() {
         final snap = VesselSnapshot.of(v, system: SampleWorld.realSystem(), epoch: w.clock.epoch);
         expect(snap.trajectoryOpen, isTrue, reason: 'cut at the impact, not the full ellipse');
         arcPoints = snap.trajectory.length ~/ 3;
-        // The arc ends at the aimed ground, where the Moon will have turned it.
+        // The arc is drawn over the ground it crosses: it ends on the aimed
+        // ground as the Moon stands now — the ring it lands in.
         final m = ops.missiles.single;
         final end = Vector3(snap.trajectory[snap.trajectory.length - 3], snap.trajectory[snap.trajectory.length - 2],
             snap.trajectory.last);
-        final aimThen = moon.orientationAt(Epoch(m.impactEpochS)).rotate(m.aimBF!);
-        expect((end - aimThen).length, lessThan(5), reason: 'the line ends where it lands');
+        final aimNow = moon.orientationAt(w.clock.epoch).rotate(m.aimBF!);
+        expect((end - aimNow).length, lessThan(5), reason: 'the line ends on the ring');
+        final start = Vector3(snap.trajectory[0], snap.trajectory[1], snap.trajectory[2]);
+        expect((start - v.state.position).length, lessThan(1), reason: 'and starts at the salvo');
         // ignore: avoid_print
         print('salvo: ${((m.impactEpochS - m.launchEpochS)).toStringAsFixed(1)} s of flight, '
             '${(m.siloBF!.normalized.dot(m.aimBF!.normalized)).toStringAsFixed(6)} cos of arc');

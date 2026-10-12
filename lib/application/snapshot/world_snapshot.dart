@@ -279,17 +279,23 @@ class VesselSnapshot {
         final arcEnd = v.arcEndEpochS;
         if (arcEnd != null && arcEnd > epoch.seconds) {
           // A flight that ends by plan — a silo salvo's impact (combat.md
-          // §7O): the conic from here to there, and no further.
+          // §7O): the conic from here to there, and no further. Drawn over
+          // the GROUND it crosses, not in inertial space: each point where it
+          // will be, carried back by the body's turn since now, so the line
+          // ends on the ring it lands in. Inertial, it ended where the target
+          // will be at impact — off the ring by the body's turn, hundreds of
+          // km on a long flight over Earth.
           const n = 96;
           final orbit0 = const StateVectorOrbitConverter().toOrbit(
               position: v.state.position, velocity: v.state.velocity, body: body, epoch: epoch);
+          final now = body.orientationAt(epoch);
           trajectory = [
             for (var i = 0; i <= n; i++)
               ...() {
-                final p = const StateVectorOrbitConverter()
-                    .toStateVector(orbit0, Epoch(epoch.seconds + (arcEnd - epoch.seconds) * i / n))
-                    .position;
-                return [p.x, p.y, p.z];
+                final t = Epoch(epoch.seconds + (arcEnd - epoch.seconds) * i / n);
+                final p = const StateVectorOrbitConverter().toStateVector(orbit0, t).position;
+                final g = now.rotate(body.orientationAt(t).conjugate.rotate(p));
+                return [g.x, g.y, g.z];
               }(),
           ];
           trajectoryOpen = true;
