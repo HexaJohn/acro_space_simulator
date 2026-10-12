@@ -3130,12 +3130,12 @@ final class _TrailLegs implements OffRoadLegs {
   final BuildingTable buildings;
 
   @override
-  ({double timeS, double freeFlowS})? leg(int from, int to) {
+  ({double timeS, double freeFlowS})? leg(int from, int to, int nowUs) {
     final tr = city.trails;
     if (tr == null || !city.offRoadLegal) return null;
     final r = tr.leg(buildings.siteId[from], buildings.siteId[to]);
     if (r == null) return null;
-    tr.lay(r);
+    tr.lay(r, startUs: nowUs);
     return (timeS: r.timeS, freeFlowS: r.lengthM / kTrailWornMps);
   }
 }

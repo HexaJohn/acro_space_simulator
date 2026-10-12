@@ -108,7 +108,7 @@ abstract interface class OffRoadLegs {
   /// takes, and how long it would on a beaten track — what a commute's
   /// [TrafficStats.tripDone] weighs it against. Null when there is none: no
   /// trails, a ban, or ground the rover cannot cross.
-  ({double timeS, double freeFlowS})? leg(int from, int to);
+  ({double timeS, double freeFlowS})? leg(int from, int to, int nowUs);
 }
 
 /// A trip's leg: out (to work, to an errand) or back home.
@@ -588,7 +588,7 @@ class CitizenTrips implements SpawnSink {
   /// the leg's time, which their dwell there starts after. False when there
   /// is no such leg, and then nothing about them has changed.
   bool _offRoadLeg(int c, int i, int from, int to, TripPurpose p) {
-    final leg = offRoad?.leg(from, to);
+    final leg = offRoad?.leg(from, to, nowUs);
     if (leg == null) return false;
     sent++;
     offRoadTrips++;

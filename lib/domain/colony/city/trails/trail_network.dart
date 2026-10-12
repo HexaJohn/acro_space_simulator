@@ -50,6 +50,17 @@ const double _promoteCadenceS = 120;
 /// Routes remembered for that look: the most recently driven, by ends.
 const int _takenCap = 128;
 
+/// Legs drawn under way at once, at most.
+const int _activeCap = 256;
+
+/// A leg being driven: its route, and when it set off and for how long, in
+/// agent µs.
+class TrailLeg {
+  const TrailLeg(this.route, this.startUs, this.durUs);
+  final TrailRoute route;
+  final int startUs, durUs;
+}
+
 class TrailNetwork {
   TrailNetwork({TrailField? field}) : _field = field;
 
@@ -82,6 +93,13 @@ class TrailNetwork {
 
   /// Dirt roads laid along trails so far ([dueRoads]' callers count them).
   int roadsLaid = 0;
+
+  /// The legs under way, oldest first: what a rover is drawn driving.
+  final List<TrailLeg> active = [];
+
+  /// Metres driven across open ground so far: the crash model's off-road
+  /// distance (desire-paths.md §8).
+  double offRoadM = 0;
 
   /// Keeps the field in step with the plat. [shapeKey] names the plat as it
   /// stands — when it moves, or every [_shapeCadenceS] regardless, the
@@ -191,8 +209,13 @@ class TrailNetwork {
   }
 
   /// [route] was taken: its cells take the wear of one leg.
-  void lay(TrailRoute route) {
+  void lay(TrailRoute route, {int startUs = 0}) {
     legs++;
+    offRoadM += route.lengthM;
+    // A leg is drawn while it is driven; the oldest go first once a town
+    // has more out at once than anyone would count.
+    active.add(TrailLeg(route, startUs, (route.timeS * 1e6).round()));
+    if (active.length > _activeCap) active.removeAt(0);
     final f = _field;
     if (f == null || route.cells.isEmpty) return;
     f.lay(route.cells);
@@ -201,6 +224,35 @@ class TrailNetwork {
     _taken.remove(key);
     _taken[key] = route;
     if (_taken.length > _takenCap) _taken.remove(_taken.keys.first);
+  }
+
+  /// Where each leg under way at agent time [nowUs] has got to: colony
+  /// metres and heading, `[e, n, dirE, dirN, …]`. Legs that have arrived
+  /// are dropped.
+  List<double> roversAt(int nowUs) {
+    final f = _field;
+    active.removeWhere((l) => nowUs >= l.startUs + l.durUs || nowUs < l.startUs);
+    if (f == null) return const [];
+    final out = <double>[];
+    for (final l in active) {
+      final cells = l.route.cells;
+      if (cells.length < 2 || l.durUs <= 0) continue;
+      // Even pace along the cells: a leg's time is spread over its length.
+      final t = (nowUs - l.startUs) / l.durUs * (cells.length - 1);
+      final k = t.floor().clamp(0, cells.length - 2);
+      final u = t - k;
+      final a = cells[k], b = cells[k + 1];
+      final ae = f.centreE(a), an = f.centreN(a);
+      final be = f.centreE(b), bn = f.centreN(b);
+      final de = be - ae, dn = bn - an;
+      final dl = math.sqrt(de * de + dn * dn);
+      out
+        ..add(ae + de * u)
+        ..add(an + dn * u)
+        ..add(dl > 0 ? de / dl : 1)
+        ..add(dl > 0 ? dn / dl : 0);
+    }
+    return out;
   }
 
   /// The trails beaten enough to be roads, as polylines to lay a dirt road

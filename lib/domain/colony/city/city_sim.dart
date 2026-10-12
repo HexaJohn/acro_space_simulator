@@ -4052,12 +4052,30 @@ class CitySim {
     return _roadNet!;
   }
 
+  /// A sampler of the natural ground under colony-local points, metres
+  /// above the body datum; flat where the body has no relief. The body's
+  /// relief is built on demand, so a sampler looks it up once, at its first
+  /// sample, and only a caller that samples pays for it.
+  double Function(double e, double n) naturalGround() {
+    TerrainField? relief;
+    var looked = false;
+    return (e, n) {
+      if (!looked) {
+        relief = body.terrainField;
+        looked = true;
+      }
+      final f = relief;
+      if (f == null) return 0;
+      final dir =
+          localToBodyFixed(Vec2(e, n), bodyRadiusM: body.radius).normalized;
+      return f.groundRadiusAt(dir.x, dir.y, dir.z) - body.radius;
+    };
+  }
+
   /// Keeps [trails] in step with the plat: its sites, its roads, the ground.
   void syncTrails(double dt) {
     final tr = trails;
     if (tr == null) return;
-    TerrainField? relief;
-    var looked = false;
     tr.sync(
       shapeKey: Object.hash(layout.version, parcelBuildings.length,
           utils.length, grown.length),
@@ -4082,19 +4100,7 @@ class CitySim {
           );
         }
       },
-      heightAt: (e, n) {
-        // The sampler is built on demand, so it is asked for once a fill,
-        // and only by a fill.
-        if (!looked) {
-          relief = body.terrainField;
-          looked = true;
-        }
-        final f = relief;
-        if (f == null) return 0;
-        final dir = localToBodyFixed(Vec2(e, n), bodyRadiusM: body.radius)
-            .normalized;
-        return f.groundRadiusAt(dir.x, dir.y, dir.z) - body.radius;
-      },
+      heightAt: naturalGround(),
     );
     // A trail driven enough is a road (desire-paths.md §5 phase 2): a dirt
     // road graded along it, free, since the wear did the work. One per

@@ -35,6 +35,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_sim.dart';
+import '../../../domain/colony/city/colony_relief.dart';
 import '../../../domain/colony/city/parcel.dart';
 import '../../../domain/colony/city/spatial_index.dart';
 import '../../../domain/colony/city/sprawl_plan.dart';
@@ -172,6 +173,8 @@ class _CityPlatViewState extends State<CityPlatView> {
   _PlatCache? _cache;
   int _cachedRevision = 0;
   _TrailPaint? _trails;
+  _ReliefPaint? _relief;
+  bool _reliefPumping = false;
   double _scaleStart = 1;
   Offset? _lastFocal;
 
@@ -203,6 +206,25 @@ class _CityPlatViewState extends State<CityPlatView> {
         tp.rev != tf.wearRev ||
         tp.age.elapsedMilliseconds > 5000) {
       _trails = _TrailPaint.of(tf);
+    }
+    // The lie of the land: sampled a few hundred points a frame until the
+    // lattice is whole, then traced once.
+    if (sim == null) {
+      _relief = null;
+    } else {
+      final r = _relief;
+      if (r == null || !identical(r.sim, sim)) {
+        _relief = _ReliefPaint(sim, widget.extentM);
+      }
+      if (!_relief!.ready && !_reliefPumping) {
+        _reliefPumping = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _reliefPumping = false;
+          if (!mounted) return;
+          final rp = _relief;
+          if (rp != null && !rp.ready) setState(rp.pump);
+        });
+      }
     }
     return LayoutBuilder(builder: (context, constraints) {
       final size = constraints.biggest;
@@ -259,6 +281,7 @@ class _CityPlatViewState extends State<CityPlatView> {
                   repaint: _cache?.imagesReady,
                   cache: _cache,
                   trails: _trails,
+                  relief: _relief?.ready == true ? _relief : null,
                   centreE: cam.centreE,
                   centreN: cam.centreN,
                   metresPerPx: cam.metresPerPx,
@@ -399,6 +422,10 @@ class _PlatCache {
 
   Box2 bounds = const Box2(-2000, -2000, 2000, 2000);
 
+  /// Street names, a piece of road each, and building names, a site each.
+  final List<_StreetLabel> streetLabels = [];
+  final List<_SiteLabel> siteLabels = [];
+
   /// Whether a class is drawn whole from [majorRoads] (the county's).
   static bool _county(RoadClass cls) => switch (cls.name) {
         'highway' || 'rail' || 'expressway' => true,
@@ -447,6 +474,10 @@ class _PlatCache {
       if (pts.length < 2) continue;
       for (final p in pts) {
         grow(p.e, p.n);
+      }
+      if (r.roadClass.carriesCars) {
+        c.streetLabels.add(_StreetLabel(sim.roadNameOf(r.id), pts,
+            Box2.of(pts), _county(r.roadClass) || _district(r.roadClass)));
       }
       // In the drawing plane (y = -north); a closed loop is closed by
       // hand so the cuts see its last edge.
@@ -522,6 +553,20 @@ class _PlatCache {
       c.plots.close();
       c._blockAt(cE, cY).boxes.addRect(b.minE, -b.maxN, b.maxE, -b.minN, colour.withValues(alpha: 0.55).toARGB32());
     }
+    // What stands where, by name: what the player placed (every grown
+    // house would read "Small House"), on its lot or its grid cells.
+    for (final e in sim.parcelBuildings.entries) {
+      final p = sim.layout.parcelById(e.key);
+      if (p != null && p.polygon.length >= 3) {
+        c.siteLabels.add(_SiteLabel(e.value.label, Box2.of(p.polygon)));
+      }
+    }
+    for (final e in sim.utils.entries) {
+      final poly = sim.parcelForCell(e.key, e.value).polygon;
+      if (poly.length >= 3) {
+        c.siteLabels.add(_SiteLabel(e.value.label, Box2.of(poly)));
+      }
+    }
     final plan = sim.sprawl;
     if (plan != null) {
       for (final s in plan.sections) {
@@ -569,6 +614,7 @@ class _PlatPainter extends CustomPainter {
     super.repaint,
     required this.cache,
     this.trails,
+    this.relief,
     required this.centreE,
     required this.centreN,
     required this.metresPerPx,
@@ -577,6 +623,7 @@ class _PlatPainter extends CustomPainter {
 
   final _PlatCache? cache;
   final _TrailPaint? trails;
+  final _ReliefPaint? relief;
   final double centreE, centreN, metresPerPx, extentM;
 
   static const _bg = Color(0xFF12161B);
@@ -617,6 +664,22 @@ class _PlatPainter extends CustomPainter {
     canvas.clipRect(view);
 
     _paintGrid(canvas, view, mpp);
+
+    // Contours, under everything: thin, and the index contours a shade up.
+    if (relief case final r?) {
+      canvas.drawPath(
+          r.minor,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 0.8 * mpp
+            ..color = const Color(0xFF26323D));
+      canvas.drawPath(
+          r.major,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.3 * mpp
+            ..color = const Color(0xFF3A4D5E));
+    }
 
     // Desire paths under everything built: worn ground, darker the more
     // it is worn.
@@ -744,6 +807,9 @@ class _PlatPainter extends CustomPainter {
     canvas.drawLine(Offset(0, -cross), Offset(0, cross), origin);
     canvas.restore();
 
+    final placed = <Rect>[];
+    if (c != null) _paintLabels(canvas, size, mpp, lod, c, view, placed);
+    if (relief case final r?) _paintHeights(canvas, size, mpp, r, view, placed);
     _paintScaleBar(canvas, size, mpp, lod, c);
   }
 
@@ -770,7 +836,7 @@ class _PlatPainter extends CustomPainter {
         'highway' || 'expressway' => const Color(0xFFF2F2F2),
         'avenue' || 'arterial' || 'collector' => const Color(0xFFD0D0D0),
         'rail' => const Color(0xFFE0C060),
-        'dirt' => const Color(0xFF8B6B3E),
+        'path' => const Color(0xFF8B6B3E),
         _ => const Color(0xFF9A9A9A),
       };
 
@@ -789,6 +855,135 @@ class _PlatPainter extends CustomPainter {
     final n0 = (view.top / pitch).floor() * pitch;
     for (var n = n0; n <= view.bottom; n += pitch) {
       canvas.drawLine(Offset(view.left, n), Offset(view.right, n), paint);
+    }
+  }
+
+  /// Colony metres to this frame's screen pixels.
+  Offset _screen(double e, double n, Size size, double mpp) => Offset(
+      (e - centreE) / mpp + size.width / 2,
+      (centreN - n) / mpp + size.height / 2);
+
+  static bool _inView(Box2 b, Rect view) =>
+      b.maxE >= view.left &&
+      b.minE <= view.right &&
+      -b.minN >= view.top &&
+      -b.maxN <= view.bottom;
+
+  static bool _free(List<Rect> placed, Rect r) {
+    for (final p in placed) {
+      if (p.overlaps(r)) return false;
+    }
+    placed.add(r);
+    return true;
+  }
+
+  /// Building names on their sites and street names along their roads, in
+  /// screen space so they read the same at every zoom: a name is drawn
+  /// only where it fits, and never over another ([placed]).
+  void _paintLabels(Canvas canvas, Size size, double mpp, PlatLod lod,
+      _PlatCache c, Rect view, List<Rect> placed) {
+    // Sites first: a building's name is the more useful of the two.
+    for (final l in c.siteLabels) {
+      final b = l.box;
+      if (!_inView(b, view)) continue;
+      final tp = _Labels.of(l.text, 11.5, const Color(0xFFE8DDF5), bold: true);
+      final wPx = (b.maxE - b.minE) / mpp, hPx = (b.maxN - b.minN) / mpp;
+      if (tp.width + 8 > wPx || tp.height + 4 > hPx) continue;
+      final at =
+          _screen((b.minE + b.maxE) / 2, (b.minN + b.maxN) / 2, size, mpp);
+      final r = Rect.fromCenter(
+          center: at, width: tp.width + 6, height: tp.height + 2);
+      if (!_free(placed, r)) continue;
+      final o = at - Offset(tp.width / 2, tp.height / 2);
+      _Labels.of(l.text, 11.5, null, bold: true).paint(canvas, o);
+      tp.paint(canvas, o);
+    }
+
+    // Streets: at street scale every road, at district scale the larger
+    // ones; along the road at its middle, turned to read left to right.
+    if (lod == PlatLod.county) return;
+    final seen = <String, List<Offset>>{};
+    for (final l in c.streetLabels) {
+      if (lod == PlatLod.district && !l.major) continue;
+      if (!_inView(l.box, view)) continue;
+      final tp = _Labels.of(l.text, 10.5, const Color(0xFFCFD6DD));
+      final needM = (tp.width + 16) * mpp;
+      if (l.lengthM < needM) continue;
+      final mid = _along(l.points, l.lengthM / 2);
+      final at = _screen(mid.e, mid.n, size, mpp);
+      if (at.dx < 0 || at.dy < 0 || at.dx > size.width || at.dy > size.height) {
+        continue;
+      }
+      // One label a name per 280 px: a long road cut into pieces at every
+      // junction says what it is called once a screenful, not at each.
+      final others = seen[l.text];
+      if (others != null && others.any((o) => (o - at).distance < 280)) {
+        continue;
+      }
+      final a = _along(l.points, l.lengthM / 2 - needM / 2);
+      final z = _along(l.points, l.lengthM / 2 + needM / 2);
+      var angle = math.atan2(-(z.n - a.n), z.e - a.e);
+      if (angle > math.pi / 2) angle -= math.pi;
+      if (angle < -math.pi / 2) angle += math.pi;
+      final r = Rect.fromCenter(
+          center: at,
+          width: tp.width * math.cos(angle).abs() + tp.height,
+          height: tp.width * math.sin(angle).abs() + tp.height);
+      if (!_free(placed, r)) continue;
+      (seen[l.text] ??= []).add(at);
+      canvas.save();
+      canvas.translate(at.dx, at.dy);
+      canvas.rotate(angle);
+      final o = Offset(-tp.width / 2, -tp.height / 2);
+      _Labels.of(l.text, 10.5, null).paint(canvas, o);
+      tp.paint(canvas, o);
+      canvas.restore();
+    }
+  }
+
+  /// The point [s] metres along [pts], clamped to its ends.
+  static Vec2 _along(List<Vec2> pts, double s) {
+    if (s <= 0) return pts.first;
+    var acc = 0.0;
+    for (var k = 1; k < pts.length; k++) {
+      final d = pts[k].distanceTo(pts[k - 1]);
+      if (acc + d >= s) {
+        final t = d <= 0 ? 0.0 : (s - acc) / d;
+        return Vec2(pts[k - 1].e + (pts[k].e - pts[k - 1].e) * t,
+            pts[k - 1].n + (pts[k].n - pts[k - 1].n) * t);
+      }
+      acc += d;
+    }
+    return pts.last;
+  }
+
+  /// The heights of the index contours, a few to a screen: what the lines
+  /// mean, without a legend.
+  void _paintHeights(Canvas canvas, Size size, double mpp, _ReliefPaint r,
+      Rect view, List<Rect> placed) {
+    final mine = <Offset>[];
+    for (final c in r.contours) {
+      if (!c.major) continue;
+      final segs = c.segments;
+      var drawn = 0;
+      for (var k = 0; k + 3 < segs.length && drawn < 3; k += 4) {
+        final e = (segs[k] + segs[k + 2]) / 2, n = (segs[k + 1] + segs[k + 3]) / 2;
+        if (e < view.left || e > view.right || -n < view.top || -n > view.bottom) {
+          continue;
+        }
+        final at = _screen(e, n, size, mpp);
+        if (mine.any((o) => (o - at).distance < 240)) continue;
+        final text = '${c.level.round()} m';
+        final tp = _Labels.of(text, 9.5, const Color(0xFF6F8494));
+        final rect = Rect.fromCenter(
+            center: at, width: tp.width + 4, height: tp.height + 2);
+        if (!_free(placed, rect)) continue;
+        mine.add(at);
+        drawn++;
+        final o = at - Offset(tp.width / 2, tp.height / 2);
+        _Labels.of(text, 9.5, null).paint(canvas, o);
+        tp.paint(canvas, o);
+      }
     }
   }
 
@@ -837,6 +1032,7 @@ class _PlatPainter extends CustomPainter {
   bool shouldRepaint(_PlatPainter old) =>
       !identical(old.cache, cache) ||
       !identical(old.trails, trails) ||
+      !identical(old.relief, relief) ||
       old.centreE != centreE ||
       old.centreN != centreN ||
       old.metresPerPx != metresPerPx ||
@@ -880,5 +1076,108 @@ class _TrailPaint {
           Paint()..color = _colour.withValues(alpha: 0.18 + 0.16 * b),
         ),
     ]);
+  }
+}
+
+/// A piece of road's name, where it runs, and whether it is a road of the
+/// district scale (its name shows further out).
+class _StreetLabel {
+  _StreetLabel(this.text, this.points, this.box, this.major)
+      : lengthM = _lengthOf(points);
+
+  final String text;
+  final List<Vec2> points;
+  final Box2 box;
+  final bool major;
+  final double lengthM;
+
+  static double _lengthOf(List<Vec2> pts) {
+    var s = 0.0;
+    for (var k = 1; k < pts.length; k++) {
+      s += pts[k].distanceTo(pts[k - 1]);
+    }
+    return s;
+  }
+}
+
+/// A placed building's name and the box of its site.
+class _SiteLabel {
+  const _SiteLabel(this.text, this.box);
+  final String text;
+  final Box2 box;
+}
+
+/// Laid-out names, kept: a label is laid out once, not every frame. A null
+/// colour is the dark halo drawn under the text.
+abstract final class _Labels {
+  static final Map<(String, double, int?, bool), TextPainter> _cache = {};
+
+  static TextPainter of(String text, double size, Color? colour,
+      {bool bold = false}) {
+    final key = (text, size, colour?.toARGB32(), bold);
+    final hit = _cache[key];
+    if (hit != null) return hit;
+    if (_cache.length > 600) {
+      for (final tp in _cache.values) {
+        tp.dispose();
+      }
+      _cache.clear();
+    }
+    final base = TextStyle(
+      fontSize: size,
+      fontWeight: bold ? FontWeight.w600 : FontWeight.w400,
+      letterSpacing: 0.2,
+    );
+    final style = colour != null
+        ? base.copyWith(color: colour)
+        : base.copyWith(
+            foreground: Paint()
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 3
+              ..strokeJoin = StrokeJoin.round
+              ..color = const Color(0xE612161B));
+    final tp = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: ui.TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    return _cache[key] = tp;
+  }
+}
+
+/// A colony's contours for the plat, sampled a budget a frame
+/// ([ReliefGrid.fill]) and traced once the lattice is whole.
+class _ReliefPaint {
+  _ReliefPaint(this.sim, double extentM)
+      : grid = ReliefGrid.around(0, 0,
+            halfM: math.max(extentM, 1500) + 500,
+            stepM: math.max(40.0, 2 * (math.max(extentM, 1500) + 500) / 160)),
+        _ground = sim.naturalGround();
+
+  final CitySim sim;
+  final ReliefGrid grid;
+  final double Function(double e, double n) _ground;
+
+  /// Lattice points sampled a frame: some 5 ms of relief.
+  static const int budget = 300;
+
+  final Path minor = Path(), major = Path();
+  List<Contour> contours = const [];
+  bool ready = false;
+
+  void pump() {
+    if (ready) return;
+    if (!grid.fill(_ground, budget)) return;
+    contours = contoursOf(grid);
+    for (final c in contours) {
+      final path = c.major ? major : minor;
+      final s = c.segments;
+      for (var k = 0; k + 3 < s.length; k += 4) {
+        path
+          ..moveTo(s[k], -s[k + 1])
+          ..lineTo(s[k + 2], -s[k + 3]);
+      }
+    }
+    ready = true;
   }
 }
