@@ -52,6 +52,7 @@ import 'screens/city_site_actions.dart';
 import 'screens/city_control_ui.dart' show showIndependence;
 import 'screens/colony_markers_painter.dart';
 import 'screens/combat/battle_overlay.dart';
+import 'screens/combat/missile_overlay.dart';
 import 'screens/combat/combat_hooks.dart';
 import 'screens/combat/occupation_panel.dart';
 import 'screens/combat/operation_planner_sheet.dart';
@@ -78,6 +79,9 @@ import '../../domain/combat/live/nav_grid.dart';
 import 'gamepad.dart';
 import '../../domain/combat/powers/orbital.dart';
 import '../../domain/combat/powers/strike_window.dart';
+import '../../domain/combat/powers/air.dart' show kSiloMissiles, kSiloSlantM;
+import '../../domain/combat/powers/missile.dart';
+import '../../application/usecases/missile_flight.dart';
 import '../../domain/combat/resolver_tuning.dart';
 import '../../domain/multiplayer/player.dart';
 import 'screens/road_tool_scene.dart';
@@ -1345,6 +1349,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // driven — and closes it again (docs/plans/agent-traffic.md §13.9).
       if (e.logicalKey == LogicalKeyboardKey.keyV && _editingCity != null) {
         _toggleLaneSpeedView();
+        return KeyEventResult.handled;
+      }
+      // Esc lets go of a missile strike being aimed (combat.md §7O).
+      if (e.logicalKey == LogicalKeyboardKey.escape && _combatState.missileFrom != null) {
+        rebuild(_cancelMissileAim);
         return KeyEventResult.handled;
       }
       // Esc frees a captured mouse — to reach the toolbar, or another
@@ -3306,6 +3315,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                   // overlay projected from the operation's ground.
                   if (_colonyMarkers(_sceneWorld) case final markers?) markers,
                   if (_battleOverlay(_sceneWorld) case final battle?) battle,
+                  if (_missileOverlay(_sceneWorld) case final missiles?) missiles,
+                  if (_missileCard() case final card?) card,
                   if (_liveHud() case final hud?) hud,
                   if (_commandCard() case final card?) card,
                   // Reflection-capture debug overlay (bottom-left, above the

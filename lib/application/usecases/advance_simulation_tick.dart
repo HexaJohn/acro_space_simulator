@@ -68,8 +68,10 @@ import '../ports/world_repositories.dart';
 import 'combat_phase.dart';
 import 'combat_sky.dart';
 import 'force_landers.dart';
+import 'missile_flight.dart';
 import '../../domain/colony/city/city_war.dart';
 import '../../domain/combat/operation_registry.dart';
+import '../../domain/combat/powers/missile.dart';
 
 /// THE core simulation loop, as a use case.
 ///
@@ -114,7 +116,7 @@ class AdvanceSimulationTick {
 
   /// The combat phase over [operations], built once.
   late final CombatPhase? _combat =
-      operations == null ? null : CombatPhase(operations!, landers: forceLanders);
+      operations == null ? null : CombatPhase(operations!, landers: forceLanders, missiles: forceLanders);
 
   /// Fly operations' squads down as real troop landers on airless bodies,
   /// and hold warp at 1× while one descends (docs/plans/combat.md §7B).
@@ -122,6 +124,10 @@ class AdvanceSimulationTick {
 
   late final ForceLanderFlight _landerFlight =
       ForceLanderFlight(vessels: vessels, terrainEdits: terrainEdits);
+
+  /// Silo salvos flown as real missiles (combat.md §7O), in a world that
+  /// flies vessels ([forceLanders]).
+  late final MissileFlight _missileFlight = MissileFlight(vessels: vessels, terrainEdits: terrainEdits);
 
   /// Moves goods between a craft standing on a pad and the colony under it.
   final ShuttleCargoService shuttleCargo;
@@ -338,7 +344,9 @@ class AdvanceSimulationTick {
       // carry it off the pad. (Until it throttles up it sits — no motion, so no
       // spurious aero/gravity load on a craft just spawned on the surface.)
       if (vessel.landed && underThrust) vessel.landed = false;
-      final mode = (!vessel.landed && (forceRails || (!underThrust && !inAtmosphere)))
+      // A silo salvo coasts on its conic, air or none (§7O: drag is cut).
+      final missile = vessel.id.value.startsWith(kMissileIdPrefix);
+      final mode = (!vessel.landed && (forceRails || missile || (!underThrust && !inAtmosphere)))
           ? PropagationMode.onRails
           : PropagationMode.physics;
       vessel.mode = mode;
@@ -383,6 +391,7 @@ class AdvanceSimulationTick {
 
       // 4c. Structural overstress: exceeding max-Q in atmosphere breaks the ship.
       if (!disableAeroStress &&
+          !missile &&
           inAtmosphere &&
           structural.check(vessel,
               ambient: sample, maxDynamicPressure: maxDynamicPressure)) {
@@ -438,6 +447,8 @@ class AdvanceSimulationTick {
     // attitude take effect on the next tick's integration.
     if (forceLanders && ops != null) {
       _landerFlight.run(ops, cities.all(), system, clock);
+      _missileFlight.run(ops, cities.all(), system, clock);
+      _detonateMissiles(ops, system, clock);
     }
 
     // ---- Planetary-atmosphere phase: every colony's gas flows, summed per
@@ -1012,6 +1023,9 @@ class AdvanceSimulationTick {
   bool _handleSurfaceContact(
       Vessel vessel, CelestialBody body, Epoch epoch, int tick) {
     if (vessel.landed) return false;
+    // A silo salvo meets the ground at its own impact time, where it was
+    // aimed ([_detonateMissiles]): a terrain hump on the way is not a hit.
+    if (vessel.id.value.startsWith(kMissileIdPrefix)) return false;
     // Contact against the VOXEL TERRAIN surface (falls back to the datum
     // sphere for bodies without terrain), so the craft lands on hills and can
     // descend into sub-datum valleys instead of stopping at a perfect sphere.
@@ -1100,6 +1114,35 @@ class AdvanceSimulationTick {
     ));
     vessel.landed = true;
     return false;
+  }
+
+  /// Silo salvos at their impact time (combat.md §7O): each comes down at
+  /// its aimed ground — the crater it digs (its kinetic energy and its
+  /// warhead) and the Impact event for the effects — and is gone; the combat
+  /// phase answers for what it hit on the next tick.
+  void _detonateMissiles(OperationRegistry ops, StarSystem system, SimulationClock clock) {
+    for (final m in MissileFlight.due(ops, clock.epoch.seconds)) {
+      final body = system.body(BodyId(m.bodyId));
+      final aim = m.aimBF;
+      m.state = MissileState.landed;
+      final v = vessels.byId(VesselId(m.vesselId));
+      if (body == null || aim == null) {
+        if (v != null) vessels.remove(v.id);
+        continue;
+      }
+      final speed = v?.state.velocity.length ?? 0;
+      final crater = craterForImpact(
+        kineticEnergyJ: kineticEnergy(kMissileSalvoKg, speed) + kMissileWarheadJ,
+        surfaceGravityMs2: body.mu / aim.lengthSquared,
+        targetDensityKgM3: craterTargetDensity,
+      );
+      if (!disableCrater) _recordImpactCrater(body, clock.tick, aim, crater, 0);
+      if (v != null) {
+        v.raise(Impact(v.id, body.id, speed, contactBF: aim, craterRadiusM: crater?.rimRadiusM ?? 0));
+        _publishEvents(v);
+        vessels.remove(v.id);
+      }
+    }
   }
 
   /// Cut the craters orbital strikes left clear of every building

@@ -843,6 +843,29 @@ colour (the frame now flips a defended fight's sides and control), and a raid on
 no built Seat and is skipped. The taken-Seat paths (a rising that wins, raiders who plunder) are covered by tests,
 not yet seen live.
 
+## 7O. Silo missiles you can watch
+
+Specified 2026-10-12 from the user's ask ("use the same orbital trajectory lines that craft use to show where they
+will strike"); their choices: real missiles, both targeting modes now, the silo ignores the rules of engagement.
+
+**A strike is a real missile.** One salvo vessel (`missile-<id>`, 4 missiles, 1.6 t) leaves the firing colony's
+Missile Silo on a ballistic arc solved by Lambert's problem to the aimed point — the ground at the target, where the
+body will have turned it to at impact — and coasts on the conic like any craft. Its trajectory line is the craft
+line, cut at the impact; a ring on the ground (the 30 m scatter) and a countdown mark where it will land. It
+detonates at its impact time at the aimed point: the impact crater and effects, sized by its kinetic energy plus a
+2 GJ warhead *(default)*. Same body only; out to 2,000 km of arc *(default)*. Warp does not change where it lands.
+
+**Two ways to aim.** *An operation's objective* — the drawer's silo strike, from the lead source's silo, scattered
+about the objective (the CEP's Rayleigh roll, taken at launch), and the strike's effect on the battle where it
+actually lands. Any objective but the LZ and life support, whatever the rules *(user)*. *Any point* — the silo's own
+site row: "Launch a missile strike", then click the ground; a card gives range and flight time with the arc drawn,
+and Launch. What is there takes it: every building within 40 m of the impact is razed and a quarter of its people
+die *(default)*, a grievance for a colony not the player's and −0.1 loyalty for one that is; a battle there takes it
+as a strike. Each salvo costs the firing colony 4 missiles; one salvo per silo at a time.
+
+**Cut *(default)*:** interception (the AA turrets answer the rebels' abstract missile only), boost and reentry
+(the salvo leaves the silo at burnout), drag (on a body with air the arc is flown as if airless), other bodies.
+
 ## 8. Open questions
 
 Numbers match the ref (§19), where each has its full wording and proposed answer.

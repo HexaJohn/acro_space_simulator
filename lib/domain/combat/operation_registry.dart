@@ -13,6 +13,7 @@ library;
 
 import '../multiplayer/command.dart';
 import 'operation.dart';
+import 'powers/missile.dart';
 
 /// A garrison the world keeps supplied: who holds whose port, what they eat.
 class GarrisonRecord {
@@ -167,6 +168,14 @@ class OperationRegistry {
     loadout.removeWhere((r) => r.rounds <= 0);
   }
 
+  /// Silo salvos (combat.md §7O): waiting to fly, in the air, and landed
+  /// and not yet answered for; and the next one's id.
+  final List<MissileShot> missiles = [];
+  int nextMissileId = 1;
+
+  /// A salvo is in the air.
+  bool get missileAloft => missiles.any((m) => m.state == MissileState.flying);
+
   /// Strike craters already cut into the world this session, by key: a load
   /// within the session keeps its brushes (terrain edits are append-only), so
   /// they are never cut twice. Not saved, and kept across a restore.
@@ -195,7 +204,7 @@ class OperationRegistry {
 
   bool get isEmpty =>
       operations.isEmpty && garrisons.isEmpty && runs.isEmpty && inbox.pending.isEmpty &&
-      loadout.isEmpty && nextOperationId == 1;
+      loadout.isEmpty && nextOperationId == 1 && missiles.isEmpty && nextMissileId == 1;
 
   Operation? byId(int id) {
     for (final o in operations) {
@@ -242,6 +251,8 @@ class OperationRegistry {
           if (runs.isNotEmpty) 'runs': [for (final r in runs) r.toJson()],
           if (loadout.isNotEmpty) 'loadout': [for (final r in loadout) r.toJson()],
           if (inbox.pending.isNotEmpty) 'pending': [for (final c in inbox.pending) c.toJson()],
+          if (missiles.isNotEmpty) 'missiles': [for (final m in missiles) m.toJson()],
+          if (nextMissileId != 1) 'nextMissile': nextMissileId,
         };
 
   /// Replaces everything with [j] (null: a save with no operations).
@@ -252,6 +263,8 @@ class OperationRegistry {
     runs.clear();
     loadout.clear();
     inbox.pending.clear();
+    missiles.clear();
+    nextMissileId = 1;
     nextOperationId = 1;
     clockUs = 0;
     lastRefusal = null;
@@ -278,5 +291,10 @@ class OperationRegistry {
       final cmd = CombatCommand.fromJson(c);
       if (cmd != null) inbox.pending.add(cmd);
     }
+    for (final m in (j['missiles'] as List? ?? const [])) {
+      final shot = MissileShot.fromJson(m);
+      if (shot != null) missiles.add(shot);
+    }
+    nextMissileId = (j['nextMissile'] as num?)?.toInt() ?? 1;
   }
 }

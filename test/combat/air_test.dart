@@ -90,10 +90,12 @@ void main() {
   });
 
   test('a silo strike waits on the source\'s missiles, then lands in 60 s with a 30 m scatter', () {
-    final op = assault();
+    final op = assault(roe: Roe.restrained);
     until(op, () => op.base!.deployed);
-    expect(op.power('silo', objectiveId: 'seat'), contains('rules of engagement'), reason: 'Standard: not the Seat');
-    expect(op.power('silo', objectiveId: 'port'), isNull);
+    // Whatever the rules (§7O): never the LZ or life support, anything else.
+    expect(op.power('silo', objectiveId: 'lz'), contains('never'));
+    expect(op.power('silo', objectiveId: 'lifeSupport'), contains('never'));
+    expect(op.power('silo', objectiveId: 'port'), isNull, reason: 'Restrained, and no gun there');
     expect(op.air.pendingSilo, 'port');
     expect(op.power('silo', objectiveId: 'power'), isNotNull);
     op.siloFired('port', ok: true);
@@ -104,6 +106,29 @@ void main() {
     expect(op.orbital.craters, hasLength(1));
     final back = Operation.fromJson((jsonDecode(jsonEncode(op.toJson())) as Map).cast<String, dynamic>());
     expect(back.air.siloReadyStep, op.air.siloReadyStep);
+  });
+
+  test('flown as a real missile (§7O): aimed within the scatter, it waits to land, and hits where it fell', () {
+    final op = assault();
+    until(op, () => op.base!.deployed);
+    until(op, () => op.formations.any((f) => f.side == CombatSide.defender && f.presentAt('seat', op.clock.steps)),
+        max: 10);
+    expect(op.power('silo', objectiveId: 'seat'), isNull, reason: 'the Seat, under Standard rules');
+    final aim = op.siloFired('seat', ok: true, flown: true)!;
+    final seat = op.graph.byId('seat')!;
+    final off = (aim.e - seat.e) * (aim.e - seat.e) + (aim.n - seat.n) * (aim.n - seat.n);
+    expect(off, lessThan(120 * 120), reason: 'within a few CEPs of the Seat');
+    // It does not land by the clock.
+    until(op, () => false, max: 200);
+    expect(op.orbital.inFlight.where((s) => s.seq == aim.seq), hasLength(1));
+    final before = op.defenderRemoved;
+    op.missileLanded(aim.seq, seat.e, seat.n);
+    expect(op.orbital.inFlight.where((s) => s.seq == aim.seq), isEmpty);
+    expect(op.defenderRemoved, greaterThanOrEqualTo(before));
+    expect(op.orbital.notices.last, startsWith('Strike on seat'));
+    expect(op.orbital.craters.last.brush, isFalse, reason: 'the missile dug its own crater');
+    // Lost on the way: the strike is off, and said.
+    expect(op.power('silo', objectiveId: 'power'), contains('not ready'));
   });
 
   test('the rebels\' silo strikes the base once a day; AA turrets bring missiles down', () {

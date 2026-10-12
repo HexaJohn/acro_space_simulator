@@ -276,7 +276,24 @@ class VesselSnapshot {
           epoch: epoch,
           pointsPerPatch: 256,
         );
-        if (patches.length > 1) {
+        final arcEnd = v.arcEndEpochS;
+        if (arcEnd != null && arcEnd > epoch.seconds) {
+          // A flight that ends by plan — a silo salvo's impact (combat.md
+          // §7O): the conic from here to there, and no further.
+          const n = 96;
+          final orbit0 = const StateVectorOrbitConverter().toOrbit(
+              position: v.state.position, velocity: v.state.velocity, body: body, epoch: epoch);
+          trajectory = [
+            for (var i = 0; i <= n; i++)
+              ...() {
+                final p = const StateVectorOrbitConverter()
+                    .toStateVector(orbit0, Epoch(epoch.seconds + (arcEnd - epoch.seconds) * i / n))
+                    .position;
+                return [p.x, p.y, p.z];
+              }(),
+          ];
+          trajectoryOpen = true;
+        } else if (patches.length > 1) {
           trajectory = [
             for (final p in patches.first.points) ...[p.x, p.y, p.z]
           ];

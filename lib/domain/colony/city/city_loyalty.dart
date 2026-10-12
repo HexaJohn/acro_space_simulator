@@ -318,6 +318,9 @@ enum LoyaltyNoticeKind {
 
   /// It beat a rival's raiders off.
   raidBeaten,
+
+  /// A silo salvo came down on it (combat.md §7O).
+  missileStrike,
 }
 
 /// One announcement for the HUD to raise — a queue a host drains, as it

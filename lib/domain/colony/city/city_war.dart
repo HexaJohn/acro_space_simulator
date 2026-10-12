@@ -17,6 +17,7 @@ library;
 import 'dart:math' as math;
 
 import '../../combat/launch/snapshots.dart';
+import '../../combat/powers/missile.dart' show kMissileOwnColonyCost;
 import 'city_building_spec.dart';
 import 'city_loyalty.dart';
 import 'city_reclaim.dart';
@@ -315,6 +316,16 @@ class RaidEndWrite extends CombatWrite {
   final String raiderName;
   final bool raided;
   final int dead;
+}
+
+/// A silo salvo came down at ([e], [n]) (combat.md §7O): every building
+/// whose site centre is within [radiusM] is razed and [deathShare] of its
+/// people die.
+class MissileStrikeWrite extends CombatWrite {
+  const MissileStrikeWrite(this.e, this.n, this.radiusM, this.deathShare);
+  final double e, n;
+  final double radiusM;
+  final double deathShare;
 }
 
 /// War weariness: the player's dead cost every colony's loyalty
@@ -881,6 +892,8 @@ extension CityWar on CitySim {
           sent[k] = n;
         }
         war.outbox.add(GarrisonSuppliedEvent(w.targetColonyId, sent));
+      case MissileStrikeWrite():
+        _missileStrike(w);
       case UprisingFoughtWrite():
         if (loyalty.risen) loyalty.uprisingFought = true;
       case UprisingEndWrite():
@@ -930,6 +943,49 @@ extension CityWar on CitySim {
           }
         }
     }
+  }
+
+  /// A salvo's hit (§7O): what stood within its blast is razed, a share of
+  /// its people die — a grievance for a colony not the player's, loyalty for
+  /// one that is.
+  void _missileStrike(MissileStrikeWrite w) {
+    final hit = <String>[];
+    var people = 0.0;
+    final pop = population;
+    final housing = math.max(1.0, this.housing.toDouble());
+    final occ = (pop / housing).clamp(0.0, 1.0);
+    for (final (parcel, s) in _sitesInOrder()) {
+      final c = parcel.centroid;
+      final dx = c.e - w.e, dy = c.n - w.n;
+      if (dx * dx + dy * dy > w.radiusM * w.radiusM) continue;
+      hit.add(_siteIdOf(parcel.id));
+      people += (s.housing + s.jobs) * occ;
+    }
+    for (final id in hit) {
+      if (id.startsWith('cell:')) {
+        final k = int.tryParse(id.substring(5));
+        if (k != null) flattenAt(k);
+      } else {
+        clearParcel(id);
+      }
+    }
+    final dead = math.min(pop.floor(), (people * w.deathShare).round());
+    if (dead > 0) {
+      recordWarDead(dead, corpses: true);
+      loyalty.warDead += dead;
+      final gr = loyalty.reclaim.grievance;
+      if (gr != null) loyalty.reclaim.grievance = gr.withWarDead(dead);
+    }
+    final yours = loyalty.allegiance != Allegiance.independent;
+    if (yours && (hit.isNotEmpty || dead > 0)) {
+      loyalty.level = (loyalty.level - kMissileOwnColonyCost).clamp(0.0, 1.0);
+    }
+    loyalty.notice(
+        LoyaltyNoticeKind.missileStrike,
+        hit.isEmpty && dead == 0
+            ? 'A missile strike came down nearby: nothing was hit.'
+            : 'A missile strike hit the colony: ${hit.length} building${hit.length == 1 ? '' : 's'} '
+                'destroyed, $dead dead.');
   }
 
   /// What a garrison eats and fires over [dt]: from its own stock, and for an

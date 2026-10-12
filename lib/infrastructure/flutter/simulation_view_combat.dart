@@ -124,6 +124,11 @@ class _CombatViewState {
 
   /// [OperationRegistry.refusals] already said.
   int refusalsSeen = 0;
+
+  /// A missile strike being aimed (combat.md §7O): the firing colony, and
+  /// the ground picked (a body-fixed unit direction), until Launch or Esc.
+  String? missileFrom;
+  Vector3? missileAimDir;
 }
 
 final Expando<_CombatViewState> _combatViewStates = Expando<_CombatViewState>('combat');
@@ -133,6 +138,165 @@ extension _SimulationViewCombat on _SimulationViewState {
       _combatViewStates[this] ??= _CombatViewState();
 
   OperationRegistry get _operations => _session.operations;
+
+  // ---- silo missiles (§7O) ------------------------------------------------------
+
+  void _cancelMissileAim() => _combatState
+    ..missileFrom = null
+    ..missileAimDir = null;
+
+  /// While a strike is being aimed, the ground under [local] is its target.
+  bool _missilePickAt(Offset local) {
+    final st = _combatState;
+    if (st.missileFrom == null) return false;
+    final hit = _pickCityGround(local);
+    if (hit != null) rebuild(() => st.missileAimDir = hit.bodyFixed.normalized);
+    return true;
+  }
+
+  /// The salvo [_combatState] is aiming, planned from now: its arc, or why
+  /// it cannot fly; null with nothing aimed.
+  ({CitySim home, CelestialBody body, MissilePlan plan})? _missilePreview() {
+    final st = _combatState;
+    final from = st.missileFrom == null ? null : _cityById(st.missileFrom!);
+    final aim = st.missileAimDir;
+    if (from == null || aim == null) return null;
+    final body = _universe.current().body(from.body.id);
+    if (body == null) return null;
+    final flight = MissileFlight(vessels: _vessels, terrainEdits: _terrainEdits);
+    final silo = flight.siloOf(from, body);
+    if (silo == null) return null;
+    return (home: from, body: body, plan: flight.plan(body, silo, aim, _clock.epoch.seconds));
+  }
+
+  /// The aiming card: what to do, or where it would go and how long it
+  /// would fly, and Launch.
+  Widget? _missileCard() {
+    final st = _combatState;
+    final from = st.missileFrom == null ? null : _cityById(st.missileFrom!);
+    if (from == null) return null;
+    final pv = _missilePreview();
+    final plan = pv?.plan;
+    final why = plan?.why;
+    String line;
+    if (st.missileAimDir == null) {
+      line = 'Missile strike from ${from.name}: click the ground where it should come down. Esc cancels.';
+    } else if (pv == null) {
+      line = '${from.name} has no Missile Silo.';
+    } else if (why != null) {
+      line = 'Cannot strike there: $why';
+    } else {
+      final arcKm = pv.body.radius * math.acos(plan!.siloBF.normalized.dot(plan.aimBF.normalized).clamp(-1.0, 1.0)) / 1000;
+      final s = plan.tof.round();
+      line = 'From ${from.name}: ${arcKm.toStringAsFixed(arcKm < 10 ? 1 : 0)} km, '
+          '${s ~/ 60 > 0 ? '${s ~/ 60} min ' : ''}${s % 60} s of flight · $kSiloMissiles missiles. '
+          'Buildings within ${kMissileBlastM.round()} m are destroyed.';
+    }
+    final ready = pv != null && why == null;
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 110,
+      child: Center(
+        child: Material(
+          key: const Key('missile-card'),
+          color: AppTheme.panel.withValues(alpha: 0.95),
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.rocket_launch_outlined, color: AppTheme.danger, size: 18),
+              const SizedBox(width: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: Text(line, style: AppTheme.body),
+              ),
+              const SizedBox(width: 12),
+              if (ready)
+                FilledButton(
+                  key: const Key('missile-launch'),
+                  style: FilledButton.styleFrom(backgroundColor: AppTheme.danger),
+                  onPressed: () {
+                    final d = st.missileAimDir!;
+                    _operations.inbox.enqueue(MissileStrikeCommand(
+                        const PlayerId('player'), 0, from.id, from.body.id.value, (d.x, d.y, d.z)));
+                    rebuild(_cancelMissileAim);
+                  },
+                  child: const Text('Launch'),
+                ),
+              TextButton(
+                key: const Key('missile-cancel'),
+                onPressed: () => rebuild(_cancelMissileAim),
+                child: const Text('Cancel'),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Every salvo's impact on the ground — a ring the size of its scatter and
+  /// its countdown — and, while one is being aimed, the arc it would fly.
+  Widget? _missileOverlay(WorldSnapshot? snap) {
+    if (snap == null) return null;
+    final focus = _focusWorldForPick(snap);
+    if (focus == null) return null;
+    final cam = _camera;
+    final marks = <MissileMark>[];
+    final arcs = <List<Offset>>[];
+    Offset? project(Vector3 world) {
+      final p = cam.projectPx(world - focus);
+      return p == null ? null : Offset(_screenW / 2 + p.x, _screenH / 2 - p.y);
+    }
+
+    final now = _clock.epoch.seconds;
+    for (final m in _operations.missiles) {
+      final aim = m.aimBF;
+      final b = snap.bodies[m.bodyId];
+      if (m.state != MissileState.flying || aim == null || b == null) continue;
+      final centre = Vector3(b.px, b.py, b.pz);
+      final world = centre + Quaternion(b.qw, b.qx, b.qy, b.qz).rotate(aim);
+      final at = project(world);
+      if (at == null) continue;
+      marks.add(MissileMark(at, cam.radiusPx(world - focus, strikeCepM(kSiloSlantM)),
+          'Missile salvo · impact in ${math.max(0, (m.impactEpochS - now)).round()} s'));
+    }
+    final pv = _missilePreview();
+    final plan = pv?.plan;
+    if (pv != null && plan != null) {
+      final b = snap.bodies[pv.body.id.value];
+      if (b != null) {
+        final centre = Vector3(b.px, b.py, b.pz);
+        final q = Quaternion(b.qw, b.qx, b.qy, b.qz);
+        final world = centre + q.rotate(plan.aimBF);
+        final at = project(world);
+        if (at != null) {
+          marks.add(MissileMark(at, cam.radiusPx(world - focus, strikeCepM(kSiloSlantM)),
+              plan.why == null ? 'Strike here' : 'Out of reach', preview: true));
+        }
+        if (plan.why == null) {
+          // The conic it would fly, in the body-centred inertial frame the
+          // snapshot's bodies sit in.
+          const conv = StateVectorOrbitConverter();
+          final orbit = conv.toOrbit(position: plan.r1, velocity: plan.v1, body: pv.body, epoch: _clock.epoch);
+          final pts = <Offset>[];
+          for (var i = 0; i <= 64; i++) {
+            final p = conv.toStateVector(orbit, Epoch(now + plan.tof * i / 64)).position;
+            final s = project(centre + p);
+            if (s != null) pts.add(s);
+          }
+          if (pts.length > 1) arcs.add(pts);
+        }
+      }
+    }
+    if (marks.isEmpty && arcs.isEmpty) return null;
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: CustomPaint(key: const Key('missile-overlay'), painter: MissileOverlayPainter(marks, arcs)),
+      ),
+    );
+  }
 
   /// A refused order, said once where the player sees it: a launch the
   /// colonies could no longer field when it reached them, a strike with no
@@ -150,8 +314,29 @@ extension _SimulationViewCombat on _SimulationViewState {
     ));
   }
 
-  /// The site-sheet row that opens the planner, on a port the rebels hold.
+  /// The site-sheet row that opens the planner, on a port the rebels hold;
+  /// and a Missile Silo's strike on a point (§7O).
   List<Widget> _combatSiteRows(CitySim city, String site, CityBuildingSpec spec) {
+    if (spec.type == 'silo') {
+      final busy = _operations.missiles.any((m) => m.homeColonyId == city.id && !m.done);
+      return [
+        citySiteAction(
+          context,
+          Icons.rocket_launch_outlined,
+          busy ? 'A salvo is in hand' : 'Launch a missile strike',
+          busy
+              ? 'The silo fires one salvo at a time.'
+              : 'Click the ground to aim. $kSiloMissiles missiles; what is there takes it.',
+          busy ? AppTheme.textDim : AppTheme.danger,
+          () {
+            if (busy) return;
+            rebuild(() => _combatState
+              ..missileFrom = city.id
+              ..missileAimDir = null);
+          },
+        ),
+      ];
+    }
     if (spec.type != 'spaceport' || !city.loyalty.portSeized) return const [];
     final running = _operations.runningAgainst(city.id);
     return [
@@ -1814,9 +1999,12 @@ extension _SimulationViewCombat on _SimulationViewState {
                           _power(op, 'gunship', target: o.id);
                           Navigator.of(ctx).maybePop();
                         }),
+        // Any objective but the LZ and life support, whatever the rules
+        // (§7O, the user's call; found playing it: under Restrained, with no
+        // gun to strike, the silo was not there at all).
         if (b != null && b.standing && b.hasGate('silo'))
           for (final o in op.graph.objectives)
-            if (op.strikeAllowed(o))
+            if (op.siloAllowed(o))
               button('combat-silo-${o.id}', 'Silo strike on ${place(o.id)}${wait(op.air.siloReadyStep)}',
                   t < op.air.siloReadyStep || op.air.pendingSilo != null
                       ? null
@@ -2611,6 +2799,27 @@ extension _SimulationViewCombat on _SimulationViewState {
             };
           }(),
           'drawnOffset': _combatState.drawnOffset,
+          // Where the player's squad is drawn: metres from the eye, feet over
+          // the drawn ground, and whether it went into the frame's batches.
+          'squadDrawn': [
+            for (final m in CombatUnitState.units)
+              if (m.key.startsWith('${l.playerFormationId}:'))
+                [
+                  (m.feetBF - _freecamRelLocal).length.toStringAsFixed(1),
+                  ((m.feetBF.length - (SceneSync.drawnGround?.call(m.feetBF.normalized) ?? double.nan)))
+                      .toStringAsFixed(2),
+                  m.moving,
+                ],
+          ],
+          'eyeOverDrawn': (_freecamRelLocal.length -
+                  (SceneSync.drawnGround?.call(_freecamRelLocal.normalized) ?? double.nan))
+              .toStringAsFixed(2),
+          'marks': CombatUnitState.units.length,
+          'aim': [
+            _combatState.lastAim.$1.toStringAsFixed(2),
+            _combatState.lastAim.$2.toStringAsFixed(2),
+            _combatState.lastAim.$3.toStringAsFixed(2),
+          ],
         },
       'rasters': {
         for (final op in _operations.operations)
@@ -2747,6 +2956,12 @@ extension _SimulationViewCombat on _SimulationViewState {
         if (src.parcelBuildings.containsKey(lot.id)) continue;
         if (src.placeOnParcel(lot.id, barracks)) placed++;
       }
+      // And a Missile Silo (§7O), so its strike can be tried at once.
+      final silo = kUtilCatalog.firstWhere((s) => s.type == 'silo');
+      for (final lot in [...src.layout.autoParcels]) {
+        if (src.parcelBuildings.containsKey(lot.id)) continue;
+        if (src.placeOnParcel(lot.id, silo)) break;
+      }
       _cities.add(src);
     }
     // A debug colony: staffed, stocked and peopled whatever its size. A
@@ -2761,6 +2976,7 @@ extension _SimulationViewCombat on _SimulationViewState {
     src.stock[Commodity.guns] = 80;
     src.stock[Commodity.ammo] = 400;
     src.stock[Commodity.ore] = 700; // a forward base's Materiel
+    src.stock[Commodity.missiles] = 20; // five salvos
     src.population = 300;
     return {'target': target.id, 'source': src.id};
   }

@@ -318,15 +318,78 @@ class Operation {
 
   /// The source paid (or could not pay) for the silo strike (§7M): with
   /// [ok], four missiles are in the air on [objectiveId], down in 60 s.
-  void siloFired(String objectiveId, {required bool ok}) {
+  ///
+  /// [flown]: the world flies the salvo as a real missile (§7O). The strike
+  /// then waits for it to land ([missileLanded]) and this returns where it is
+  /// aimed — the objective, scattered by the CEP's Rayleigh roll — for the
+  /// missile to be flown to.
+  ({int seq, double e, double n})? siloFired(String objectiveId, {required bool ok, bool flown = false}) {
     air.pendingSilo = null;
     if (!ok) {
       air.notices.add('The silo had not the missiles for a strike.');
-      return;
+      return null;
     }
     final t = clock.steps;
-    orbital.inFlight.add(StrikeInFlight(orbital.nextSeq++, 'silo', objectiveId, t + kSiloFlightS, kSiloSlantM));
-    air.notices.add('Missiles away from the silo: down on $objectiveId in $kSiloFlightS s.');
+    final seq = orbital.nextSeq++;
+    if (!flown) {
+      orbital.inFlight.add(StrikeInFlight(seq, 'silo', objectiveId, t + kSiloFlightS, kSiloSlantM));
+      air.notices.add('Missiles away from the silo: down on $objectiveId in $kSiloFlightS s.');
+      return null;
+    }
+    final obj = graph.byId(objectiveId);
+    if (obj == null) return null;
+    orbital.inFlight.add(StrikeInFlight(seq, 'silo', objectiveId, kAwaitMissile, kSiloSlantM));
+    final (e, n) = _scatter(obj, seq, strikeCepM(kSiloSlantM));
+    air.notices.add('Missiles away from the silo for $objectiveId: watch the arc.');
+    return (seq: seq, e: e, n: n);
+  }
+
+  /// A strike's step while its salvo flies as a real missile (§7O): never
+  /// due by the clock; the missile's landing settles it.
+  static const int kAwaitMissile = 1 << 40;
+
+  /// The salvo for strike [seq] came down at ([e], [n]) (§7O): the strike
+  /// takes effect there. Nothing, once the operation is over.
+  void missileLanded(int seq, double e, double n) {
+    final s = orbital.inFlight.where((x) => x.seq == seq).firstOrNull;
+    if (s == null) return;
+    orbital.inFlight.remove(s);
+    if (resolved) return;
+    _impact(s, clock.steps, at: (e, n));
+  }
+
+  /// A salvo aimed at a point, not at this battle, came down at ([e], [n])
+  /// (§7O): the objective it fell within 150 m of takes it as a strike.
+  void pointStrike(double e, double n) {
+    if (resolved || phase != OperationPhase.engaged) return;
+    Objective? best;
+    var bd = 150.0 * 150.0;
+    for (final o in graph.objectives) {
+      final d = (o.e - e) * (o.e - e) + (o.n - n) * (o.n - n);
+      if (d < bd) {
+        bd = d;
+        best = o;
+      }
+    }
+    if (best == null) return;
+    final t = clock.steps;
+    _impact(StrikeInFlight(orbital.nextSeq++, 'silo', best.id, t, kSiloSlantM), t, at: (e, n));
+  }
+
+  /// The salvo for strike [seq] could not fly ([why]): the strike is off.
+  void missileLost(int seq, String why) {
+    orbital.inFlight.removeWhere((x) => x.seq == seq);
+    air.notices.add('The silo strike was called off: $why');
+  }
+
+  /// Where a round aimed at [obj] for strike [seq] comes down: Rayleigh
+  /// about it, σ = CEP / 1.1774.
+  (double, double) _scatter(Objective obj, int seq, double cep) {
+    final key = combatKey('strike');
+    final u = combatUnit(seed, key, seq * 8).clamp(0.0, 0.999999);
+    final a = combatUnit(seed, key, seq * 8 + 1) * 2 * math.pi;
+    final r = cep / 1.1774 * math.sqrt(-2 * math.log(1 - u));
+    return (obj.e + r * math.cos(a), obj.n + r * math.sin(a));
   }
 
   /// Passes end; the rebels' silo fires on its day (§7M).
@@ -420,7 +483,7 @@ class Operation {
         if (air.pendingSilo != null) return 'A silo strike is already called.';
         final o = graph.byId(objectiveId ?? '');
         if (o == null) return 'A strike on where?';
-        if (!strikeAllowed(o)) return 'The rules of engagement do not allow a strike there.';
+        if (!siloAllowed(o)) return 'A silo never strikes the landing zone or life support.';
         air
           ..pendingSilo = o.id
           ..siloPosted = false
@@ -460,6 +523,10 @@ class Operation {
     }
     return null;
   }
+
+  /// A silo strike, whatever the rules of engagement (§7O, the user's
+  /// call): any objective but the LZ and life support.
+  bool siloAllowed(Objective o) => o.kind != ObjectiveKind.lz && o.kind != ObjectiveKind.lifeSupport;
 
   /// Under [Roe.restrained] only where a gun emplacement stands; under
   /// [Roe.standard] also the Port, Power, Depot and Airfield. Never the Seat,
@@ -508,18 +575,15 @@ class Operation {
     return n + (combatUnit(seed, combatKey('strike'), seq * 8 + k) < x - n ? 1 : 0);
   }
 
-  /// A round comes down at its objective (ref §10A.12, in the pools).
-  void _impact(StrikeInFlight s, int t) {
+  /// A round comes down at its objective (ref §10A.12, in the pools) — or,
+  /// a real missile's salvo, [at] where it landed (§7O).
+  void _impact(StrikeInFlight s, int t, {(double, double)? at}) {
     final obj = graph.byId(s.objectiveId);
     if (obj == null) return;
     final cep = strikeCepM(s.slantM);
     final d = orbital.craterM;
     final key = combatKey('strike');
-    // Scatter: Rayleigh about the aim, σ = CEP / 1.1774.
-    final u = combatUnit(seed, key, s.seq * 8).clamp(0.0, 0.999999);
-    final a = combatUnit(seed, key, s.seq * 8 + 1) * 2 * math.pi;
-    final r = cep / 1.1774 * math.sqrt(-2 * math.log(1 - u));
-    final ie = obj.e + r * math.cos(a), in_ = obj.n + r * math.sin(a);
+    final (ie, in_) = at ?? _scatter(obj, s.seq, cep);
     // The emplacement there, else its largest defender formation.
     Formation? struck;
     for (final f in formations) {
@@ -563,7 +627,9 @@ class Operation {
         final reach = p.$3 + d / 2;
         return dx * dx + dy * dy < reach * reach;
       });
-      orbital.craters.add(StrikeCrater(s.seq, qe, qn, d, t, brush: clear));
+      // A real missile digs its own crater where it lands (§7O): the record
+      // is for the overlay only.
+      orbital.craters.add(StrikeCrater(s.seq, qe, qn, d, t, brush: clear && at == null));
     }
     final what = struck == null
         ? 'nothing there'

@@ -103,6 +103,11 @@ class Vessel {
   /// commands. Defaults true (in contact).
   bool hasCommLink = true;
 
+  /// The world epoch, s, its flight ends at by plan — a silo salvo's impact
+  /// (combat.md §7O): its trajectory line stops there. Working state, set
+  /// each tick by whoever planned the flight; not saved.
+  double? arcEndEpochS;
+
   /// Crew aboard, if any. The life-support service draws their consumables.
   CrewModule? crew;
 

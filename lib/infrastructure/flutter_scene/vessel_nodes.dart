@@ -97,6 +97,9 @@ class VesselNodes {
   static bool _isLander(String vesselId) =>
       vesselId.toLowerCase().contains('lander');
 
+  /// A silo salvo (combat.md §7O): drawn as a missile, never as a CSM.
+  static bool _isMissile(String vesselId) => vesselId.startsWith('missile-');
+
   /// The model asset [vesselId] renders, per platform.
   static String _assetFor(String vesselId) {
     if (_isLander(vesselId)) {
@@ -214,7 +217,7 @@ class VesselNodes {
       // because staging can drop the last catalog part (or, on a craft that
       // docked with one, reveal the first).
       final kitbash = isKitbash(v);
-      if (!kitbash) _ensureCraftModel(v.id, node);
+      if (!kitbash && !_isMissile(v.id)) _ensureCraftModel(v.id, node);
       final partsKey = _partsFingerprint(v);
       // Whole-craft: once its model is applied the part list no longer drives
       // anything, so stop rebuilding the silhouette. Kitbash: the part list IS
@@ -716,7 +719,9 @@ class VesselNodes {
     // ([_isLander]). Standing a lander in as a CSM is not a rough stand-in but
     // a different vehicle: the shapes share no stage, the tails are 3 m apart
     // ([silhouetteAftM]), and a descent is flown by reading the legs.
-    if (_isLander(v.id)) {
+    if (_isMissile(v.id)) {
+      _addMissile(vesselNode);
+    } else if (_isLander(v.id)) {
       _addLanderFallback(vesselNode);
     } else {
       _addApolloFallback(vesselNode);
@@ -801,6 +806,46 @@ class VesselNodes {
       ),
     );
   }
+
+  /// A silo salvo: a slim body, an ogive nose on +Z, four fins aft — ~9 m,
+  /// programmer art in the parts' own materials. Big enough to be seen from
+  /// the ground it is falling on.
+  void _addMissile(fs.Node vesselNode) {
+    final noseUp = _noseUp();
+    void add(double noseR, double aftR, double height, double z, fs.Material mat) {
+      vesselNode.add(
+        fs.Node(
+          mesh: fs.Mesh(
+            fs.CylinderGeometry(topRadius: noseR, bottomRadius: aftR, height: height, radialSegments: 16),
+            mat,
+          ),
+        )..localTransform = vm.Matrix4.compose(
+          vm.Vector3(0, 0, lengthToScene(z)),
+          noseUp,
+          vm.Vector3.all(lengthToScene(1.0)),
+        ),
+      );
+    }
+
+    add(0.45, 0.45, 6.5, 0, PartPrimitives.hull());
+    add(0.02, 0.45, 2.2, 4.35, PartPrimitives.dark());
+    add(0.45, 0.6, 0.6, -3.55, PartPrimitives.dark());
+    for (var i = 0; i < 4; i++) {
+      final a = i * 3.14159265 / 2;
+      vesselNode.add(
+        fs.Node(
+          mesh: fs.Mesh(fs.CuboidGeometry(vm.Vector3(0.08, 1.4, 1.6)), PartPrimitives.panel()),
+        )..localTransform = vm.Matrix4.compose(
+          vm.Vector3(lengthToScene(0.9 * _cos(a)), lengthToScene(0.9 * _sin(a)), lengthToScene(-2.6)),
+          vm.Quaternion.axisAngle(vm.Vector3(0, 0, 1), a),
+          vm.Vector3.all(lengthToScene(1.0)),
+        ),
+      );
+    }
+  }
+
+  static double _cos(double a) => math.cos(a);
+  static double _sin(double a) => math.sin(a);
 
   /// A rough Apollo Lunar Module, cabin facing +X and nose (docking tunnel) on
   /// +Z: a foil-wrapped octagonal descent stage on four splayed legs, the DPS

@@ -77,6 +77,11 @@ sealed class CombatCommand extends SimCommand {
       case 'arm':
         return ArmVesselCommand(
             by, tick, j['vessel'] as String, j['colony'] as String, (j['rounds'] as num).toInt());
+      case 'missile':
+        final a = j['aim'];
+        if (a is! List || a.length != 3) return null;
+        return MissileStrikeCommand(by, tick, j['colony'] as String, j['body'] as String,
+            ((a[0] as num).toDouble(), (a[1] as num).toDouble(), (a[2] as num).toDouble()));
       case 'base':
         return BaseOrderCommand(by, tick, (j['op'] as num).toInt(), j['action'] as String,
             module: j['module'] as String?,
@@ -412,6 +417,28 @@ class ArmVesselCommand extends CombatCommand {
         'vessel': vesselId,
         'colony': colonyId,
         'rounds': rounds,
+      };
+}
+
+/// A missile strike on a point (combat.md §7O): [colonyId]'s silo fires a
+/// salvo at the ground in body-fixed direction [aim] on [bodyId].
+class MissileStrikeCommand extends CombatCommand {
+  const MissileStrikeCommand(super.issuedBy, super.tick, this.colonyId, this.bodyId, this.aim);
+  final String colonyId;
+  final String bodyId;
+  final (double, double, double) aim;
+
+  @override
+  String get targetAssetId => 'colony:$colonyId';
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'missile',
+        'by': issuedBy.value,
+        'tick': tick,
+        'colony': colonyId,
+        'body': bodyId,
+        'aim': [aim.$1, aim.$2, aim.$3],
       };
 }
 

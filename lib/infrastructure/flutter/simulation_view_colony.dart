@@ -696,6 +696,7 @@ extension _SimulationViewColony on _SimulationViewState {
   void _inspectCityAt(Offset local) {
     final city = _editingCity;
     if (city == null) return;
+    if (_missilePickAt(local)) return;
     final target =
         InspectOrder.pick(() => _vehicleUnder(local), () => _siteUnder(local));
     if (target == null) return;
@@ -1043,14 +1044,15 @@ extension _SimulationViewColony on _SimulationViewState {
     // only over what can be picked or dragged. On Look it opens only over a
     // BUILDING: every other tap belongs to the HUD underneath, and a gesture
     // arena cannot tell the two apart on its own.
-    bool open(Offset p) => adjust
-        ? _adjustGateOpen(p)
-        : c.active || _siteUnder(p) != null || _vehicleUnder(p) != null;
+    // Aiming a missile strike (combat.md §7O) takes every click on the
+    // world: the ground under it is the target.
+    bool open(Offset p) => _combatState.missileFrom != null ||
+        (adjust ? _adjustGateOpen(p) : c.active || _siteUnder(p) != null || _vehicleUnder(p) != null);
     return Positioned.fill(
       child: _PickClaim(
         // Not while walking: a click on the world then also takes the mouse
         // back for looking, on the camera layer beneath.
-        claim: (p) => c.active && !_walkMode && open(p),
+        claim: (p) => (c.active && !_walkMode && open(p)) || _combatState.missileFrom != null,
         child: MouseRegion(
           opaque: false,
           onHover: (e) => _hoverCityAt(e.localPosition),

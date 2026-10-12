@@ -33,6 +33,7 @@ import '../../domain/combat/launch/snapshots.dart';
 import '../../domain/combat/operation.dart';
 import '../../domain/combat/operation_registry.dart';
 import '../../domain/combat/powers/air.dart';
+import '../../domain/combat/powers/missile.dart';
 import '../../domain/combat/powers/orbital.dart';
 import '../../domain/combat/powers/overhead.dart';
 import '../../domain/combat/powers/sky.dart';
@@ -42,7 +43,8 @@ import '../../domain/combat/resolver_tuning.dart';
 import '../../domain/multiplayer/command.dart';
 
 class CombatPhase {
-  CombatPhase(this.registry, {this.tuning = const ResolverTuning(), this.landers = false});
+  CombatPhase(this.registry,
+      {this.tuning = const ResolverTuning(), this.landers = false, this.missiles = false});
 
   final OperationRegistry registry;
   final ResolverTuning tuning;
@@ -54,6 +56,13 @@ class CombatPhase {
   final bool landers;
 
   bool _landersFor(CitySim target) => landers && !target.body.hasAtmosphere;
+
+  /// Fly silo salvos as real missiles (combat.md §7O). Off where no world
+  /// flies them, and a silo strike is the abstract 60 s one.
+  final bool missiles;
+
+  /// Colonies a salvo coming down this close to the centre of are hit by it.
+  static const double missileColonyReachM = 5000;
 
   /// Supply runs to a garrison leave every this many operation days.
   static const double supplyEveryDays = 3;
@@ -92,6 +101,7 @@ class CombatPhase {
     for (final c in registry.inbox.drain()) {
       _apply(c, cities);
     }
+    _answerMissiles(cities);
     for (final city in cities) {
       if (city.war.outbox.isEmpty) continue;
       final events = List<CombatEvent>.of(city.war.outbox);
@@ -195,6 +205,8 @@ class CombatPhase {
         registry.lastRefusal = _assign(c, cities);
       case ArmVesselCommand():
         registry.lastRefusal = _arm(c, cities);
+      case MissileStrikeCommand():
+        registry.lastRefusal = _missileStrike(c, cities);
       case ReinforceOperationCommand():
         _reinforce(c, cities);
       case BaseOrderCommand():
@@ -227,6 +239,86 @@ class CombatPhase {
             if (c.value != null) registry.lastRefusal = b.orderSpareCore(op, c.value!);
         }
     }
+  }
+
+  // ---- silo missiles (§7O) --------------------------------------------------------
+
+  /// A strike on a point: [c]'s colony fires a salvo at it, once it has paid.
+  String? _missileStrike(MissileStrikeCommand c, List<CitySim> cities) {
+    if (!missiles) return 'Nothing flies here: no missile can be launched.';
+    final home = _find(cities, c.colonyId);
+    if (home == null) return 'That colony no longer exists.';
+    final a = home.loyalty.allegiance;
+    if (a != Allegiance.colonial && a != Allegiance.occupied) return '${home.name} takes no orders.';
+    if (!home.buildingParcels().any((b) => b.$2.type == 'silo')) return '${home.name} has no Missile Silo.';
+    if (home.body.id.value != c.bodyId) return 'A silo strikes only its own world.';
+    if (registry.missiles.any((m) => m.homeColonyId == home.id && !m.done)) {
+      return '${home.name}\'s silo already has a salvo in hand.';
+    }
+    final aim = Vector3(c.aim.$1, c.aim.$2, c.aim.$3);
+    if (aim.length < 1e-9) return 'A strike on where?';
+    final m = MissileShot(
+      id: registry.nextMissileId++,
+      homeColonyId: home.id,
+      bodyId: c.bodyId,
+      aimDir: aim.normalized,
+      state: MissileState.unpaid,
+    );
+    registry.missiles.add(m);
+    home.war.inbox.add(SiloDebitWrite(-1, 'free:${m.id}', kSiloMissiles));
+    return null;
+  }
+
+  /// Salvos that landed, or could not fly, answered for (§7O): the battle
+  /// they were aimed into, and every colony they came down in.
+  void _answerMissiles(List<CitySim> cities) {
+    for (final m in [...registry.missiles]) {
+      if (m.state == MissileState.failed) {
+        final op = m.opId == null ? null : registry.byId(m.opId!);
+        if (op != null && m.strikeSeq != null) {
+          op.missileLost(m.strikeSeq!, m.why ?? 'the salvo could not fly.');
+        } else {
+          registry.lastRefusal = 'The missile strike could not fly: ${m.why ?? 'no reason given.'}';
+        }
+        registry.missiles.remove(m);
+        continue;
+      }
+      if (m.state != MissileState.landed) continue;
+      registry.missiles.remove(m);
+      final aim = m.aimBF;
+      var answered = false;
+      if (aim != null) {
+        for (final c in cities) {
+          if (c.body.id.value != m.bodyId) continue;
+          final (e, n) = localOf(c, aim);
+          if (e * e + n * n > missileColonyReachM * missileColonyReachM) continue;
+          c.war.inbox.add(MissileStrikeWrite(e, n, kMissileBlastM, kMissileDeathShare));
+          final running = registry.runningAgainst(c.id);
+          if (running == null) continue;
+          if (m.opId == running.id && m.strikeSeq != null) {
+            running.missileLanded(m.strikeSeq!, e, n);
+            answered = true;
+          } else {
+            running.pointStrike(e, n);
+          }
+        }
+      }
+      // Aimed into a battle at a colony no longer there to hit: settled.
+      final op = m.opId == null ? null : registry.byId(m.opId!);
+      if (!answered && op != null && m.strikeSeq != null) {
+        op.missileLost(m.strikeSeq!, 'it came down away from the battle.');
+      }
+    }
+  }
+
+  /// [bf] (body-fixed) in [c]'s local east/north metres: the tangent-plane
+  /// projection about its site.
+  static (double, double) localOf(CitySim c, Vector3 bf) {
+    final lat = c.cityLat * math.pi / 180, lon = c.cityLon * math.pi / 180;
+    final east = Vector3(-math.sin(lon), math.cos(lon), 0);
+    final up = Vector3(math.cos(lat) * math.cos(lon), math.cos(lat) * math.sin(lon), math.sin(lat));
+    final north = up.cross(east);
+    return (bf.dot(east), bf.dot(north));
   }
 
   // ---- orbital support (§7E) -----------------------------------------------------
@@ -537,8 +629,37 @@ class CombatPhase {
           city.war.inbox.add(BaseGoodsWrite(e.materiel, e.stock));
         }
       case SiloFiredEvent():
+        if (e.opId < 0) {
+          // A strike on a point (§7O): paid for, or not.
+          final id = int.tryParse(e.objectiveId.replaceFirst('free:', ''));
+          final m = registry.missiles.where((x) => x.id == id).firstOrNull;
+          if (m != null && m.state == MissileState.unpaid) {
+            if (e.fired) {
+              m.state = MissileState.pending;
+            } else {
+              m
+                ..state = MissileState.failed
+                ..why = '${city.name} had not the $kSiloMissiles missiles.';
+            }
+          }
+          break;
+        }
         final op = registry.byId(e.opId);
-        if (op != null && !op.resolved) op.siloFired(e.objectiveId, ok: e.fired);
+        if (op != null && !op.resolved) {
+          final target = _find(cities, op.targetColonyId);
+          final flies = missiles && target != null && target.body.id == city.body.id;
+          final aim = op.siloFired(e.objectiveId, ok: e.fired, flown: flies);
+          if (aim != null && target != null) {
+            registry.missiles.add(MissileShot(
+              id: registry.nextMissileId++,
+              homeColonyId: city.id,
+              bodyId: target.body.id.value,
+              aimDir: target.localToBodyFixed(Vec2(aim.e, aim.n), bodyRadiusM: target.body.radius).normalized,
+              opId: op.id,
+              strikeSeq: aim.seq,
+            ));
+          }
+        }
       case ArmedEvent():
         registry.loadRounds(e.vesselId, e.paid, registry.clockUs + kArmLoadS * 1000000);
         if (e.paid < e.asked) {
