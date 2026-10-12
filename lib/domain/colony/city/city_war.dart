@@ -542,6 +542,10 @@ extension CityWar on CitySim {
       }
       final cap = (s.jobs * restThrottle * 0.5).floor();
       final avail = math.max(0, cap - away);
+      // Nobody away and still none to send: the building is not running —
+      // short of power (a solar colony's night) or of staff — which "every
+      // trooper is already away" told nobody (found playing it).
+      if (cap <= 0 && away == 0) why ??= 'not running: short of power or staff';
       out.add(TrooperSource(
         siteId: siteId,
         type: s.type,

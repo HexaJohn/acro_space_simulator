@@ -2971,7 +2971,10 @@ extension _SimulationViewCombat on _SimulationViewState {
     src
       ..infiniteRobotics = true
       ..infiniteRes = true
-      ..pinPopulation = true;
+      ..pinPopulation = true
+      // Through the lunar night too: its solar farm makes nothing then, and
+      // its barracks stopped (found playing it).
+      ..infinitePower = true;
     src.stock[Commodity.rations] = 400;
     src.stock[Commodity.guns] = 80;
     src.stock[Commodity.ammo] = 400;

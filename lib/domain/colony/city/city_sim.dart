@@ -562,6 +562,7 @@ class CitySim {
   bool infiniteDemand = false; // DEBUG: RCI demand pinned to max (zones keep growing)
   bool infiniteRobotics = false; // DEBUG/endgame: buildings need no workers (full staffing)
   bool pinPopulation = false; // DEBUG: nobody migrates in or out (a fixture's people stay put)
+  bool infinitePower = false; // DEBUG: every building powered, day or night
   bool ignoreUnlocks = false; // DEBUG: build anything regardless of population gate
 
   String? landerPad; // spaceport SITE the lander is parked on (occupied), or null
@@ -1469,9 +1470,9 @@ class CitySim {
       tallyLife(s, uf);
     }
     final lifePower =
-        lifeDraw <= 0 ? 1.0 : (powerOut / lifeDraw).clamp(0.0, 1.0);
+        infinitePower || lifeDraw <= 0 ? 1.0 : (powerOut / lifeDraw).clamp(0.0, 1.0);
     final restDraw = powerDraw - lifeDraw;
-    final restPower = restDraw <= 1e-9
+    final restPower = infinitePower || restDraw <= 1e-9
         ? 1.0
         : ((powerOut - lifeDraw * lifePower) / restDraw).clamp(0.0, 1.0);
     final restJobs = jobs - lifeJobs;
