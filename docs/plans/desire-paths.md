@@ -236,3 +236,14 @@ what a short walk wears into, the way a long drive wears into a dirt road.
   - 3D: a glass barrel on concrete piers.
   - Plat: a pale cyan line over the roads.
   - Walkers are not drawn yet; inside a tube they are hidden anyway.
+
+**Built** (2026-10-12):
+- **Phase 3, the trails in 3D:** aa67818. `TrailCapture` (ribbons on the edited ground,
+  plus rover poses) and `trail_nodes.dart`. Kerb cars are no longer baked while agents
+  run.
+- **Phase 4, the laws:** aa67818. `traffic_laws.dart` and `_Core._applyPolicy`; the twin
+  tests are in `test/colony/traffic_laws_test.dart`.
+- **§9, tubes:** bab3967. `tubeRuns`, `TrailNetwork.trip` and `dueTubes`; gates in
+  `test/colony/trails/tubes_test.dart`. In a 4-hour headless run of the starter base, the
+  crew's walks between the spaceport and the solar farm (doors 121 m apart) were promoted
+  to a tube with no help.
