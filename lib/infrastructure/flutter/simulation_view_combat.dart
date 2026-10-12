@@ -965,7 +965,15 @@ extension _SimulationViewCombat on _SimulationViewState {
       _freecam = false;
       _focusVessel = v.id;
       _focusBody = null;
-      _craftCam = true;
+      // Over its shoulder, not down its nose: a lander comes down nose-up,
+      // and the chase cam looked down the nose at the sky with the craft a
+      // speck at the colony rig's 1.8 km (found playing it). Close, above
+      // and behind, looking down at it and the ground it is coming down on.
+      _craftCam = false;
+      _perspectiveMode = true;
+      _upMode = CameraUpMode.gravity;
+      _range = 120;
+      _view = _view.copyWith(elevation: 35 * math.pi / 180, roll: 0);
     });
   }
 

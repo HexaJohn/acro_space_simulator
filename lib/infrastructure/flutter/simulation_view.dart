@@ -3630,9 +3630,23 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                 // happens to sit over — the toolbar included — cannot put an
                 // arrow back; and opaque, because while the mouse is the head
                 // a click on a button would be an accident. Esc frees it.
+                //
+                // Opaque means the world's layer beneath never sees a press
+                // either, so the rifle's (and the APC cannon's) trigger is
+                // here (combat.md §7G): found playing with a real mouse, the
+                // trigger on the world layer never fired while looking.
                 if (_pointerLock.captured)
-                  const Positioned.fill(
-                    child: MouseRegion(cursor: SystemMouseCursors.none),
+                  Positioned.fill(
+                    child: Listener(
+                      key: const Key('captured-mouse'),
+                      behavior: HitTestBehavior.opaque,
+                      onPointerDown: (e) {
+                        if (_liveJoined && e.buttons == kPrimaryButton) _combatState.trigger = true;
+                      },
+                      onPointerUp: (_) => _combatState.trigger = false,
+                      onPointerCancel: (_) => _combatState.trigger = false,
+                      child: const MouseRegion(cursor: SystemMouseCursors.none),
+                    ),
                   ),
               ],
             ),
