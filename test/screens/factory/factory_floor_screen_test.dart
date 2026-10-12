@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
@@ -370,5 +371,151 @@ void main() {
     expect(t.takeException(), isNull);
     // A loose sanity bound, not a benchmark: 20 test frames of a full hall.
     expect(sw.elapsedMilliseconds, lessThan(10000));
+  });
+
+  /// A plain click (no drag) with a spanned tool lays the 2x2 the hover
+  /// previewed, not the 1x1 a zero-size drag rectangle would make.
+  testWidgets('plain click with a spanned tool lays the previewed span',
+      (t) async {
+    await open(t, FakeFactorySim(hall()));
+    await t.tap(find.byKey(const Key('palette-aisle')));
+    await t.pump();
+    final g = await hover(t, const TilePos(6, 6));
+    expect(c.ghost.single.placement.span, kDefaultSpan);
+    await g.removePointer();
+    final down = await t.startGesture(at(t, const TilePos(6, 6)),
+        kind: PointerDeviceKind.mouse);
+    await t.pump();
+    expect(c.ghost.single.placement.span, kDefaultSpan,
+        reason: 'pressing must not shrink the preview');
+    await down.up();
+    await t.pump();
+    expect(sim.placed.single.kind, EntityKind.aisle);
+    expect(sim.placed.single.pos, const TilePos(6, 6));
+    expect(sim.placed.single.span, kDefaultSpan);
+  });
+
+  /// Handing the screen a different sim (or port) rebinds the editor to it:
+  /// the old sim stops stepping, edits and paint go to the new one, and the
+  /// layer cache is rebuilt even though both sims share layoutRev 0.
+  testWidgets('swapping the sim rebinds the controller and layer cache',
+      (t) async {
+    t.view.physicalSize = const Size(1600, 1000);
+    t.view.devicePixelRatio = 1;
+    addTearDown(t.view.reset);
+    final a = FakeFactorySim(hall());
+    final b = FakeFactorySim(FloorBlueprint(
+        name: 'Other', hall: const HallSize(20, 10)));
+    Widget app(FakeFactorySim s, [FactoryColonyPort? p]) =>
+        MaterialApp(home: FactoryFloorScreen(sim: s, port: p));
+    await t.pumpWidget(app(a));
+    await t.pump(const Duration(milliseconds: 16));
+    final st =
+        t.state<FactoryFloorScreenState>(find.byType(FactoryFloorScreen));
+    final first = st.controller;
+    final sandbox = first.port;
+    // A rebuild with the same sim keeps the controller and its sandbox.
+    await t.pumpWidget(app(a));
+    expect(identical(st.controller, first), isTrue);
+    expect(identical(st.controller.port, sandbox), isTrue,
+        reason: 'the default port is made once, not per build');
+
+    await t.pumpWidget(app(b));
+    await t.pump(const Duration(milliseconds: 16));
+    expect(identical(st.controller.sim, b), isTrue);
+    expect(identical(st.controller.port, sandbox), isTrue);
+    expect(st.layerBuilds, 1, reason: 'a fresh cache built for the new sim');
+    expect(st.controller.index.blueprint, same(b.bp));
+    final aSteps = a.steps;
+    for (var i = 0; i < 5; i++) {
+      await t.pump(const Duration(milliseconds: 16));
+    }
+    expect(a.steps, aSteps, reason: 'the old sim no longer runs');
+    expect(b.steps, greaterThan(0));
+
+    final port = StockColonyPort();
+    await t.pumpWidget(app(b, port));
+    expect(identical(st.controller.port, port), isTrue);
+    expect(t.takeException(), isNull);
+  });
+
+  /// An arm's pick filter is set from the inspector. The editor surface has
+  /// no setItem, so it is a remove + place of the same arm with the filter,
+  /// and the selection follows the re-placed arm.
+  testWidgets('arm inspector sets the pick filter by remove + place',
+      (t) async {
+    await open(t, FakeFactorySim(hall([
+      const Placement(id: 1, kind: EntityKind.arm, pos: TilePos(5, 5),
+          dir: Dir4.north),
+    ])));
+    await click(t, const TilePos(5, 5));
+    expect(c.selectedId, 1);
+    await t.tap(find.byKey(const Key('inspect-arm-item')));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 400));
+    await t.tap(find.text(FactoryItems.ore.label).last);
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 400));
+    expect(sim.removed, [1]);
+    final arm = sim.placed.single;
+    expect(arm.kind, EntityKind.arm);
+    expect(arm.pos, const TilePos(5, 5));
+    expect(arm.dir, Dir4.north);
+    expect(arm.item, FactoryItems.ore.id);
+    final sel = c.selectedId;
+    expect(sel, isNotNull, reason: 'the selection follows the new arm');
+    expect(c.index.byId(sel!)?.item, FactoryItems.ore.id);
+
+    // Back to "any item": the filter is cleared, not kept.
+    await t.tap(find.byKey(const Key('inspect-arm-item')));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 400));
+    await t.tap(find.text('Any item').last);
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 400));
+    expect(sim.removed, [1, sel]);
+    expect(sim.placed.last.item, isNull);
+    expect(sim.placed.last.pos, const TilePos(5, 5));
+  });
+
+  /// A crossing is a walkable belt tile: a belt run dragged across an aisle
+  /// is laid as crossings there, and a crossing laid on a belt replaces it
+  /// (keeping its direction).
+  testWidgets('belts over an aisle become crossings; crossing replaces belt',
+      (t) async {
+    await open(t, FakeFactorySim(hall([
+      const Placement(id: 1, kind: EntityKind.aisle, pos: TilePos(5, 0),
+          span: (2, 30)),
+      const Placement(id: 2, kind: EntityKind.belt, pos: TilePos(10, 10),
+          dir: Dir4.north),
+    ])));
+    await t.tap(find.byKey(const Key('palette-belt')));
+    await t.pump();
+    final g = await t.startGesture(at(t, const TilePos(3, 4)),
+        kind: PointerDeviceKind.mouse);
+    await g.moveTo(at(t, const TilePos(8, 4)));
+    await t.pump();
+    await g.up();
+    await g.removePointer();
+    await t.pump();
+    final run = sim.placed;
+    expect(run.map((p) => p.kind), [
+      EntityKind.belt, EntityKind.belt, EntityKind.crossing,
+      EntityKind.crossing, EntityKind.belt, EntityKind.belt,
+    ]);
+    expect(run.every((p) => p.dir == Dir4.east), isTrue);
+
+    await t.tap(find.byKey(const Key('palette-crossing')));
+    await t.pump();
+    final h = await hover(t, const TilePos(10, 10));
+    expect(c.ghostValid, isTrue, reason: 'a crossing may go on a belt');
+    await h.removePointer();
+    await click(t, const TilePos(10, 10));
+    expect(sim.removed, [2]);
+    expect(sim.placed.last.kind, EntityKind.crossing);
+    expect(sim.placed.last.pos, const TilePos(10, 10));
+    expect(sim.placed.last.dir, Dir4.north);
+    expect(c.index.beltDirAt(const TilePos(10, 10)), Dir4.north,
+        reason: 'a crossing carries items along its dir like a belt');
   });
 }

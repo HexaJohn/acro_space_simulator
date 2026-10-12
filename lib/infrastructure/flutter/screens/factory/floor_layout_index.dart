@@ -49,7 +49,11 @@ class FloorLayoutIndex {
         continue;
       }
       if (p.kind == EntityKind.machine) machines.add(p);
-      if (p.kind == EntityKind.belt) _beltDir[p.pos.key] = p.dir;
+      // A crossing is a belt tile with a walkway over it: it carries items
+      // along its dir like any belt.
+      if (p.kind == EntityKind.belt || p.kind == EntityKind.crossing) {
+        _beltDir[p.pos.key] = p.dir;
+      }
       final f = p.footprint;
       for (var y = f.y0; y < f.y1; y++) {
         for (var x = f.x0; x < f.x1; x++) {
@@ -85,7 +89,7 @@ class FloorLayoutIndex {
     return id == null ? null : _byId[id];
   }
 
-  /// Which way the belt on [t] runs (null = no belt there).
+  /// Which way the belt or crossing on [t] runs (null = no belt there).
   Dir4? beltDirAt(TilePos t) => _beltDir[t.key];
 
   /// What a click on [t] means: the solid object first, else the topmost

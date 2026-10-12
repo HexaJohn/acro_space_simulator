@@ -80,8 +80,12 @@ const (int, int) kDefaultSpan = (2, 2);
 
 /// One tile (or one piece) of the placement preview.
 class GhostPiece {
-  const GhostPiece(this.placement, this.rect, this.check);
+  const GhostPiece(this.placement, this.rect, this.check, {this.replaces});
   final Placement placement;
+
+  /// A belt this piece swaps out (a crossing laid over an existing belt
+  /// tile): committed as remove-then-place, restored if the place fails.
+  final int? replaces;
 
   /// Tiles the piece would cover (for a machine with no recipe yet, the
   /// station's footprint, so the player sees the space it needs).
@@ -284,6 +288,41 @@ class FactoryEditorController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Sets an arm's pick filter ([item] null = any item). The editor surface
+  /// has no setItem, so this is an edit like any other: the arm is removed
+  /// and placed again with the filter (same tile, same facing), and put
+  /// back as it was if the new one is refused. The selection follows the
+  /// re-placed arm's new id.
+  void setArmFilter(int id, String? item) {
+    final old = index.byId(id);
+    if (old == null || old.kind != EntityKind.arm) {
+      message = refusalText(EditRefusal.wrongKind);
+      notifyListeners();
+      return;
+    }
+    if (old.item == item) return;
+    final gone = sim.remove(id);
+    if (!gone.ok) {
+      _report(gone);
+      notifyListeners();
+      return;
+    }
+    final next = Placement(id: 0, kind: EntityKind.arm, pos: old.pos,
+        dir: old.dir, item: item);
+    final r = sim.place(next);
+    if (r.ok) {
+      _report(r);
+      if (selectedId == id) selectedId = r.placementId;
+    } else {
+      final back = sim.place(Placement(id: 0, kind: EntityKind.arm,
+          pos: old.pos, dir: old.dir, item: old.item));
+      if (selectedId == id) selectedId = back.placementId;
+      _report(r);
+    }
+    frame.value++;
+    notifyListeners();
+  }
+
   void setMachineMode(int id, MachineMode mode) {
     _report(sim.setMode(id, mode));
     frame.value++;
@@ -342,9 +381,26 @@ class FactoryEditorController extends ChangeNotifier {
   TilePos? hover;
   List<GhostPiece> ghost = const [];
 
-  /// Tiles of a belt run being dragged, in order.
+  /// Tiles of a belt (or crossing) run being dragged, in order.
   final List<TilePos> beltPath = [];
   TilePos? _rectStart;
+
+  /// True once a spanned-kind drag has left its start tile; until then the
+  /// gesture is a plain click and lays the [kDefaultSpan] the hover showed.
+  bool _rectMoved = false;
+
+  /// Kinds laid by dragging a directed run.
+  static bool _isRunKind(EntityKind? k) =>
+      k == EntityKind.belt || k == EntityKind.crossing;
+
+  /// Is [t] on a walkway (an aisle marking)? A belt run laid across one
+  /// becomes crossings there, so the aisle stays walkable.
+  bool _onWalkway(TilePos t) {
+    for (final o in index.overlays) {
+      if (o.kind == EntityKind.aisle && o.footprint.contains(t)) return true;
+    }
+    return false;
+  }
 
   bool get ghostValid => ghost.isNotEmpty && ghost.every((g) => g.check.ok);
 
@@ -354,9 +410,26 @@ class FactoryEditorController extends ChangeNotifier {
       final p = Placement(id: 0, kind: k, pos: t, span: kDefaultSpan);
       return GhostPiece(p, p.footprint, index.check(p));
     }
+    if (k == EntityKind.crossing) {
+      // A crossing is a walkable belt tile: laid over an existing belt it
+      // takes that belt's place and keeps its direction, so the line still
+      // flows and walkers gain a way over it.
+      final under = index.solidAt(t);
+      if (under != null &&
+          under.kind == EntityKind.belt &&
+          !(pending?.contains(t.key) ?? false)) {
+        final p = Placement(id: 0, kind: k, pos: t, dir: under.dir);
+        return GhostPiece(p, p.footprint, const LayoutCheck.ok(),
+            replaces: under.id);
+      }
+    }
     String? item;
     if (k == EntityKind.receivingDock) item = itemChoice ?? FactoryItems.ore.id;
-    if (k == EntityKind.shippingDock || k == EntityKind.chest) item = itemChoice;
+    if (k == EntityKind.shippingDock ||
+        k == EntityKind.chest ||
+        k == EntityKind.arm) {
+      item = itemChoice;
+    }
     if (k == EntityKind.machine) {
       final r = effectiveRecipe;
       var (w, h) = (station.footW, station.footH);
@@ -379,31 +452,37 @@ class FactoryEditorController extends ChangeNotifier {
       ghost = const [];
       return;
     }
-    if (k == EntityKind.belt && beltPath.isNotEmpty) {
+    if (_isRunKind(k) && beltPath.isNotEmpty) {
       final pending = <int>{};
       final out = <GhostPiece>[];
       for (var i = 0; i < beltPath.length; i++) {
         final dir = beltRunDir(beltPath, i, ghostDir);
-        final g = _pieceAt(k, beltPath[i], dir, pending: pending);
-        pending.add(beltPath[i].key);
+        final at = beltPath[i];
+        final pk = k == EntityKind.belt && _onWalkway(at)
+            ? EntityKind.crossing
+            : k;
+        final g = _pieceAt(pk, at, dir, pending: pending);
+        pending.add(at.key);
         out.add(g);
       }
       ghost = out;
       return;
     }
     final rs = _rectStart;
-    if (kSpannedKinds.contains(k) && rs != null && h != null) {
+    if (kSpannedKinds.contains(k) && rs != null && h != null && _rectMoved) {
       final x0 = math.min(rs.x, h.x), y0 = math.min(rs.y, h.y);
       final w = (rs.x - h.x).abs() + 1, hh = (rs.y - h.y).abs() + 1;
       final p = Placement(id: 0, kind: k, pos: TilePos(x0, y0), span: (w, hh));
       ghost = [GhostPiece(p, p.footprint, index.check(p))];
       return;
     }
-    if (h == null) {
+    final at = rs ?? h;
+    if (at == null) {
       ghost = const [];
       return;
     }
-    ghost = [_pieceAt(k, h, ghostDir)];
+    final pk = k == EntityKind.belt && _onWalkway(at) ? EntityKind.crossing : k;
+    ghost = [_pieceAt(pk, at, ghostDir)];
   }
 
   /// Direction of tile [i] of a dragged run: toward the next tile; the last
@@ -451,6 +530,7 @@ class FactoryEditorController extends ChangeNotifier {
     _placing = false;
     beltPath.clear();
     _rectStart = null;
+    _rectMoved = false;
   }
 
   void pointerHover(Offset local) {
@@ -498,12 +578,13 @@ class FactoryEditorController extends ChangeNotifier {
         notifyListeners();
       case FactoryTool.place:
         _placing = true;
-        if (kind == EntityKind.belt) {
+        if (_isRunKind(kind)) {
           beltPath
             ..clear()
             ..add(t);
         } else if (kind != null && kSpannedKinds.contains(kind)) {
           _rectStart = t;
+          _rectMoved = false;
         }
     }
     _refreshGhost();
@@ -524,9 +605,10 @@ class FactoryEditorController extends ChangeNotifier {
     final t = localToTile(local);
     if (t == hover) return;
     hover = t;
-    if (_placing && kind == EntityKind.belt && beltPath.isNotEmpty) {
+    if (_placing && _isRunKind(kind) && beltPath.isNotEmpty) {
       _extendBelt(t);
     }
+    if (_placing && _rectStart != null && t != _rectStart) _rectMoved = true;
     _refreshGhost();
     frame.value++;
   }
@@ -534,10 +616,12 @@ class FactoryEditorController extends ChangeNotifier {
   void pointerUp(int pointer, Offset local) {
     if (pointer != _pointer) return;
     if (_placing) {
-      hover = localToTile(local);
-      if (kind == EntityKind.belt && beltPath.isNotEmpty) {
-        _extendBelt(hover!);
+      final t = localToTile(local);
+      hover = t;
+      if (_isRunKind(kind) && beltPath.isNotEmpty) {
+        _extendBelt(t);
       }
+      if (_rectStart != null && t != _rectStart) _rectMoved = true;
       _refreshGhost();
       _commitGhost();
     }
@@ -567,10 +651,22 @@ class FactoryEditorController extends ChangeNotifier {
         why ??= g.check.refusal;
         continue;
       }
+      final swap = g.replaces;
+      final old = swap == null ? null : index.byId(swap);
+      if (swap != null) {
+        final gone = sim.remove(swap);
+        if (!gone.ok) {
+          refused++;
+          why ??= gone.refusal;
+          continue;
+        }
+        if (selectedId == swap) selectedId = null;
+      }
       final r = sim.place(g.placement);
       if (r.ok) {
         placed++;
       } else {
+        if (old != null) sim.place(old.copyWith(id: 0));
         refused++;
         why ??= r.refusal;
       }

@@ -115,6 +115,15 @@ class _Handler {
   int trip = 0;
 }
 
+/// Belts and crossings: a crossing is a belt tile with a walkway over it.
+bool _isBelt(EntityKind k) => k == EntityKind.belt || k == EntityKind.crossing;
+
+/// The commodity one [item] books as, and how many units of it the item is.
+(String, double) _units(String item) {
+  final def = FactoryItems.byId(item);
+  return (def?.commodity ?? item, def?.commodityUnits ?? 1);
+}
+
 class DemoFactorySim implements FactorySim {
   DemoFactorySim(this._bp) {
     _reindex();
@@ -233,6 +242,7 @@ class DemoFactorySim implements FactorySim {
     for (final p in _bp.placements) {
       switch (p.kind) {
         case EntityKind.belt:
+        case EntityKind.crossing:
           _belts.putIfAbsent(p.id, () => []);
         case EntityKind.machine:
           _machines.putIfAbsent(p.id, () => _Machine());
@@ -308,7 +318,7 @@ class DemoFactorySim implements FactorySim {
   @override
   Iterable<BeltItemView> get beltItems sync* {
     for (final p in _bp.placements) {
-      if (p.kind != EntityKind.belt) continue;
+      if (!_isBelt(p.kind)) continue;
       final list = _belts[p.id];
       if (list == null) continue;
       for (final i in list) {
@@ -448,11 +458,58 @@ class DemoFactorySim implements FactorySim {
     return l;
   }
 
+  /// Every bit of runtime state, keyed by placement id in id order (and
+  /// handlers by handler id), so equal sims serialise to equal JSON.
   @override
-  Map<String, Object?> toJson() => {
-        'bp': _bp.toJson(),
-        't': _sim,
-      };
+  Map<String, Object?> toJson() {
+    List<int> ids(Iterable<int> keys) => keys.toList()..sort();
+    Map<String, int> counts(Map<String, int> m) =>
+        {for (final k in m.keys.toList()..sort()) if (m[k] != 0) k: m[k]!};
+    final crew = [..._handlers]..sort((a, b) => a.id.compareTo(b.id));
+    return {
+      'bp': _bp.toJson(),
+      'rev': _rev,
+      't': _sim,
+      'carry': _carry,
+      'kw': _powerKw,
+      'nextHandler': _nextHandlerId,
+      'ledger': _ledger.toJson(),
+      'belts': {
+        for (final id in ids(_belts.keys))
+          if (_belts[id]!.isNotEmpty)
+            '$id': [for (final i in _belts[id]!) [i.item, i.progress]],
+      },
+      'machines': {
+        for (final id in ids(_machines.keys))
+          '$id': {
+            'in': counts(_machines[id]!.input),
+            'out': counts(_machines[id]!.output),
+            'timer': _machines[id]!.timer,
+            'status': _machines[id]!.status.name,
+          },
+      },
+      'stores': {
+        for (final id in ids(_stores.keys))
+          if (_stores[id]!.isNotEmpty) '$id': counts(_stores[id]!),
+      },
+      'feed': {for (final id in ids(_feed.keys)) '$id': _feed[id]},
+      'handlers': [
+        for (final h in crew)
+          {
+            'id': h.id,
+            'kind': h.kind.name,
+            'x': h.x,
+            'y': h.y,
+            'state': h.state.name,
+            'carrying': ?h.carrying,
+            'count': h.count,
+            'target': ?h.target,
+            'wait': h.wait,
+            'trip': h.trip,
+          },
+      ],
+    };
+  }
 
   void _sub(double dt, FactoryColonyPort port) {
     _sim += dt;
@@ -460,7 +517,7 @@ class DemoFactorySim implements FactorySim {
     final speed = port.powerShare.clamp(0.0, 1.0) *
         port.staffingShare.clamp(0.0, 1.0);
     _feedBelts(dt, port);
-    _advanceBelts(dt * speed);
+    _advanceBelts(dt * speed, port);
     _craft(dt * speed, port);
     _moveHandlers(dt * speed, port);
     _ledger.energyKJ += _powerKw * dt;
@@ -471,7 +528,7 @@ class DemoFactorySim implements FactorySim {
   /// arms do this; the toy shortcuts it).
   void _feedBelts(double dt, FactoryColonyPort port) {
     for (final p in _bp.placements) {
-      if (p.kind != EntityKind.belt) continue;
+      if (!_isBelt(p.kind)) continue;
       final up = _ix.solidAt(p.pos.step(p.dir.opposite));
       if (up == null) continue;
       if (up.kind != EntityKind.receivingDock &&
@@ -491,12 +548,15 @@ class DemoFactorySim implements FactorySim {
       String? item;
       if (up.kind == EntityKind.receivingDock) {
         final want = up.item ?? 'ore';
-        final def = FactoryItems.byId(want);
-        final units = def?.commodityUnits ?? 1;
-        final got = port.take(def?.commodity ?? want, units);
+        final (commodity, units) = _units(want);
+        final got = port.take(commodity, units);
         if (got >= units) {
           item = want;
-          _ledger.addReceived(def?.commodity ?? want, got);
+          _ledger.addReceived(commodity, got);
+        } else if (got > 0) {
+          // Not enough for a whole item: hand the part-grant straight back
+          // rather than lose it.
+          port.give(commodity, got);
         }
       } else {
         final m = _machines[up.id];
@@ -516,12 +576,12 @@ class DemoFactorySim implements FactorySim {
     }
   }
 
-  void _advanceBelts(double dt) {
+  void _advanceBelts(double dt, FactoryColonyPort port) {
     final move = kDemoBeltTilesPerS * dt;
     // Downstream first, so a freed slot is seen in the same sub-step.
     for (var i = _bp.placements.length - 1; i >= 0; i--) {
       final p = _bp.placements[i];
-      if (p.kind != EntityKind.belt) continue;
+      if (!_isBelt(p.kind)) continue;
       final list = _belts[p.id]!;
       var limit = 1.0;
       for (var j = 0; j < list.length; j++) {
@@ -530,19 +590,10 @@ class DemoFactorySim implements FactorySim {
         limit = it.progress - kDemoBeltGap;
       }
       if (list.isEmpty || list.first.progress < 1.0) continue;
-      // A crossing is a walkable bridge over the run: items pass under it
-      // to the next tile beyond (up to a few in a row).
-      var at = p.pos.step(p.dir);
-      var next = _ix.solidAt(at);
-      for (var hop = 0;
-          hop < 4 && next != null && next.kind == EntityKind.crossing;
-          hop++) {
-        at = at.step(p.dir);
-        next = _ix.solidAt(at);
-      }
+      final next = _ix.solidAt(p.pos.step(p.dir));
       if (next == null) continue;
       final head = list.first;
-      if (next.kind == EntityKind.belt) {
+      if (_isBelt(next.kind)) {
         final nl = _belts[next.id]!;
         if (nl.isNotEmpty && nl.last.progress < kDemoBeltGap) continue;
         list.removeAt(0);
@@ -553,15 +604,19 @@ class DemoFactorySim implements FactorySim {
         if (held >= kDemoOutputCap * 2) continue;
         list.removeAt(0);
         m.input[head.item] = (m.input[head.item] ?? 0) + 1;
-      } else if (next.kind == EntityKind.chest ||
-          next.kind == EntityKind.shippingDock) {
+      } else if (next.kind == EntityKind.shippingDock) {
+        // Shipping hands the item to the colony; a full colony refuses it
+        // and the run backs up instead of losing it.
+        if (!_ship(head.item, port)) continue;
+        list.removeAt(0);
+      } else if (next.kind == EntityKind.chest) {
         list.removeAt(0);
         final s = _stores[next.id]!;
         s[head.item] = (s[head.item] ?? 0) + 1;
       } else if (next.kind == EntityKind.arm) {
         // An arm hands the item on to the tile it faces.
         final drop = _ix.solidAt(next.pos.step(next.dir));
-        if (drop != null && drop.kind == EntityKind.belt) {
+        if (drop != null && _isBelt(drop.kind)) {
           final nl = _belts[drop.id]!;
           if (nl.isNotEmpty && nl.last.progress < kDemoBeltGap) continue;
           list.removeAt(0);
@@ -569,6 +624,19 @@ class DemoFactorySim implements FactorySim {
         }
       }
     }
+  }
+
+  /// Gives one whole [item] to the colony: all of it or nothing (a part the
+  /// colony accepted is taken back), so an item is never split or lost.
+  bool _ship(String item, FactoryColonyPort port) {
+    final (commodity, units) = _units(item);
+    final put = port.give(commodity, units);
+    if (put < units) {
+      if (put > 0) port.take(commodity, put);
+      return false;
+    }
+    _ledger.addShipped(commodity, put);
+    return true;
   }
 
   void _craft(double dt, FactoryColonyPort port) {
@@ -655,8 +723,15 @@ class DemoFactorySim implements FactorySim {
         continue;
       }
       if (h.state == HandlerState.idle) {
-        h.target = receiving[(h.id + h.trip) % receiving.length].id;
-        h.state = HandlerState.toPickup;
+        if (h.count > 0) {
+          // Still holding a load (its dock was removed mid-trip): ship it
+          // rather than pick up over it.
+          h.target = shipping[(h.id + h.trip) % shipping.length].id;
+          h.state = HandlerState.carrying;
+        } else {
+          h.target = receiving[(h.id + h.trip) % receiving.length].id;
+          h.state = HandlerState.toPickup;
+        }
       }
       final tgt = h.target == null ? null : _ix.byId(h.target!);
       if (tgt == null) {
@@ -683,25 +758,29 @@ class DemoFactorySim implements FactorySim {
       h.y = ty;
       h.wait = kDemoHandleS;
       if (h.state == HandlerState.toPickup) {
+        // The load is what the colony granted, in whole items; a fraction
+        // of an item (a part crate) goes straight back.
         final want = tgt.item ?? 'ore';
-        final def = FactoryItems.byId(want);
-        final units = (def?.commodityUnits ?? 1) * spec.capacity;
-        final got = port.take(def?.commodity ?? want, units);
-        _ledger.addReceived(def?.commodity ?? want, got);
+        final (commodity, per) = _units(want);
+        final got = port.take(commodity, per * spec.capacity);
+        final n = math.min(spec.capacity, (got / per + 1e-9).floor());
+        final keep = n * per;
+        if (got > keep) port.give(commodity, got - keep);
+        if (n == 0) continue; // dry dock: wait and ask again
+        _ledger.addReceived(commodity, keep);
         h.carrying = want;
-        h.count = spec.capacity;
+        h.count = n;
         h.target = shipping[(h.id + h.trip) % shipping.length].id;
         h.state = HandlerState.carrying;
       } else {
+        // Delivered to the colony only (not also into the dock's store),
+        // item by item; what a full colony refuses stays on the handler.
         final item = h.carrying ?? 'ore';
-        final def = FactoryItems.byId(item);
-        final units = (def?.commodityUnits ?? 1) * h.count;
-        final put = port.give(def?.commodity ?? item, units);
-        _ledger.addShipped(def?.commodity ?? item, put);
-        final s = _stores[tgt.id];
-        if (s != null) s[item] = (s[item] ?? 0) + h.count;
+        while (h.count > 0 && _ship(item, port)) {
+          h.count--;
+        }
+        if (h.count > 0) continue; // colony full: wait and try again
         h.carrying = null;
-        h.count = 0;
         h.trip++;
         h.state = HandlerState.idle;
       }

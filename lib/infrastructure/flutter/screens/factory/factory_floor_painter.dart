@@ -208,13 +208,15 @@ class FloorLayerCache {
       final sx = -fy, sy = fx;
       switch (p.kind) {
         case EntityKind.belt:
+        case EntityKind.crossing:
+          // A crossing is a belt (it carries items along its dir) with a
+          // zebra walkway painted over it.
           belts.addRect(_r(f, 0.06));
           chevrons
             ..moveTo(cx - fx * 0.12 + sx * 0.26, cy - fy * 0.12 + sy * 0.26)
             ..lineTo(cx + fx * 0.22, cy + fy * 0.22)
             ..lineTo(cx - fx * 0.12 - sx * 0.26, cy - fy * 0.12 - sy * 0.26);
-        case EntityKind.crossing:
-          belts.addRect(_r(f, 0.06));
+          if (p.kind != EntityKind.crossing) break;
           for (var i = 0; i < 4; i++) {
             final o = -0.36 + i * 0.24;
             zebra

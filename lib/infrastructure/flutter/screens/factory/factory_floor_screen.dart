@@ -46,16 +46,20 @@ const double kPaletteWidth = 212;
 const double kSidePanelWidth = 280;
 
 class FactoryFloorScreen extends StatefulWidget {
-  FactoryFloorScreen({
+  const FactoryFloorScreen({
     super.key,
     required this.sim,
-    FactoryColonyPort? port,
+    this.port,
     this.title = 'Factory Floor',
     this.onSaveBlueprint,
-  }) : port = port ?? InfiniteColonyPort();
+  });
 
   final FactorySim sim;
-  final FactoryColonyPort port;
+
+  /// The colony the floor trades with; null = a sandbox
+  /// ([InfiniteColonyPort]) created once by the screen's state and kept
+  /// across rebuilds, so its dock tallies are not reset every frame.
+  final FactoryColonyPort? port;
   final String title;
 
   /// Receives a COPY of the layout ("Save as blueprint"); hidden when null.
@@ -67,9 +71,15 @@ class FactoryFloorScreen extends StatefulWidget {
 
 class FactoryFloorScreenState extends State<FactoryFloorScreen>
     with SingleTickerProviderStateMixin {
-  late final FactoryEditorController controller =
-      FactoryEditorController(widget.sim, widget.port);
-  final FloorLayerCache _cache = FloorLayerCache();
+  /// The sandbox port used while the widget gives none (made once).
+  InfiniteColonyPort? _sandbox;
+
+  FactoryColonyPort get _port =>
+      widget.port ?? (_sandbox ??= InfiniteColonyPort());
+
+  late FactoryEditorController controller =
+      FactoryEditorController(widget.sim, _port);
+  FloorLayerCache _cache = FloorLayerCache();
   final FocusNode _focus = FocusNode(debugLabel: 'factory-floor');
   late final Ticker _ticker;
   Duration _last = Duration.zero;
@@ -81,6 +91,26 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   void initState() {
     super.initState();
     _ticker = createTicker(_onTick)..start();
+  }
+
+  /// A new sim or port means a new floor: the controller (camera, selection,
+  /// rate window, heat map) and the static-layer cache (keyed only by
+  /// layoutRev, which two sims can share) both belong to the old one.
+  @override
+  void didUpdateWidget(FactoryFloorScreen old) {
+    super.didUpdateWidget(old);
+    if (identical(old.sim, widget.sim) && identical(old.port, widget.port)) {
+      return;
+    }
+    final oldController = controller, oldCache = _cache;
+    controller = FactoryEditorController(widget.sim, _port);
+    _cache = FloorLayerCache();
+    // The frame being built may still hold the old painter; release the old
+    // controller and pictures once it is out.
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      oldController.dispose();
+      oldCache.dispose();
+    });
   }
 
   void _onTick(Duration elapsed) {
@@ -375,6 +405,9 @@ class _Palette extends StatelessWidget {
             _kindEntry(EntityKind.belt, Icons.double_arrow),
             _kindEntry(EntityKind.arm, Icons.call_split),
             _kindEntry(EntityKind.chest, Icons.inventory_2_outlined),
+            if (c.tool == FactoryTool.place && c.kind == EntityKind.arm)
+              _itemPicker(),
+            _kindEntry(EntityKind.crossing, Icons.drag_handle),
             _head('DOCKS'),
             _kindEntry(EntityKind.receivingDock, Icons.login),
             _kindEntry(EntityKind.shippingDock, Icons.logout),
@@ -386,7 +419,6 @@ class _Palette extends StatelessWidget {
             _head('FLOOR'),
             _kindEntry(EntityKind.aisle, Icons.view_stream_outlined),
             _kindEntry(EntityKind.staging, Icons.crop_square),
-            _kindEntry(EntityKind.crossing, Icons.drag_handle),
             _kindEntry(EntityKind.craneBay, Icons.view_week_outlined),
             _kindEntry(EntityKind.rack, Icons.shelves),
             _kindEntry(EntityKind.chargingBay, Icons.ev_station),
@@ -395,6 +427,8 @@ class _Palette extends StatelessWidget {
               child: Text(
                   'R rotate · Del delete · Esc select\n'
                   'Drag to lay belts, aisles, staging and crane bays.\n'
+                  'A belt across an aisle is laid as a crossing; a\n'
+                  'crossing laid on a belt replaces it.\n'
                   'Middle-drag or drag empty floor to pan; wheel zooms.',
                   style: AppTheme.dim),
             ),
@@ -580,6 +614,11 @@ class _Inspector extends StatelessWidget {
                 ' in ${recipe.seconds}s',
                 style: AppTheme.dim),
         ],
+        if (p.kind == EntityKind.arm) ...[
+          const SizedBox(height: 8),
+          const Text('Picks', style: AppTheme.body),
+          _ArmFilter(c: c, arm: p),
+        ],
         const SizedBox(height: 6),
         if (keys.isEmpty)
           const Text('Empty', style: AppTheme.dim)
@@ -588,6 +627,33 @@ class _Inspector extends StatelessWidget {
             Text('${FactoryItems.byId(k)?.label ?? k}: ${contents[k]}',
                 style: AppTheme.mono),
       ],
+    );
+  }
+}
+
+/// An arm's pick filter: which item it swings (null = any).
+class _ArmFilter extends StatelessWidget {
+  const _ArmFilter({required this.c, required this.arm});
+  final FactoryEditorController c;
+  final Placement arm;
+
+  @override
+  Widget build(BuildContext context) {
+    final ids = FactoryItems.table.keys.toList()..sort();
+    final cur = arm.item;
+    return DropdownButton<String?>(
+      key: const Key('inspect-arm-item'),
+      isExpanded: true,
+      dropdownColor: AppTheme.panelLight,
+      style: AppTheme.body,
+      value: cur != null && ids.contains(cur) ? cur : null,
+      items: [
+        const DropdownMenuItem<String?>(value: null, child: Text('Any item')),
+        for (final id in ids)
+          DropdownMenuItem<String?>(
+              value: id, child: Text(FactoryItems.byId(id)!.label)),
+      ],
+      onChanged: (v) => c.setArmFilter(arm.id, v),
     );
   }
 }
