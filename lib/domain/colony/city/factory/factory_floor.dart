@@ -28,7 +28,23 @@
 /// dock takes from the colony only when the tile in front of it has room,
 /// and a shipping dock keeps an item the colony refuses (the dock backs up,
 /// then the belt, then the line — real back-pressure). Partial grants are
-/// carried as part-paid units on the dock, never rounded away.
+/// carried as part-paid units on the dock, never rounded away. Nor is
+/// anything lost to an EDIT: what a removed or re-recipe'd placement held
+/// (a running craft's inputs included) is set down as a [FloorPile] beside
+/// it, a load whose target vanished or was walled off is re-routed to the
+/// nearest store with room or set down at the worker's feet, and a fired
+/// worker sets his load down first. [itemsOnFloor] and [craftNet] let a
+/// test prove it: held + shipped − received − craftNet is zero, always.
+///
+/// **Who feeds what.** Feeds are tracked per (machine, item), not per
+/// machine. An arm or belt counts as feeding an input only if what can
+/// actually reach it upstream includes that item: a receiving dock's item,
+/// a machine's outputs (through a filter if the arm has one), what a belt
+/// run carries (solved as a fixed point over docks, arms and belts), and
+/// "anything" for an unfiltered chest. Likewise an arm clears only the
+/// outputs its filter passes AND its drop tile accepts. So an assembler
+/// with one belt-fed input still asks walkers for the other, and a
+/// smelter whose only arm takes pig iron still offers its slag.
 ///
 /// **People.** Stations need their crew and handlers are workers. The
 /// colony's staffing share decides how many of the layout's jobs are filled
@@ -36,6 +52,7 @@
 /// and a station short of its full crew does not run.
 library;
 
+import 'dart:collection';
 import 'dart:typed_data';
 
 import 'factory_catalog.dart';
@@ -103,6 +120,16 @@ const double _eps = 1e-9;
 /// Save format version.
 const int _kFloorJsonVersion = 1;
 
+/// Flow-field key reserved for the idle spot (placement ids are positive;
+/// floor piles use [_pileId], below -1).
+const int _kIdleKey = -1;
+
+/// The pseudo-placement id of the floor pile on tile [t].
+int _pileId(TilePos t) => -2 - t.key;
+
+/// "Any item": what an unfiltered chest may hand an arm.
+const String _kAnyItem = '*';
+
 bool _isBelt(EntityKind k) => k == EntityKind.belt || k == EntityKind.crossing;
 
 /// Solid entities a handler may still stand on.
@@ -121,7 +148,7 @@ class FactoryFloor implements FactorySim {
     for (final p in f._bp.placements) {
       f._initState(p);
     }
-    final spot = f._idleSpot();
+    final spot = f._idleTile;
     for (final kind in HandlerKind.values) {
       if (!kSimulatedHandlerKinds.contains(kind)) continue;
       final n = f._bp.roster[kind] ?? 0;
@@ -162,6 +189,11 @@ class FactoryFloor implements FactorySim {
         (k, v) => f._recv[int.parse(k)] = ReceivingState.fromJson(v));
     m(j['sd']).forEach(
         (k, v) => f._ship[int.parse(k)] = ShippingState.fromJson(m(v)));
+    for (final e in (j['pl'] as List? ?? const [])) {
+      final pile = FloorPile.fromJson(e);
+      f._piles[_pileId(pile.at)] = pile;
+    }
+    m(j['cx']).forEach((k, v) => f._craftNet[k] = (v as num).toInt());
     return f;
   }
 
@@ -183,6 +215,12 @@ class FactoryFloor implements FactorySim {
   final Map<int, ItemBag> _stores = {};
   final Map<int, ReceivingState> _recv = {};
   final Map<int, ShippingState> _ship = {};
+
+  /// Goods set down on the floor, by [_pileId] (sorted: walked in order).
+  final SplayTreeMap<int, FloorPile> _piles = SplayTreeMap();
+
+  /// Items crafts made minus items they used up, by item id (sorted).
+  final SplayTreeMap<String, int> _craftNet = SplayTreeMap();
 
   /// In id order.
   final List<FloorHandler> _handlers = [];
@@ -206,20 +244,24 @@ class FactoryFloor implements FactorySim {
   List<Placement> _recvList = const [];
   List<Placement> _shipList = const [];
   List<Placement> _chestList = const [];
+  List<Placement> _stagingList = const [];
 
   /// Belts and crossings, downstream first (so an item handed on is not
   /// advanced twice in one sub-step).
   List<Placement> _beltOrder = const [];
 
-  /// Machine outputs not cleared by an arm, chests and staging: where a
-  /// handler may fetch from.
+  /// Machines, chests and staging: where a handler may fetch from (a
+  /// machine only the outputs no arm clears; see [_armCleared]).
   List<Placement> _providers = const [];
 
-  /// Machines an arm or belt feeds (they post no hand requests).
-  Set<int> _autoFed = const {};
+  /// (machine, input item) pairs an arm or belt feeds: no hand requests.
+  Set<(int, String)> _autoFed = const {};
 
-  /// Machines an arm empties (their outputs are not offered to handlers).
-  Set<int> _armCleared = const {};
+  /// (machine, output item) pairs an arm empties: not offered to handlers.
+  Set<(int, String)> _armCleared = const {};
+
+  /// Where idle handlers gather (and new hires start).
+  TilePos _idleTile = const TilePos(0, 0);
 
   /// Items some hand-fed machine consumes: a hand-cleared output of one of
   /// these waits to be fetched rather than being pushed to a dock.
@@ -274,6 +316,66 @@ class FactoryFloor implements FactorySim {
       }
     }
     return bag.toMap();
+  }
+
+  /// Every item on the floor, by id: buffers (a running craft's inputs
+  /// included), belts, arms, docks, stores, handlers' hands and piles.
+  Map<String, int> get itemsOnFloor {
+    final bag = ItemBag();
+    void addBag(ItemBag b) {
+      for (final k in b.keys) {
+        bag.add(k, b[k]);
+      }
+    }
+
+    for (final p in _machineList) {
+      final m = _machines[p.id];
+      if (m == null) continue;
+      addBag(m.inBuf);
+      addBag(m.outBuf);
+      final r = _recipeOf(p);
+      if (m.crafting && r != null) {
+        for (final q in r.inputs) {
+          bag.add(q.item, q.count);
+        }
+      }
+    }
+    for (final s in _stores.values) {
+      addBag(s);
+    }
+    for (final b in _belts.values) {
+      for (final i in b.items) {
+        bag.add(i.item, 1);
+      }
+    }
+    for (final a in _arms.values) {
+      final held = a.held;
+      if (held != null) bag.add(held, 1);
+    }
+    for (final s in _ship.values) {
+      for (final i in s.queue) {
+        bag.add(i, 1);
+      }
+    }
+    for (final h in _handlers) {
+      final c = h.carrying;
+      if (c != null) bag.add(c, h.carryingCount);
+    }
+    for (final p in _piles.values) {
+      addBag(p.items);
+    }
+    return bag.toMap();
+  }
+
+  /// Items crafts have made minus items they used up, since the floor was
+  /// built (a running craft's inputs are still [itemsOnFloor], not here).
+  Map<String, int> get craftNet => {..._craftNet};
+
+  /// Goods set down on the open floor, by tile (row-major order).
+  Map<TilePos, Map<String, int>> get floorPiles {
+    final ps = _piles.values.toList()
+      ..sort((a, b) => a.at.key.compareTo(b.at.key));
+    return {for (final p in ps) p.at: p.items.toMap()};
   }
 
   @override
@@ -361,6 +463,8 @@ class FactoryFloor implements FactorySim {
       if (_ship.isNotEmpty) 'sd': byId(_ship, (s) => s.toJson()),
       if (_handlers.isNotEmpty) 'h': [for (final h in _handlers) h.toJson()],
       if (_queue.isNotEmpty) 'q': [for (final r in _queue) r.toJson()],
+      if (_piles.isNotEmpty) 'pl': [for (final p in _piles.values) p.toJson()],
+      if (_craftNet.isNotEmpty) 'cx': {..._craftNet},
       'led': _ledger.toJson(),
     };
   }
@@ -738,6 +842,10 @@ class FactoryFloor implements FactorySim {
         }
         for (final q in r.outputs) {
           m.outBuf.add(q.item, q.count);
+          _craftNet[q.item] = (_craftNet[q.item] ?? 0) + q.count;
+        }
+        for (final q in r.inputs) {
+          _craftNet[q.item] = (_craftNet[q.item] ?? 0) - q.count;
         }
         m.crafting = false;
         // Carry the overshoot into the next craft, so a busy machine's rate
@@ -776,16 +884,93 @@ class FactoryFloor implements FactorySim {
 
   // ---- move requests -------------------------------------------------------
 
-  /// Doubled centre-to-centre Manhattan distance (integers, no halves).
-  static int _centreDist(Placement a, Placement b) {
-    final fa = a.footprint, fb = b.footprint;
-    return ((2 * fa.x0 + fa.w) - (2 * fb.x0 + fb.w)).abs() +
-        ((2 * fa.y0 + fa.h) - (2 * fb.y0 + fb.h)).abs();
+  /// A placement or (negative id) a floor pile still on the floor.
+  bool _exists(int id) =>
+      id < 0 ? _piles.containsKey(id) : _byId.containsKey(id);
+
+  /// Doubled centre of a placement or pile (integers, no halves).
+  (int, int) _centre2(int id) {
+    if (id < 0) {
+      final t = _piles[id]?.at ?? const TilePos(0, 0);
+      return (2 * t.x + 1, 2 * t.y + 1);
+    }
+    final f = _byId[id]!.footprint;
+    return (2 * f.x0 + f.w, 2 * f.y0 + f.h);
   }
 
-  /// Posts what hand-fed machines need and what hand-cleared outputs no
-  /// one on the floor consumes. "Already on its way" is re-derived from the
-  /// queue and the handlers' jobs every time, so nothing is posted twice.
+  /// Doubled centre-to-centre Manhattan distance.
+  int _centreDist(int a, int b) {
+    final (ax, ay) = _centre2(a);
+    final (bx, by) = _centre2(b);
+    return (ax - bx).abs() + (ay - by).abs();
+  }
+
+  /// How many [item] placement or pile [id] can hand to a handler.
+  int _storedAt(int id, String item) {
+    if (id < 0) return _piles[id]?.items[item] ?? 0;
+    final p = _byId[id];
+    return p == null ? 0 : _stored(p, item);
+  }
+
+  /// Removes up to [n] of [item] from placement or pile [id].
+  int _takeFromId(int id, String item, int n) {
+    if (id >= 0) {
+      final p = _byId[id];
+      return p == null ? 0 : _takeFrom(p, item, n);
+    }
+    final pile = _piles[id];
+    if (pile == null) return 0;
+    final have = pile.items[item];
+    final k = have < n ? have : n;
+    if (k <= 0) return 0;
+    pile.items.add(item, -k);
+    if (pile.items.isEmpty) _piles.remove(id);
+    return k;
+  }
+
+  /// Items already promised to each placement by the queue and by handlers
+  /// on their way ([skip] excluded), all items together.
+  Map<int, int> _inboundTotals({FloorHandler? skip}) {
+    final out = <int, int>{};
+    for (final r in _queue) {
+      out[r.to] = (out[r.to] ?? 0) + r.count;
+    }
+    for (final h in _handlers) {
+      final j = h.job;
+      if (j == null || identical(h, skip)) continue;
+      if (h.state == HandlerState.toPickup) {
+        out[j.to] = (out[j.to] ?? 0) + j.count;
+      } else if (h.state == HandlerState.carrying) {
+        out[j.to] = (out[j.to] ?? 0) + h.carryingCount;
+      }
+    }
+    return out;
+  }
+
+  /// Room for [item] at a store or shipping dock [p] (0 when its filter
+  /// refuses it, or [p] stores nothing).
+  int _roomFor(Placement p, String item, Map<int, int> inbound) {
+    final filter = p.item;
+    if (filter != null && filter != item) return 0;
+    final int cap, held;
+    switch (p.kind) {
+      case EntityKind.shippingDock:
+        cap = kShippingBufferItems;
+        held = _ship[p.id]!.queue.length;
+      case EntityKind.chest:
+      case EntityKind.staging:
+        cap = _storeCap(p);
+        held = _stores[p.id]!.total;
+      default:
+        return 0;
+    }
+    return cap - held - (inbound[p.id] ?? 0);
+  }
+
+  /// Posts what hand-fed inputs need and what hand-cleared outputs (and
+  /// piles) no one on the floor consumes. "Already on its way" is
+  /// re-derived from the queue and the handlers' jobs every time, so
+  /// nothing is posted twice.
   void _postRequests() {
     final inbound = <int, ItemBag>{};
     final outbound = <int, ItemBag>{};
@@ -812,86 +997,102 @@ class FactoryFloor implements FactorySim {
         addIn(j.to, j.item, h.carryingCount);
       }
     }
-    int avail(Placement p, String item) =>
-        _stored(p, item) - (outbound[p.id]?[item] ?? 0);
+    int avail(int id, String item) =>
+        _storedAt(id, item) - (outbound[id]?[item] ?? 0);
 
-    void post(String item, int n, Placement from, Placement to) {
-      _queue.add(MoveRequest(item: item, count: n, from: from.id, to: to.id));
-      addIn(to.id, item, n);
-      addOut(from.id, item, n);
+    void post(String item, int n, int from, int to) {
+      _queue.add(MoveRequest(item: item, count: n, from: from, to: to));
+      addIn(to, item, n);
+      addOut(from, item, n);
     }
 
-    // Pull: hand-fed machines fetch their inputs from the nearest provider.
+    final providers = [for (final p in _providers) p.id, ..._piles.keys];
+
+    // Pull: hand-fed inputs fetch from the nearest provider.
     for (final m in _machineList) {
-      if (_autoFed.contains(m.id)) continue;
       final r = _recipeOf(m);
       if (r == null) continue;
       final ms = _machines[m.id]!;
       for (final q in r.inputs) {
+        if (_autoFed.contains((m.id, q.item))) continue;
         var want = kMachineBufferCrafts * q.count -
             ms.inBuf[q.item] -
             (inbound[m.id]?[q.item] ?? 0);
         while (want > 0) {
-          Placement? best;
-          var bestD = 0, bestA = 0;
-          for (final p in _providers) {
-            if (p.id == m.id) continue;
-            final a = avail(p, q.item);
+          var best = 0, bestD = 0, bestA = 0;
+          for (final id in providers) {
+            if (id == m.id || _armCleared.contains((id, q.item))) continue;
+            final a = avail(id, q.item);
             if (a <= 0) continue;
-            final d = _centreDist(p, m);
-            if (best == null || d < bestD) {
-              best = p;
+            final d = _centreDist(id, m.id);
+            if (bestA == 0 || d < bestD) {
+              best = id;
               bestD = d;
               bestA = a;
             }
           }
-          if (best == null) break;
+          if (bestA == 0) break;
           final n = want < bestA ? want : bestA;
-          post(q.item, n, best, m);
+          post(q.item, n, best, m.id);
           want -= n;
         }
       }
     }
 
-    // Push: a hand-cleared output nothing here consumes goes to the nearest
-    // shipping dock (or chest) with room.
+    // Push: a hand-cleared output (or a pile) nothing here consumes goes to
+    // the nearest shipping dock, else chest (piles: else staging) with room.
+    void push(int src, String item, {required bool toStaging}) {
+      var a = avail(src, item);
+      while (a > 0) {
+        Placement? best;
+        var bestD = 0, bestRoom = 0;
+        void consider(Placement p) {
+          final room = _roomFor(p, item, inboundTotal);
+          if (room <= 0) return;
+          final d = _centreDist(p.id, src);
+          if (best == null || d < bestD) {
+            best = p;
+            bestD = d;
+            bestRoom = room;
+          }
+        }
+
+        for (final p in _shipList) {
+          consider(p);
+        }
+        if (best == null) {
+          for (final p in _chestList) {
+            consider(p);
+          }
+        }
+        if (best == null && toStaging) {
+          for (final p in _stagingList) {
+            consider(p);
+          }
+        }
+        final to = best;
+        if (to == null) break;
+        final n = a < bestRoom ? a : bestRoom;
+        post(item, n, src, to.id);
+        a -= n;
+      }
+    }
+
     for (final src in _machineList) {
-      if (_armCleared.contains(src.id)) continue;
       final r = _recipeOf(src);
       if (r == null) continue;
       for (final q in r.outputs) {
+        if (_armCleared.contains((src.id, q.item))) continue;
         if (_handFedConsumes.contains(q.item)) continue;
-        var a = avail(src, q.item);
-        while (a > 0) {
-          Placement? best;
-          var bestD = 0, bestRoom = 0;
-          void consider(Placement p, int cap, int held) {
-            final filter = p.item;
-            if (filter != null && filter != q.item) return;
-            final room = cap - held - (inboundTotal[p.id] ?? 0);
-            if (room <= 0) return;
-            final d = _centreDist(p, src);
-            if (best == null || d < bestD) {
-              best = p;
-              bestD = d;
-              bestRoom = room;
-            }
-          }
-
-          for (final p in _shipList) {
-            consider(p, kShippingBufferItems, _ship[p.id]!.queue.length);
-          }
-          if (best == null) {
-            for (final p in _chestList) {
-              consider(p, kChestCapacity, _stores[p.id]!.total);
-            }
-          }
-          final to = best;
-          if (to == null) break;
-          final n = a < bestRoom ? a : bestRoom;
-          post(q.item, n, src, to);
-          a -= n;
-        }
+        push(src.id, q.item, toStaging: false);
+      }
+    }
+    for (final id in [..._piles.keys]) {
+      final pile = _piles[id];
+      if (pile == null) continue;
+      for (final item in pile.items.keys) {
+        if (_handFedConsumes.contains(item)) continue;
+        push(id, item, toStaging: true);
       }
     }
   }
@@ -921,22 +1122,32 @@ class FactoryFloor implements FactorySim {
         return out;
       }();
 
-  Int32List? _fieldTo(int placementId) {
-    final p = _byId[placementId];
-    if (p == null) return null;
-    return _paths.fieldTo(placementId, _goalsOf(p));
+  /// Where a handler stands to work at [id]: a placement's [_goalsOf], a
+  /// pile's own tile, or the idle spot for [_kIdleKey].
+  List<TilePos> _goalsFor(int id) {
+    if (id == _kIdleKey) return [_idleTile];
+    if (id < 0) {
+      final pile = _piles[id];
+      return pile == null ? const [] : [pile.at];
+    }
+    final p = _byId[id];
+    return p == null ? const [] : _goalsOf(p);
   }
 
-  int _distTo(FloorHandler h, int placementId) {
-    final f = _fieldTo(placementId);
+  Uint16List? _fieldTo(int id) {
+    if (id != _kIdleKey && !_exists(id)) return null;
+    return _paths.fieldTo(id, _goalsFor(id));
+  }
+
+  int _distTo(FloorHandler h, int id) {
+    final f = _fieldTo(id);
     return f == null ? kUnreachable : _paths.distance(f, h.at);
   }
 
   bool _routable(int from, int to) {
-    final src = _byId[from];
     final f = _fieldTo(to);
-    if (src == null || f == null) return false;
-    for (final g in _goalsOf(src)) {
+    if (f == null || !_exists(from)) return false;
+    for (final g in _goalsFor(from)) {
       if (_paths.distance(f, g) >= 0) return true;
     }
     return false;
@@ -944,15 +1155,20 @@ class FactoryFloor implements FactorySim {
 
   void _moveHandlers(double dt) {
     for (final h in _handlers) {
-      if (!h.active) continue;
+      if (!h.active) {
+        // An unstaffed hand stops where it is — on a tile, not between two.
+        if (h.state == HandlerState.idle) h.settle();
+        continue;
+      }
       final job = h.job;
       if (job == null) {
         if (h.state != HandlerState.idle) h.goIdle();
+        // Home to the idle spot (a half-taken step is finished on the way).
+        _walk(h, _kIdleKey, dt);
         continue;
       }
       if (h.state == HandlerState.toPickup) {
-        final src = _byId[job.from];
-        if (src == null) {
+        if (!_exists(job.from)) {
           h.goIdle();
           continue;
         }
@@ -965,7 +1181,8 @@ class FactoryFloor implements FactorySim {
         h.timer += dt;
         if (h.timer + _eps < kHandPickS) continue;
         final cap = h.spec.capacity;
-        final n = _takeFrom(src, job.item, job.count < cap ? job.count : cap);
+        final n =
+            _takeFromId(job.from, job.item, job.count < cap ? job.count : cap);
         if (n == 0) {
           h.goIdle(); // someone else got there first
           continue;
@@ -978,11 +1195,20 @@ class FactoryFloor implements FactorySim {
       } else if (h.state == HandlerState.carrying) {
         final dst = _byId[job.to];
         final item = h.carrying;
-        if (dst == null || item == null) {
-          h.goIdle(); // its target was removed: the load goes with it
+        if (item == null || h.carryingCount <= 0) {
+          h.goIdle();
           continue;
         }
-        if (_walk(h, job.to, dt) != 1) continue;
+        if (dst == null) {
+          _redirect(h); // its target was removed: take the load elsewhere
+          continue;
+        }
+        final w = _walk(h, job.to, dt);
+        if (w < 0) {
+          _redirect(h); // walled off: elsewhere, or set it down here
+          continue;
+        }
+        if (w == 0) continue;
         h.timer += dt;
         if (h.timer + _eps < kHandDropS) continue;
         while (h.carryingCount > 0 && _depositInto(dst, item)) {
@@ -993,11 +1219,85 @@ class FactoryFloor implements FactorySim {
     }
   }
 
+  /// Sends a loaded handler whose target is gone or out of reach to the
+  /// nearest REACHABLE shipping dock, chest or staging area with room for
+  /// its whole load (path distance, ties by id); with none, it sets the load
+  /// down at its feet as a floor pile, which then posts its own requests.
+  /// Never destroys the load.
+  void _redirect(FloorHandler h) {
+    final item = h.carrying;
+    final n = h.carryingCount;
+    if (item == null || n <= 0) {
+      h.goIdle();
+      return;
+    }
+    final inbound = _inboundTotals(skip: h);
+    Placement? best;
+    var bestD = 0;
+    for (final p in [..._shipList, ..._chestList, ..._stagingList]
+      ..sort((a, b) => a.id.compareTo(b.id))) {
+      if (_roomFor(p, item, inbound) < n) continue;
+      final d = _distTo(h, p.id);
+      if (d < 0) continue;
+      if (best == null || d < bestD) {
+        best = p;
+        bestD = d;
+      }
+    }
+    final to = best;
+    if (to != null) {
+      final from = h.job?.from ?? to.id;
+      h
+        ..job = MoveRequest(item: item, count: n, from: from, to: to.id)
+        ..state = HandlerState.carrying
+        ..timer = 0;
+      return;
+    }
+    h.settle();
+    _addPile(h.at, item, n);
+    h.goIdle();
+  }
+
+  /// Sets [n] of [item] down on tile [t] (merging with a pile there).
+  void _addPile(TilePos t, String item, int n) {
+    if (n <= 0) return;
+    (_piles[_pileId(t)] ??= FloorPile(t)).items.add(item, n);
+  }
+
+  /// Sets everything in [bag] down as one pile on the walkable tile nearest
+  /// [near] (or on [near] itself in a hall with no floor left).
+  void _spill(TilePos near, ItemBag bag) {
+    if (bag.isEmpty) return;
+    final t = _nearestWalkable(near) ?? near;
+    for (final k in bag.keys) {
+      _addPile(t, k, bag[k]);
+    }
+  }
+
+  /// The walkable tile nearest [c] in square rings, row-major within a ring.
+  TilePos? _nearestWalkable(TilePos c) {
+    final hall = _bp.hall;
+    final maxR = hall.w > hall.h ? hall.w : hall.h;
+    for (var r = 0; r <= maxR; r++) {
+      for (var y = c.y - r; y <= c.y + r; y++) {
+        for (var x = c.x - r; x <= c.x + r; x++) {
+          if ((x - c.x).abs() != r && (y - c.y).abs() != r) continue;
+          final t = TilePos(x, y);
+          if (_paths.isWalkable(t)) return t;
+        }
+      }
+    }
+    return null;
+  }
+
   /// Moves [h] toward [target] for [dt]: 1 = standing at it, 0 = on the
   /// way, -1 = no way there.
   int _walk(FloorHandler h, int target, double dt) {
     final field = _fieldTo(target);
-    if (field == null) return -1;
+    if (field == null) {
+      h.settle();
+      return -1;
+    }
     var budget = h.spec.speedMps / kFactoryTileM * dt;
     var moved = 0.0;
     var result = 0;
@@ -1041,7 +1341,7 @@ class FactoryFloor implements FactorySim {
     return result;
   }
 
-  /// Where idle handlers start: the first staging area's first walkable
+  /// Where idle handlers gather: the first staging area's first walkable
   /// tile, else the first tile (from the hall origin) of the largest open
   /// region of floor.
   TilePos _idleSpot() {
@@ -1076,6 +1376,60 @@ class FactoryFloor implements FactorySim {
     }
   }
 
+  /// Empties [p]'s runtime state and returns every item it held: buffers
+  /// (a running craft's inputs handed back — the craft never finished),
+  /// belt items, an arm's swing, a store, a shipping queue. Units a dock
+  /// already took from or gave to the colony for a part-paid item stay
+  /// booked in the ledger.
+  ItemBag _evict(Placement p) {
+    final bag = ItemBag();
+    void addBag(ItemBag b) {
+      for (final k in b.keys) {
+        bag.add(k, b[k]);
+      }
+    }
+
+    final m = _machines[p.id];
+    if (m != null) {
+      addBag(m.inBuf);
+      addBag(m.outBuf);
+      final r = _recipeOf(p);
+      if (m.crafting && r != null) {
+        for (final q in r.inputs) {
+          bag.add(q.item, q.count);
+        }
+      }
+      _machines[p.id] = MachineState();
+    }
+    final b = _belts[p.id];
+    if (b != null) {
+      for (final i in b.items) {
+        bag.add(i.item, 1);
+      }
+      b.items.clear();
+    }
+    final a = _arms[p.id];
+    final held = a?.held;
+    if (a != null && held != null) {
+      bag.add(held, 1);
+      a.held = null;
+    }
+    final st = _stores[p.id];
+    if (st != null) {
+      addBag(st);
+      _stores[p.id] = ItemBag();
+    }
+    final sd = _ship[p.id];
+    if (sd != null) {
+      for (final i in sd.queue) {
+        bag.add(i, 1);
+      }
+      sd.queue.clear();
+      sd.paid = 0;
+    }
+    return bag;
+  }
+
   void _dropState(int id) {
     _machines.remove(id);
     _belts.remove(id);
@@ -1085,8 +1439,59 @@ class FactoryFloor implements FactorySim {
     _ship.remove(id);
   }
 
+  /// What can arrive at an arm's or belt's pick side from [src]: a
+  /// machine's outputs, a belt run's cargo ([carries]), a chest's filter or
+  /// anything ([_kAnyItem]).
+  Set<String> _deliverable(Placement? src, Map<int, Set<String>> carries) {
+    if (src == null) return const {};
+    switch (src.kind) {
+      case EntityKind.machine:
+        return {
+          for (final q in _recipeOf(src)?.outputs ?? const <ItemQty>[]) q.item,
+        };
+      case EntityKind.belt:
+      case EntityKind.crossing:
+        return carries[src.id] ?? const {};
+      case EntityKind.chest:
+      case EntityKind.staging:
+        final f = src.item;
+        return f == null ? const {_kAnyItem} : {f};
+      default:
+        return const {};
+    }
+  }
+
+  /// What arm [a] can set down, given what reaches its pick tile.
+  Set<String> _armDelivers(Placement a, Map<int, Set<String>> carries) {
+    final up = _deliverable(_at(_behindOf(a)), carries);
+    final f = a.item;
+    if (f == null) return up;
+    return up.contains(f) || up.contains(_kAnyItem) ? {f} : const {};
+  }
+
+  /// Whether the tile in front of an arm could ever take [item].
+  bool _accepts(Placement? to, String item) {
+    if (to == null) return false;
+    switch (to.kind) {
+      case EntityKind.belt:
+      case EntityKind.crossing:
+        return true;
+      case EntityKind.machine:
+        final r = _recipeOf(to);
+        return r != null && _qtyOf(r.inputs, item) != null;
+      case EntityKind.chest:
+      case EntityKind.staging:
+      case EntityKind.shippingDock:
+        final f = to.item;
+        return f == null || f == item;
+      default:
+        return false;
+    }
+  }
+
   /// Re-derives every cache from the layout. Cheap (one pass over the
-  /// placements and the hall), and only run on load and on edits.
+  /// placements and the hall, plus a small fixed point over the belts), and
+  /// only run on load and on edits.
   void _rebuild() {
     final hall = _bp.hall;
     final sorted = [..._bp.placements]..sort((a, b) => a.id.compareTo(b.id));
@@ -1110,6 +1515,7 @@ class FactoryFloor implements FactorySim {
       }
     }
     _paths = FloorPathing(hall, walk);
+    _idleTile = _idleSpot();
 
     List<Placement> ofKind(bool Function(EntityKind) k) =>
         [for (final p in sorted) if (k(p.kind)) p];
@@ -1118,30 +1524,70 @@ class FactoryFloor implements FactorySim {
     _recvList = ofKind((k) => k == EntityKind.receivingDock);
     _shipList = ofKind((k) => k == EntityKind.shippingDock);
     _chestList = ofKind((k) => k == EntityKind.chest);
+    _stagingList = ofKind((k) => k == EntityKind.staging);
     final belts = ofKind(_isBelt);
 
-    final autoFed = <int>{}, armCleared = <int>{};
+    // What each belt run can carry: docks, arms and upstream belts feed it.
+    // Sets only grow over a finite universe, so the loop ends.
+    final carries = {for (final b in belts) b.id: <String>{}};
+    var changed = true;
+    while (changed) {
+      changed = false;
+      void feed(TilePos t, Set<String> items) {
+        final p = _at(t);
+        if (p == null || !_isBelt(p.kind) || items.isEmpty) return;
+        final c = carries[p.id]!;
+        final before = c.length;
+        c.addAll(items);
+        if (c.length != before) changed = true;
+      }
+
+      for (final d in _recvList) {
+        final it = d.item;
+        if (it != null) feed(_frontOf(d), {it});
+      }
+      for (final a in _armList) {
+        feed(_frontOf(a), _armDelivers(a, carries));
+      }
+      for (final b in belts) {
+        feed(_frontOf(b), {...carries[b.id]!});
+      }
+    }
+
+    final autoFed = <(int, String)>{}, armCleared = <(int, String)>{};
+    void feeds(Placement? to, Set<String> items) {
+      if (to == null || to.kind != EntityKind.machine) return;
+      for (final q in _recipeOf(to)?.inputs ?? const <ItemQty>[]) {
+        if (items.contains(q.item) || items.contains(_kAnyItem)) {
+          autoFed.add((to.id, q.item));
+        }
+      }
+    }
+
     for (final a in _armList) {
       final from = _at(_behindOf(a)), to = _at(_frontOf(a));
       if (from != null && from.kind == EntityKind.machine) {
-        armCleared.add(from.id);
+        final filter = a.item;
+        for (final q in _recipeOf(from)?.outputs ?? const <ItemQty>[]) {
+          if (filter != null && filter != q.item) continue;
+          if (_accepts(to, q.item)) armCleared.add((from.id, q.item));
+        }
       }
-      if (to != null && to.kind == EntityKind.machine) autoFed.add(to.id);
+      feeds(to, _armDelivers(a, carries));
     }
     for (final b in belts) {
-      final to = _at(_frontOf(b));
-      if (to != null && to.kind == EntityKind.machine) autoFed.add(to.id);
+      feeds(_at(_frontOf(b)), carries[b.id]!);
     }
     _autoFed = autoFed;
     _armCleared = armCleared;
     _handFedConsumes = {
       for (final m in _machineList)
-        if (!autoFed.contains(m.id))
-          for (final q in _recipeOf(m)?.inputs ?? const <ItemQty>[]) q.item,
+        for (final q in _recipeOf(m)?.inputs ?? const <ItemQty>[])
+          if (!autoFed.contains((m.id, q.item))) q.item,
     };
     _providers = [
       for (final p in sorted)
-        if ((p.kind == EntityKind.machine && !armCleared.contains(p.id)) ||
+        if (p.kind == EntityKind.machine ||
             p.kind == EntityKind.chest ||
             p.kind == EntityKind.staging)
           p,
@@ -1167,7 +1613,6 @@ class FactoryFloor implements FactorySim {
       });
 
     // Handlers left standing where something now stands step off.
-    final spot = _idleSpot();
     for (final h in _handlers) {
       final nx = h.next;
       if (nx != null && !_paths.isWalkable(nx)) {
@@ -1177,10 +1622,21 @@ class FactoryFloor implements FactorySim {
       }
       if (!_paths.isWalkable(h.at)) {
         h
-          ..at = spot
+          ..at = _idleTile
           ..next = null
           ..prog = 0;
       }
+    }
+
+    // A pile something now stands on slides to the nearest open tile.
+    for (final id in [..._piles.keys]) {
+      final pile = _piles[id]!;
+      if (_paths.isWalkable(pile.at)) continue;
+      final t = _nearestWalkable(pile.at);
+      if (t == null) continue;
+      _piles.remove(id);
+      _spill(t, pile.items);
+      _cancelJobsFor(id);
     }
   }
 
@@ -1189,12 +1645,20 @@ class FactoryFloor implements FactorySim {
     _rebuild();
   }
 
-  /// Cancels every queued request and trip that touches [id].
+  /// Cancels every queued request and every empty-handed trip that touches
+  /// [id], and re-routes loads already on their way TO it. A load picked up
+  /// from [id] is in a hand, not at [id]: it keeps going. Call after the
+  /// layout caches are rebuilt (re-routing walks the new floor).
   void _cancelJobsFor(int id) {
     _queue.removeWhere((r) => r.from == id || r.to == id);
     for (final h in _handlers) {
       final j = h.job;
-      if (j != null && (j.from == id || j.to == id)) h.goIdle();
+      if (j == null) continue;
+      if (h.state == HandlerState.toPickup && (j.from == id || j.to == id)) {
+        h.goIdle();
+      } else if (h.state == HandlerState.carrying && j.to == id) {
+        _redirect(h);
+      }
     }
   }
 
@@ -1245,13 +1709,17 @@ class FactoryFloor implements FactorySim {
 
   @override
   EditResult remove(int placementId) {
-    if (_byId[placementId] == null) {
+    final p = _byId[placementId];
+    if (p == null) {
       return const EditResult.refused(EditRefusal.noSuchPlacement);
     }
+    // What it held is set down where it stood, never lost.
+    final held = _evict(p);
     _bp.placements.removeWhere((q) => q.id == placementId);
     _dropState(placementId);
-    _cancelJobsFor(placementId);
     _layoutChanged();
+    _spill(p.pos, held);
+    _cancelJobsFor(placementId);
     return EditResult.ok(placementId);
   }
 
@@ -1280,12 +1748,15 @@ class FactoryFloor implements FactorySim {
     final q = p.copyWith(recipe: recipeId);
     final bad = _check(q, ignoreId: p.id);
     if (bad != null) return bad;
+    // A new recipe empties the station: its buffers (and a running craft's
+    // inputs) were the old chain's goods and are set down beside it, and
+    // loads en route for the old inputs go elsewhere.
+    final held = _evict(p);
     _replace(q);
-    // A new recipe empties the station: its buffers held the old chain's
-    // goods, and anything en route was for the old inputs.
     _machines[p.id] = MachineState();
-    _cancelJobsFor(p.id);
     _layoutChanged();
+    _spill(p.pos, held);
+    _cancelJobsFor(p.id);
     return EditResult.ok(p.id);
   }
 
@@ -1312,17 +1783,27 @@ class FactoryFloor implements FactorySim {
     }
     if (delta == 0) return const EditResult.ok(null);
     if (delta > 0) {
-      final spot = _idleSpot();
       for (var i = 0; i < delta; i++) {
-        _handlers.add(FloorHandler(id: _nextHandlerId++, kind: kind, at: spot));
+        _handlers.add(
+            FloorHandler(id: _nextHandlerId++, kind: kind, at: _idleTile));
       }
     } else {
-      // Let go of the newest first.
+      // Let go of the newest empty-handed first; a loaded one, only when
+      // there is no one else, sets the load down where he stands first.
       var drop = -delta;
-      for (var i = _handlers.length - 1; i >= 0 && drop > 0; i--) {
-        if (_handlers[i].kind != kind) continue;
-        _handlers.removeAt(i);
-        drop--;
+      for (final emptyOnly in const [true, false]) {
+        for (var i = _handlers.length - 1; i >= 0 && drop > 0; i--) {
+          final h = _handlers[i];
+          if (h.kind != kind) continue;
+          final c = h.carrying;
+          if (emptyOnly && c != null && h.carryingCount > 0) continue;
+          if (c != null && h.carryingCount > 0) {
+            h.settle();
+            _addPile(h.at, c, h.carryingCount);
+          }
+          _handlers.removeAt(i);
+          drop--;
+        }
       }
     }
     if (have + delta == 0) {

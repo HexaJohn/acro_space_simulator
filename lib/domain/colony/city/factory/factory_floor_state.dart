@@ -16,6 +16,7 @@
 /// stopped — and two floors that ran identically print identical JSON.
 library;
 
+import 'factory_grid.dart';
 import 'factory_sim_api.dart';
 
 /// Item counts with a stable JSON form (sorted keys) and no zero entries.
@@ -158,5 +159,29 @@ class ShippingState {
       s.queue.add(i as String);
     }
     return s;
+  }
+}
+
+/// Goods set down on the open floor: a load whose trip had nowhere left to
+/// go, or what a removed or re-recipe'd placement held. A pile never
+/// destroys anything; it posts move requests like a chest until it is
+/// cleared, and it does not block walking.
+class FloorPile {
+  FloorPile(this.at);
+
+  final TilePos at;
+  final ItemBag items = ItemBag();
+
+  List<Object?> toJson() => [at.x, at.y, items.toJson()];
+
+  static FloorPile fromJson(Object? j) {
+    final l = j as List;
+    final p = FloorPile(
+        TilePos((l[0] as num).toInt(), (l[1] as num).toInt()));
+    final bag = ItemBag.fromJson(l[2]);
+    for (final k in bag.keys) {
+      p.items.add(k, bag[k]);
+    }
+    return p;
   }
 }

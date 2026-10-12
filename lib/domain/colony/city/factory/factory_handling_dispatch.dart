@@ -88,13 +88,26 @@ class FloorHandler {
 
   bool get isFree => active && state == HandlerState.idle;
 
-  /// Drops the trip and stands where it is.
+  /// Drops the trip (and whatever it holds: the floor sets a load down
+  /// before calling this) and settles onto a whole tile.
   void goIdle() {
+    settle();
     state = HandlerState.idle;
     job = null;
     carrying = null;
     carryingCount = 0;
     timer = 0;
+  }
+
+  /// Finishes or abandons a half-taken step so the handler stands on one
+  /// tile: past halfway it arrives, before it turns back. A handler that is
+  /// not walking is never drawn parked between two tiles.
+  void settle() {
+    final n = next;
+    if (n == null) return;
+    if (prog >= 0.5) at = n;
+    next = null;
+    prog = 0;
   }
 
   HandlerView get view {
@@ -151,6 +164,10 @@ class Dispatcher {
   /// can't get there), ties by id ([handlers] must be in id order). A
   /// request whose [routable] says the goods could not then reach the
   /// target is left queued. Unknown items are never assigned.
+  ///
+  /// [routable] can cost a flow field, so it is asked only once some free
+  /// handler could lift the load at all: a queue of pallets with only
+  /// walkers on the floor builds no fields.
   static void assign(
     List<MoveRequest> queue,
     List<FloorHandler> handlers, {
@@ -163,7 +180,16 @@ class Dispatcher {
       final def = FactoryItems.byId(req.item);
       FloorHandler? best;
       var bestD = 0;
-      if (def != null && routable(req.from, req.to)) {
+      var canLift = false;
+      if (def != null) {
+        for (final h in handlers) {
+          if (h.isFree && h.spec.canLift(def.loadClass)) {
+            canLift = true;
+            break;
+          }
+        }
+      }
+      if (def != null && canLift && routable(req.from, req.to)) {
         for (final h in handlers) {
           if (!h.isFree || !h.spec.canLift(def.loadClass)) continue;
           final d = distTo(h, req.from);

@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_item.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/floor_blueprint.dart';
 
@@ -98,3 +99,29 @@ class CappedGivePort implements FactoryColonyPort {
   @override
   double get staffingShare => 1;
 }
+
+/// Commodity units the floor can't account for, by commodity (empty when it
+/// conserves): items held anywhere on it − what crafts made + shipped −
+/// received. Every edit and every sub-step must keep this empty.
+Map<String, double> conservationError(FactoryFloor f) {
+  final net = <String, double>{};
+  void add(String item, double n) {
+    final def = FactoryItems.byId(item)!;
+    net[def.commodity] = (net[def.commodity] ?? 0) + n * def.commodityUnits;
+  }
+
+  f.itemsOnFloor.forEach((k, v) => add(k, v.toDouble()));
+  f.craftNet.forEach((k, v) => add(k, -v.toDouble()));
+  f.ledger.shipped.forEach((c, u) => net[c] = (net[c] ?? 0) + u);
+  f.ledger.received.forEach((c, u) => net[c] = (net[c] ?? 0) - u);
+  net.removeWhere((_, v) => v.abs() < 1e-6);
+  return net;
+}
+
+/// Each handler's saved job as [item, count, from, to], by handler id
+/// (only handlers that have one), with its state name.
+Map<int, (String, List<Object?>)> handlerJobs(FactoryFloor f) => {
+      for (final h in (f.toJson()['h'] as List? ?? const []))
+        if ((h as Map)['job'] != null)
+          (h['id'] as num).toInt(): (h['s'] as String, h['job'] as List),
+    };

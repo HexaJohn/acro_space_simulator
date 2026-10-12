@@ -20,25 +20,51 @@
 /// Deterministic: neighbours are always tried in [Dir4] order (east, north,
 /// west, south), goals are seeded row-major, and the BFS queue is a plain
 /// array — nothing depends on hash order.
+///
+/// **Memory.** A field is one [Uint16List] (2 bytes a tile: 15 KB for a
+/// 100 × 75 hall), and the cache keeps at most [kMaxCachedFields] of them,
+/// least recently used out first. Eviction never changes a result — a field
+/// is a pure function of the layout and its goals, so a rebuilt one is
+/// identical — only how often a BFS runs. The LRU order itself is driven
+/// by the deterministic sim, so even the BFS count is reproducible.
 library;
+
+import 'dart:collection';
 
 import 'dart:typed_data';
 
 import 'factory_grid.dart';
 
-/// Distance stored for a tile the target can't be reached from.
+/// Distance [FloorPathing.distance] reports for a tile the target can't be
+/// reached from.
 const int kUnreachable = -1;
 
+/// The [Uint16List] cell value for "unreachable". A path this long or
+/// longer (65,535 tiles: far beyond any hall's aisle network) is treated as
+/// unreachable rather than wrapping.
+const int _kFar = 0xFFFF;
+
+/// Flow fields one floor keeps at once (about 1 MB for a 100 × 75 hall).
+/// A floor's busy targets are its stations, docks and the idle spot — a
+/// few dozen at most — so a template never evicts in steady state.
+const int kMaxCachedFields = 64;
+
 class FloorPathing {
-  FloorPathing(this.hall, this.walkable)
-      : assert(walkable.length == hall.w * hall.h);
+  FloorPathing(this.hall, this.walkable, {this.maxFields = kMaxCachedFields})
+      : assert(walkable.length == hall.w * hall.h),
+        assert(maxFields > 0);
 
   final HallSize hall;
 
   /// 1 = walkable, row-major `y * w + x`.
   final Uint8List walkable;
 
-  final Map<int, Int32List> _fields = {};
+  /// Cache bound (see [kMaxCachedFields]).
+  final int maxFields;
+
+  /// Insertion order = recency: a hit is moved to the end, eviction takes
+  /// the first key.
+  final LinkedHashMap<int, Uint16List> _fields = LinkedHashMap();
 
   int _index(TilePos t) => t.y * hall.w + t.x;
 
@@ -48,21 +74,35 @@ class FloorPathing {
   /// Number of flow fields built so far (the cache's size), for tests.
   int get cachedFields => _fields.length;
 
-  /// The flow field to [targetId]'s [goals] (walkable tiles, row-major).
-  /// Cached by [targetId]: the caller makes a fresh [FloorPathing] whenever
-  /// the layout changes, which is the whole invalidation story.
-  Int32List fieldTo(int targetId, List<TilePos> goals) =>
-      _fields[targetId] ??= _bfs(goals);
+  /// Whether [targetId]'s field is cached now (tests).
+  bool isCached(int targetId) => _fields.containsKey(targetId);
 
-  Int32List _bfs(List<TilePos> goals) {
+  /// The flow field to [targetId]'s [goals] (walkable tiles, row-major).
+  /// Cached by [targetId] (any int: the floor reserves negative keys for
+  /// floor piles and the idle spot); the caller makes a fresh [FloorPathing]
+  /// whenever the layout changes, which is the whole invalidation story, and
+  /// must always pass the same goals for one key within one layout.
+  Uint16List fieldTo(int targetId, List<TilePos> goals) {
+    final hit = _fields.remove(targetId);
+    if (hit != null) {
+      _fields[targetId] = hit;
+      return hit;
+    }
+    while (_fields.length >= maxFields) {
+      _fields.remove(_fields.keys.first);
+    }
+    return _fields[targetId] = _bfs(goals);
+  }
+
+  Uint16List _bfs(List<TilePos> goals) {
     final w = hall.w, h = hall.h;
-    final dist = Int32List(w * h)..fillRange(0, w * h, kUnreachable);
+    final dist = Uint16List(w * h)..fillRange(0, w * h, _kFar);
     final queue = Int32List(w * h);
     var head = 0, tail = 0;
     for (final g in goals) {
       if (!isWalkable(g)) continue;
       final i = _index(g);
-      if (dist[i] != kUnreachable) continue;
+      if (dist[i] != _kFar) continue;
       dist[i] = 0;
       queue[tail++] = i;
     }
@@ -70,11 +110,12 @@ class FloorPathing {
       final i = queue[head++];
       final x = i % w, y = i ~/ w;
       final d = dist[i] + 1;
+      if (d >= _kFar) continue; // too far to store: unreachable
       for (final dir in Dir4.values) {
         final nx = x + dir.dx, ny = y + dir.dy;
         if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
         final j = ny * w + nx;
-        if (walkable[j] != 1 || dist[j] != kUnreachable) continue;
+        if (walkable[j] != 1 || dist[j] != _kFar) continue;
         dist[j] = d;
         queue[tail++] = j;
       }
@@ -83,12 +124,15 @@ class FloorPathing {
   }
 
   /// Tiles from [at] to the field's goal, or [kUnreachable].
-  int distance(Int32List field, TilePos at) =>
-      hall.contains(at) ? field[_index(at)] : kUnreachable;
+  int distance(Uint16List field, TilePos at) {
+    if (!hall.contains(at)) return kUnreachable;
+    final d = field[_index(at)];
+    return d == _kFar ? kUnreachable : d;
+  }
 
   /// The neighbour of [at] one step closer along [field] (first in [Dir4]
   /// order on a tie), or null at a goal or when cut off.
-  TilePos? nextStep(Int32List field, TilePos at) {
+  TilePos? nextStep(Uint16List field, TilePos at) {
     final d = distance(field, at);
     if (d <= 0) return null;
     for (final dir in Dir4.values) {
