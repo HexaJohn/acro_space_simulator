@@ -210,9 +210,27 @@ Nothing is a firm, and nothing can go bankrupt.
   worker-hours by role, energy, inputs consumed, item-metres hauled, equipment hours.
   Pricing those counters gives a **unit cost** per output. A better layout really is cheaper
   per unit, so the design reward and the money side are the same lever.
-- **Prices** *(proposal)*: each good has a base value from its recipe chain (raw value +
-  labour + energy), times a scarcity factor from the colony's days of cover. Imports
-  (Earth or other colonies) set a ceiling once trade exists.
+- **Prices are local and derived, not set by hand** *(proposal, 2026-10-12)*. Each colony
+  is its own market: `price = clamp(localUnitCost × scarcity, exportFloor, importCeiling)`.
+  - *localUnitCost* = materials at local prices + energy × local power cost + labour ×
+    local wage + plant wear, all ÷ output × site multipliers. The inputs that make it
+    local already exist: `biomeFx.water/ore`, `solarFactor`, the body's gas inventory
+    (terraforming).
+  - *importCeiling* = min over sources (source price + transport/kg × kg/unit).
+    Transport/kg comes from physics: surface-to-surface Δv → rocket equation →
+    propellant/kg at the source's fuel price + vehicle wear. Earth's gravity well dominates.
+  - *exportFloor* = best (destination price − transport).
+  - *Wage* = local cost of the life-support basket (O₂, water, food, housing) × an economy
+    markup. It is circular with life-support prices, so solve by fixed-point iteration
+    (it converges because labour is less than 100% of any good's cost).
+  - Needs a `kgPerUnit` per commodity (none today).
+  - Expected result: low value-per-kg goods (O₂, water, steel, food) are always made
+    locally off Earth, and high value-per-kg goods (chips, medicine) are imported until
+    local plants exist. Factories exist to replace imports. Example, O₂: Earth ~$0.2/kg;
+    Mars at the ice caps ~$5-10; Mars dry equator ~$20-50; imported from Earth ~$500-5,000.
+  - Aside: the O₂ Harvester's flat 2.0 output should key off the body's real atmosphere.
+  - This pricing reaches far beyond factories, so it gets its own short economy plan
+    before phase 5.
 - **Private P&L per plant**: revenue = shipped units × price. Costs = inputs × price + wages
   + power + logistics (a flat per-unit freight fee until trucks, then per truck trip) +
   equipment upkeep and depreciation. Profit is taxed into `funds` (a new corporate tax line
