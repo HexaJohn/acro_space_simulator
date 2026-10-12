@@ -470,6 +470,11 @@ void main() {
     await t.tap(find.byKey(const Key('inspect-arm-item')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
+    // The menu opens scrolled to the current pick; with every colony good in
+    // the item table "Any item" sits off the top until scrolled to.
+    await t.dragUntilVisible(find.text('Any item'),
+        find.byType(Scrollable).last, const Offset(0, 300));
+    await t.pump();
     await t.tap(find.text('Any item').last);
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));

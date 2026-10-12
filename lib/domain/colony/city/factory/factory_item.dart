@@ -92,10 +92,11 @@ class FactoryItems {
       kgPerUnit: 500, commodity: 'food', commodityUnits: 500);
   static const oxygen = FactoryItem(
       id: 'oxygen', label: 'Oxygen', loadClass: LoadClass.hand, kgPerUnit: 1);
-  /// A cylinder bundle: 100 kg of O₂ in a racked pack.
+  /// A cylinder bundle: 100 kg of O₂ in a racked pack (tare not counted: a
+  /// pack weighs what it holds, so docks convert mass one for one).
   static const packOxygen = FactoryItem(
       id: 'pack:oxygen', label: 'O₂ Cylinder Pack',
-      loadClass: LoadClass.pallet, kgPerUnit: 400, commodity: 'oxygen',
+      loadClass: LoadClass.pallet, kgPerUnit: 100, commodity: 'oxygen',
       commodityUnits: 100);
   static const medicine = FactoryItem(
       id: 'medicine', label: 'Medicine', loadClass: LoadClass.hand,
