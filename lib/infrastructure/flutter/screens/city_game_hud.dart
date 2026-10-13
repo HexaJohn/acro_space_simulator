@@ -663,6 +663,22 @@ class _CityGameHudState extends State<CityGameHud> {
                 'of it kept by the settlers' : ''}',
             style: AppTheme.dim.copyWith(fontSize: 10)),
       ),
+      // The plant economy's real money (docs/plans/factory-floors.md §7
+      // Q8-Q10): only once the colony has a plant, so a colony without one
+      // shows the drawer it always did.
+      if (!city.factoryFloors.isEmpty) ...[
+        _kv('Corporate tax',
+            '+${city.corporateTaxRate.toStringAsFixed(2)} §/s',
+            AppTheme.accent2),
+        if (city.industryDeficitRate > 0)
+          _kv('Industry deficit',
+              '−${city.industryDeficitRate.toStringAsFixed(2)} §/s',
+              AppTheme.warn),
+        if (city.colonyEconomy.industrialSubsidyTotal > 0)
+          _kv('Industrial subsidies',
+              '§${city.colonyEconomy.industrialSubsidyTotal.toStringAsFixed(0)} paid',
+              AppTheme.warn),
+      ],
       const Divider(height: 14, color: Color(0xFF1E2A38)),
       _kv('Net', '${net >= 0 ? '+' : ''}${net.toStringAsFixed(2)} §/s',
           net >= 0 ? AppTheme.accent2 : AppTheme.danger),

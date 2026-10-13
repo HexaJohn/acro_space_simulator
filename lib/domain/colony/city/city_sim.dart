@@ -31,6 +31,7 @@ import '../building.dart';
 import '../surface_placement.dart';
 import '../city_network.dart';
 import 'city_building_spec.dart';
+import 'city_economy.dart';
 import 'city_factories.dart';
 import 'city_config.dart';
 import 'city_layout.dart';
@@ -53,6 +54,7 @@ import 'shuttle_run.dart';
 import 'site_access/site_access_book.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
+import 'economy/colony_economy.dart';
 import 'economy/local_prices.dart' show kKjPerPowerUnitS;
 import 'factory/factory_floors.dart';
 import 'traffic/city_agents.dart';
@@ -469,7 +471,23 @@ class CitySim {
   /// What the treasury is actually gaining or losing per second: tax, the
   /// laws, and the upkeep of every road, as the last tick paid them.
   double get netFundsRate =>
-      taxIncomeRate + lawUpkeepRate - roadUpkeepPaidRate;
+      taxIncomeRate +
+      lawUpkeepRate -
+      roadUpkeepPaidRate +
+      corporateTaxRate -
+      industryDeficitRate;
+
+  /// Corporate tax the treasury collects, §/s: the private plants' tax on
+  /// the last economy day's profit, converted from credits by
+  /// [kCreditsToFunds] and paid evenly over this day
+  /// (`city_economy.dart`). Withheld like worker tax by a defiant colony
+  /// ([CityLoyalty.taxFactor]).
+  double get corporateTaxRate =>
+      colonyEconomy.corporateTaxFundsPerS * loyalty.taxFactor;
+
+  /// What the state's plants lost on the last economy day, §/s: the
+  /// "industry deficit" Budget line (docs/plans/factory-floors.md §7 Q10).
+  double get industryDeficitRate => colonyEconomy.industryDeficitFundsPerS;
 
   /// Milestone tiers already awarded, by [CityMilestone.tier].
   ///
@@ -588,6 +606,11 @@ class CitySim {
   /// before floors existed (floors kept, never stepped). The regression test
   /// compares the two.
   bool factoryFloorsEnabled = true;
+
+  /// The plants' operators, prices and the money they move
+  /// (docs/plans/factory-floors.md §3 "Ownership and money"; the rules are
+  /// in `city_economy.dart`).
+  final ColonyEconomy colonyEconomy = ColonyEconomy();
 
   /// [site]'s floor when this tick runs it instead of [s]'s flat rate.
   FloorRecord? _floorRun(String site, CityBuildingSpec s) =>
@@ -1457,10 +1480,12 @@ class CitySim {
       final uf = utilFactor(e.key) * sf;
       // A floor plant draws and staffs what its floor needs; a template's
       // rates are the spec's own numbers (1 power unit = 1 MW).
+      // A firm's idled or closed plant draws and staffs only what still runs.
       final fr = isFloorPlant(s) ? _floorRun(siteIdOfCell(e.key), s) : null;
+      final ft = fr == null ? 1.0 : floorThrottleOf(siteIdOfCell(e.key));
       final sDraw =
-          fr == null ? s.powerDraw : fr.rates.powerKw / kKjPerPowerUnitS;
-      final num sJobs = fr == null ? s.jobs : fr.rates.jobs;
+          fr == null ? s.powerDraw : fr.rates.powerKw / kKjPerPowerUnitS * ft;
+      final num sJobs = fr == null ? s.jobs : fr.rates.jobs * ft;
       powerOut += s.powerOutput * powerFactor(s.type) * sf;
       powerDraw += sDraw * (s.housing > 0 || sJobs > 0 ? uf : 1.0);
       housing += (s.housing * uf).round();
@@ -1492,9 +1517,11 @@ class CitySim {
         final fr = parcelBuildings.containsKey(parcel.id)
             ? _floorRun(parcel.id, s)
             : null;
-        final sDraw =
-            fr == null ? s.powerDraw : fr.rates.powerKw / kKjPerPowerUnitS;
-        final num sJobs = fr == null ? s.jobs : fr.rates.jobs;
+        final ft = fr == null ? 1.0 : floorThrottleOf(parcel.id);
+        final sDraw = fr == null
+            ? s.powerDraw
+            : fr.rates.powerKw / kKjPerPowerUnitS * ft;
+        final num sJobs = fr == null ? s.jobs : fr.rates.jobs * ft;
         powerOut += s.powerOutput * powerFactor(s.type) * sf;
         powerDraw += sDraw * (s.housing > 0 || sJobs > 0 ? uf : 1.0);
         housing += (s.housing * uf).round();
@@ -1623,6 +1650,9 @@ class CitySim {
     // this, where [supportablePop] rightly counts everything.
     final localNet = <String, double>{};
     void flow(String k, double perSec, [bool local = true]) {
+      // Every production flow is also the market's demand and supply
+      // (the scarcity signal, `city_economy.dart`).
+      colonyEconomy.addFlow(k, perSec, dt);
       if (k == Commodity.food || k == Commodity.water || k == Commodity.oxygen) {
         lifeNet[k] = (lifeNet[k] ?? 0) + perSec;
         if (local) localNet[k] = (localNet[k] ?? 0) + perSec;
@@ -1797,6 +1827,10 @@ class CitySim {
     //     the rest live on what it makes.
     final foodPerSec = population * foodPerPersonPerSec;
     final waterPerSec = population * waterPerPersonPerSec;
+    // What the people eat and drink (and breathe, below) is demand too.
+    colonyEconomy
+      ..addFlow(Commodity.food, -foodPerSec, dt)
+      ..addFlow(Commodity.water, -waterPerSec, dt);
     stock[Commodity.food] =
         (stockOf(Commodity.food) - foodPerSec * dt).clamp(0, 1e12);
     stock[Commodity.water] =
@@ -1819,6 +1853,7 @@ class CitySim {
     } else {
       stock[Commodity.oxygen] =
           (stockOf(Commodity.oxygen) - o2PerSec * dt).clamp(0, 1e12);
+      colonyEconomy.addFlow(Commodity.oxygen, -o2PerSec, dt);
     }
     // People each commodity can keep supplied, when the stockpile is drawn
     // down over [runway] seconds. With ~zero consumption (tiny pop) security
@@ -2017,6 +2052,11 @@ class CitySim {
         (happiness + (happyTarget - happiness) * (0.4 * dt).clamp(0.0, 1.0))
             .clamp(0.0, 1.0);
 
+    // 1.65 The plant economy's day (`city_economy.dart`): after production,
+    // so the floors' ledgers hold this tick, and before the payoff, so a
+    // closing day's corporate tax and industry deficit are paid from now.
+    economyTick(dt);
+
     // 1.7 Payoff: tax (funds) + research.
     final taxIncome = workforce *
         happiness *
@@ -2037,7 +2077,14 @@ class CitySim {
     // Road upkeep: cached on the road network's revision, so this is a
     // lookup, not a walk of the roads, however many ticks a frame runs.
     roadUpkeepPaidRate = roadUpkeepRate;
-    funds += (taxIncomeRate + lawUpkeepRate - roadUpkeepPaidRate) * dt;
+    // Corporate tax in and the state plants' deficit out: the only real
+    // money the plant economy moves (docs/plans/factory-floors.md §7 Q8).
+    funds += (taxIncomeRate +
+            lawUpkeepRate -
+            roadUpkeepPaidRate +
+            corporateTaxRate -
+            industryDeficitRate) *
+        dt;
     research += population *
         happiness *
         researchPerPopPerSec *
@@ -5566,6 +5613,11 @@ class CitySim {
           'floorPicks': Map.of(selectedFloorBlueprint),
         if (pendingFloorInvestment.isNotEmpty)
           'floorCapexDue': Map.of(pendingFloorInvestment),
+        // The plant economy: books, offers, the day clock. Omitted while a
+        // colony has never had a plant, so it saves as before. Not
+        // 'economy': that key is the [Economy] enum's index.
+        if (!factoryFloors.isEmpty || colonyEconomy.hasState)
+          'plantEconomy': colonyEconomy.toJson(),
       };
 
   /// [fineCorridors] as saved: those of roads still in the layout.
@@ -5851,6 +5903,8 @@ class CitySim {
     (j['floorCapexDue'] as Map?)?.forEach((site, ore) {
       sim.pendingFloorInvestment[site as String] = (ore as num).toDouble();
     });
+    sim.colonyEconomy
+        .restore((j['plantEconomy'] as Map?)?.cast<String, Object?>());
     sim.reconcileFactoryFloors();
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and

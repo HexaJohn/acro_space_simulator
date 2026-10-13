@@ -71,7 +71,10 @@ class _CountingSim implements FactorySim {
   }
   return (
     delta: {for (final k in keys) k: sim.stockOf(k) - s0[k]!},
-    floorS: sim.factoryFloors.takeLedger(lot).seconds,
+    // The economy's day close (every kColonyDaySec, here once) takes the
+    // ledger into the plant's books; count what it booked too.
+    floorS: sim.factoryFloors.takeLedger(lot).seconds +
+        (sim.colonyEconomy.lastPnl[lot]?.seconds ?? 0),
   );
 }
 

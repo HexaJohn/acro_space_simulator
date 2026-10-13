@@ -28,8 +28,14 @@ import 'commodity_mass.dart';
 /// [kgPerUnit] in [earthPrice], so the per-kg figure stays the readable,
 /// checkable one.
 const Map<String, double> kEarthPricePerKg = {
-  // Iron ore fines, ~$100-130/t delivered to a mill.
-  Commodity.ore: 0.11,
+  // Run-of-mine ore at the pit, ~$40/t: roughly what it costs to blast,
+  // load and haul. NOT 62% Fe concentrate fines (~$110/t, the first
+  // calibration): the colony's ore is crude, low-grade rock — a Steel Mill
+  // turns 2 t of it into 0.19 t of steel and tube, a yield under a tenth,
+  // where a tonne of fines makes ~0.6 t of steel. At the fines price every
+  // Earth steel mill lost ~30% of its revenue on ore alone and closed within
+  // a month (wave 3 integration, economy_plant_health_test.dart).
+  Commodity.ore: 0.04,
   // Municipal water, ~$2/m³ in a developed city.
   Commodity.water: 0.002,
   // Packaged staple food at retail-wholesale, ~$3/kg.
@@ -63,8 +69,12 @@ const Map<String, double> kEarthPricePerKg = {
   Commodity.guns: 250,
   // Rifle ammunition, ~$0.50 a round for 12 g ≈ $42/kg.
   Commodity.ammo: 42,
-  // Military rations, ~$8 a meal-day of ~1 kg.
-  Commodity.rations: 8,
+  // Military rations, ~$20/kg: a US MRE runs ~$13 a meal at ~0.65 kg.
+  // The first calibration's $8 for a whole ~1 kg meal-day was below what
+  // the Rations Plant's 18 packers cost at the derived Earth wage (~$7/s
+  // against $6.40/s of rations), so every private rations plant closed
+  // (wave 3 integration, economy_plant_health_test.dart).
+  Commodity.rations: 20,
   // Tactical missiles, ~$1.5M for ~1 t.
   Commodity.missiles: 1500,
   // ---- Factory intermediates (factory_item.dart) ----

@@ -31,7 +31,9 @@
 library;
 
 import 'city_building_spec.dart';
+import 'city_economy.dart';
 import 'city_sim.dart';
+import 'economy/colony_economy.dart';
 import 'factory/city_factory_port.dart';
 import 'factory/factory_capex.dart';
 import 'factory/factory_floor.dart';
@@ -186,11 +188,13 @@ extension CityFactories on CitySim {
     if (designed != null) {
       factoryFloors.assign(site, designed, designed: true, rates: seeded)
           .dirty = true;
-      return;
+    } else {
+      final template = factoryTemplateFor(spec.type);
+      if (template == null) return;
+      factoryFloors.assign(site, template, rates: seeded);
     }
-    final template = factoryTemplateFor(spec.type);
-    if (template == null) return;
-    factoryFloors.assign(site, template, rates: seeded);
+    // Run by a firm or the state, as the colony's economy has it.
+    ensureFloorOwner(site);
   }
 
   /// Squares the floors with what stands: every built floor plant without a
@@ -215,6 +219,15 @@ extension CityFactories on CitySim {
         factoryFloors.assign(id, template, rates: flatRatesOf(live[id]!));
       }
     }
+    // Every floor has an owner, and no books outlive their plant.
+    for (final id in factoryFloors.siteIds) {
+      ensureFloorOwner(id);
+    }
+    final e = colonyEconomy;
+    for (final id in {...e.books.keys, ...e.throttle.keys, ...e.stashed.keys,
+        for (final o in e.offers) o.site}.toList()..sort()) {
+      if (factoryFloors[id] == null) e.dropSite(id);
+    }
   }
 
   /// Carries [oldId]'s floor and its colony-side state onto [newId].
@@ -225,6 +238,7 @@ extension CityFactories on CitySim {
     if (due != null) pendingFloorInvestment[newId] = due;
     final bank = floorValueBank.remove(oldId);
     if (bank != null) floorValueBank[newId] = bank;
+    colonyEconomy.renameSite(oldId, newId);
   }
 
   /// Drops [site]'s floor and its colony-side state (the plant is gone).
@@ -232,6 +246,7 @@ extension CityFactories on CitySim {
     factoryFloors.remove(site);
     pendingFloorInvestment.remove(site);
     floorValueBank.remove(site);
+    colonyEconomy.dropSite(site);
   }
 
   /// Whether [site]'s floor was designed (not the template): demolishing it
@@ -261,7 +276,15 @@ extension CityFactories on CitySim {
       );
     }
     final before = capexOf(rec.blueprint).total;
+    // The layout an unpaid edit falls back to (`settleFloorInvestment`).
+    final stash = FloorEditStash(
+      blueprint: rec.blueprint.copy(),
+      rates: rec.rates,
+      designed: rec.designed,
+    );
+    final rev = rec.rev;
     factoryFloors.close(site);
+    if (rec.rev != rev) stashFloorEdit(site, stash);
     final after = capexOf(rec.blueprint).total;
     final delta = after - before;
     if (delta.abs() > 1e-9) {
@@ -283,8 +306,16 @@ extension CityFactories on CitySim {
 
   /// Stores [rates] measured for [site]; a result for an older layout
   /// ([rev] no longer the record's) is dropped. True when stored.
-  bool applyFloorMeasure(String site, MeasuredRates rates, {int? rev}) =>
-      factoryFloors.applyMeasured(site, rates, rev: rev);
+  ///
+  /// A stored result for an edited floor settles the edit's cost
+  /// ([CityEconomy.settleFloorInvestment]): only now is it known what the
+  /// edit saves, which is what a private firm decides on.
+  bool applyFloorMeasure(String site, MeasuredRates rates, {int? rev}) {
+    final old = factoryFloors[site]?.rates;
+    if (!factoryFloors.applyMeasured(site, rates, rev: rev)) return false;
+    if (old != null) settleFloorInvestment(site, old);
+    return true;
+  }
 
   // ---- colony tick ----------------------------------------------------------
 
@@ -305,11 +336,13 @@ extension CityFactories on CitySim {
     final capPerS = kFloorRewardCap * flatOutputValuePerS(spec.outputs);
     final banked = (floorValueBank[site] ?? 0) + capPerS * dt;
     final ceiling = capPerS * kFloorValueBankSeconds;
+    // A firm's idled stations or closed plant (`city_economy.dart`).
+    final ft = floorThrottleOf(site);
     final port = CityFactoryPort(
       stock: stock,
       stockCap: stockCap,
-      powerShare: powerShare,
-      staffingShare: staffingShare,
+      powerShare: powerShare * ft,
+      staffingShare: staffingShare * ft,
       valueAllowance: banked < ceiling ? banked : ceiling,
       outputMult: (c) => biomeMult(c) * bountyMult * eventProductionMult,
     );
