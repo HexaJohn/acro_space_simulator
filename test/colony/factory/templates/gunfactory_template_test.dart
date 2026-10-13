@@ -5,6 +5,7 @@
 
 import 'dart:convert';
 
+import 'package:acro_space_simulator/application/factory/floor_measure_runner_isolate.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_capex.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
@@ -30,21 +31,27 @@ import '../factory_test_support.dart';
 CityBuildingSpec get _spec =>
     kUtilCatalog.firstWhere((s) => s.type == kArmsType);
 
-/// Warm-up and window: well past the 300 s / 1200 s floor the plan sets.
-/// The window is a whole number of the plant's 300 s lumpy cycle (an ammo
-/// pallet every 50 s, a gun case every 33 s), so lumps can't bias it.
-const _settings = MeasureSettings(
-  warmupS: 600,
-  windowS: 1800,
-  earlyStop: false,
+/// Measured the way the colony must measure this plant
+/// ([kArmsMeasureSettings]): the template's promise is about THAT reading,
+/// so the test uses the same settings, not hand-picked longer ones.
+MeasuredRates _measure(
+  FloorBlueprint bp, [
+  MeasureSettings settings = kArmsMeasureSettings,
+]) => measureBlueprint(
+  bp,
+  _build,
+  port: InfiniteColonyPort(),
+  settings: settings,
 );
 
-MeasuredRates _measure(FloorBlueprint bp) => measureBlueprint(
-  bp,
-  (b) => FactoryFloor.fromBlueprint(b),
-  port: InfiniteColonyPort(),
-  settings: _settings,
-);
+/// Top-level so it can cross to a measurement worker isolate.
+FactorySim _build(FloorBlueprint bp) => FactoryFloor.fromBlueprint(bp);
+
+/// Each spec rate (inputs and outputs) against [r], as relative errors.
+Map<String, double> _errors(MeasuredRates r) => {
+  for (final e in {..._spec.inputs, ..._spec.outputs}.entries)
+    e.key: ((r.inPerS[e.key] ?? r.outPerS[e.key] ?? 0) - e.value) / e.value,
+};
 
 void main() {
   // The template floor's measurement is shared by the tests that read it.
@@ -100,6 +107,86 @@ void main() {
           expect(rates.outPerS[c]!, closeTo(v, v * 0.05), reason: 'out $c'),
     );
   });
+
+  test('any reasonable warm-up and window reads the spec within 5%', () {
+    // The floor ships in lumps (a 50-round pallet, a 10-gun case) and has
+    // no exact cycle, so a reading that only passes on one hand-picked,
+    // lump-aligned window proves little. Sweep misaligned warm-ups (the
+    // floor settles by ~180 s) against windows of 1800 s and more — one
+    // pallet is under 3% of those — plus the plan's own minimum (300 s
+    // warm-up, 1200 s window), where one pallet is 4.2% and the margin is
+    // thinnest. A floor still filling its belts (the old 1.2 blanks/s saw
+    // took ~600 s) reads its fill as intake and fails here.
+    for (final (warm, win) in [
+      (180.0, 1800.0),
+      (kArmsMeasureSettings.warmupS, kArmsMeasureSettings.windowS),
+      (263.0, 1837.0),
+      (317.0, 1871.0),
+      (409.0, 2003.0),
+      (300.0, 1200.0),
+    ]) {
+      final r = _measure(
+        gunfactoryTemplate(),
+        MeasureSettings(warmupS: warm, windowS: win, earlyStop: false),
+      );
+      _errors(r).forEach(
+        (c, e) => expect(e.abs(), lessThan(0.05), reason: '$c at $warm/$win'),
+      );
+    }
+  });
+
+  test('the colony\'s standard measurement is too short for this floor', () {
+    // Why kArmsMeasureSettings exists (library doc, "Measuring it"): from
+    // a cold start the first ammo pallet can't leave before ~200 s, and the
+    // belts are still filling after the standard 60 s warm-up, so the
+    // standard 300 s reading is far off. If this ever reads within 5%, the
+    // floor settles fast enough for the standard settings: drop
+    // kArmsMeasureSettings and this test with it.
+    final std = _measure(gunfactoryTemplate(), MeasureSettings.standard);
+    expect(
+      _errors(std).values.any((e) => e.abs() > 0.05),
+      isTrue,
+      reason: '${std.inPerS} ${std.outPerS}',
+    );
+    // And the documented settings cost no more than ~7x the standard run:
+    // affordable on the measurement worker.
+    expect(
+      kArmsMeasureSettings.warmupS + kArmsMeasureSettings.windowS,
+      lessThanOrEqualTo(
+        7 *
+            (MeasureSettings.standard.warmupS +
+                MeasureSettings.standard.windowS),
+      ),
+    );
+  });
+
+  test(
+    'a fresh worker isolate measures it once given registerArmsChain',
+    () async {
+      // The off-thread runner builds floors in an isolate whose registries
+      // hold only ensureFactoryCatalog's chain. Passing registerArmsChain as
+      // the worker setup is what makes the 'gunfactory:*' recipes known
+      // there; without it the plant measures as making nothing (the trap the
+      // lead must avoid when wiring the runner).
+      final bare = PlatformFloorMeasureRunner(_build);
+      addTearDown(bare.dispose);
+      final unset = await bare
+          .measure(gunfactoryTemplate(), settings: MeasureSettings.standard)
+          .then<MeasuredRates?>((r) => r, onError: (Object _) => null);
+      expect(unset?.outPerS['guns'] ?? 0, 0, reason: 'unregistered recipes');
+
+      final runner = PlatformFloorMeasureRunner(
+        _build,
+        setup: registerArmsChain,
+      );
+      addTearDown(runner.dispose);
+      final r = await runner.measure(
+        gunfactoryTemplate(),
+        settings: kArmsMeasureSettings,
+      );
+      expect(jsonEncode(r.toJson()), jsonEncode(rates.toJson()));
+    },
+  );
 
   test('jobs and build cost are the spec\'s', () {
     // Stamping the template must not change staffing or the ore a colony
@@ -196,8 +283,9 @@ void main() {
   test('a better design beats it: same output, far fewer jobs', () {
     // "Fine, not great" (§3 Reward): one operator per station instead of
     // a manual pair — the fitting bench excepted, it sets the pace — and
-    // the walkers it really needs. Same guns and ammo for >= 15% fewer
-    // jobs: the labour lever exists.
+    // the nine walkers it really needs: 23 jobs against 35 (34% fewer) for
+    // the same guns and ammo, past the >= 15% the plan asks: the labour
+    // lever exists.
     final bp = gunfactoryTemplate();
     for (var i = 0; i < bp.placements.length; i++) {
       final p = bp.placements[i];

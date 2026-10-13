@@ -7,9 +7,10 @@
 /// "Templates", phase 6).
 ///
 /// Like every template it is a built-in [FloorBlueprint] whose MEASURED
-/// rates match the plant's flat `CityBuildingSpec` within 5%, whose build
-/// cost (`capexOf`) is the spec's `buildCost` and whose job demand is the
-/// spec's `jobs`, so opening the floor changes nothing for a colony. It is
+/// rates match the plant's flat `CityBuildingSpec` within 5% — measured
+/// with [kArmsMeasureSettings], NOT `MeasureSettings.standard` (see
+/// "Measuring it" below) — whose build cost (`capexOf`) is the spec's
+/// `buildCost` and whose job demand is the spec's `jobs`. It is
 /// deliberately "fine, not great": a designer who re-crews it, trims its
 /// walkers or shortens its walks beats it (the Reward levers).
 ///
@@ -38,9 +39,45 @@
 /// modelled: the spec takes no chemical input.)
 ///
 /// **What sets the pace.** One manual fitting bench ([ArmsRecipes.fit])
-/// runs flat out at exactly 0.3 guns/s; every other station has 20-60%
-/// slack, so the bench — skilled hands, not a machine — is the plant's
-/// rate, and the docks take in only what it uses.
+/// runs flat out at exactly 0.3 guns/s; every other station has 25-80%
+/// slack, the saw excepted (300%, see its comment), so the bench — skilled
+/// hands, not a machine — is the plant's rate, and the docks take in only
+/// what it uses.
+///
+/// ## Measuring it (aggregate mode)
+///
+/// This floor needs a LONGER measurement than the colony's default, and
+/// the reason is arithmetic, not tuning. `MeasureSettings.standard` (60 s
+/// warm-up, at most 300 s measured) reads a fresh floor as about steel
+/// 0.93/s (+87%), electronics 0.18/s (+77%), guns 0.20/s (-33%) and ammo
+/// 0.67/s (-33%):
+///
+/// * An ammo pallet is fifty rounds, fifty seconds of the line's output,
+///   and the packer takes 40 s to wrap one. For the 300 s window to see
+///   all six of its pallets the first would have to leave ~110 s after a
+///   COLD start, i.e. steel would have to go dock → saw → machining →
+///   swarf walk → swage → loader in ~20 s. No real plant does; the first
+///   pallet leaves at ~200 s here, the first gun case at ~170 s.
+/// * Before then the floor fills its work-in-progress — the 43-tile blank
+///   belt alone holds ~170 blanks — and a fill still running inside the
+///   window is counted as intake.
+///
+/// So the template is tuned to SETTLE fast instead (the saw and the
+/// machining centres have the slack to fill every belt by ~180 s, and the
+/// swage runs small charges), and [kArmsMeasureSettings] measures it: a
+/// 240 s warm-up, then a full 1800 s window, long enough that one 50-round
+/// pallet either side is under 3%. Any warm-up from ~180 s on, with any
+/// window of 1800 s or more, reads within 5% (the test sweeps misaligned
+/// ones). Whoever wires the off-screen re-measure must pass these settings
+/// for `kArmsType` (or measure a warm saved state via `measureSaved`);
+/// the standard settings would misreport an untouched Arms Factory.
+///
+/// **Off-thread registration.** The chain lives in this file, not in
+/// `ensureFactoryCatalog`, so a floor measured on a fresh worker isolate
+/// knows the 'gunfactory:*' recipes only if the worker registers them:
+/// pass `setup: registerArmsChain` (or a shared setup that calls it) to
+/// `FloorMeasureRunner.platform`. Without it every station's recipe is
+/// unknown there and the plant measures as making nothing.
 ///
 /// ## The floor (110 × 56 m hall on the 500 × 350 m site)
 ///
@@ -117,6 +154,7 @@ import '../factory_entities.dart';
 import '../factory_grid.dart';
 import '../factory_handling.dart';
 import '../factory_item.dart';
+import '../factory_measure.dart';
 import '../factory_recipe.dart';
 import '../floor_blueprint.dart';
 import '../template_layout.dart';
@@ -173,10 +211,11 @@ class ArmsItems {
 
 /// Recipes of the Arms Factory chain. Ids are saved: never rename.
 ///
-/// Craft times are set so each station's crew mode gives it 20-60% slack
-/// at the spec rate, except the fitting bench, which runs flat out and so
-/// IS the plant's rate (see the library doc). A manual station runs at
-/// speed 0.6, an assisted one at 1.0 ([MachineMode]).
+/// Craft times are set so each station's crew mode gives it 25-80% slack
+/// at the spec rate — the saw excepted (300%, see its comment) — except
+/// the fitting bench, which runs flat out and so IS the plant's rate (see
+/// the library doc). A manual station runs at speed 0.6, an assisted one
+/// at 1.0 ([MachineMode]).
 class ArmsRecipes {
   ArmsRecipes._();
 
@@ -186,10 +225,13 @@ class ArmsRecipes {
     station: StationKind.unpacker,
     inputs: [ItemQty('crate:steel', 1)],
     outputs: [ItemQty('steel', 10)],
-    // 5 s: a manual saw (8.3 s a bundle) cuts 1.2 blanks/s against 0.5. A
-    // saw is quick; the slack fills the long blank belt within the first
-    // few minutes, so a fresh floor settles fast.
-    seconds: 5,
+    // 3 s: a manual saw (5 s a bundle) cuts 2 blanks/s against 0.5 — 300%
+    // slack, and exactly what the one arm onto the belt can lift (2/s). A
+    // band saw through bar stock is quick; the slack is there so the
+    // 43-tile blank belt (~170 blanks once backed up) fills by ~180 s
+    // instead of ~600 s. A saw with little slack would leave the belt
+    // still filling inside any measurement window, read as extra intake.
+    seconds: 3,
     // A cold-cut band saw and its infeed: tens of kW.
     powerKw: 30,
   );
@@ -204,9 +246,10 @@ class ArmsRecipes {
       ItemQty('gunfactory:receiver', 4),
       ItemQty('gunfactory:swarf', 1),
     ],
-    // 12 s: a manual centre (20 s) makes 0.2 receivers/s; two make 0.4
-    // against the bench's 0.3.
-    seconds: 12,
+    // 9 s: a manual centre (15 s) makes 0.27 receivers/s; two make 0.53
+    // against the bench's 0.3. The 78% slack fills the 8-tile part belt to
+    // the bench (32 parts) in ~2 minutes, not five.
+    seconds: 9,
     // A 5-axis machining centre: spindle, axes, coolant pumps.
     powerKw: 60,
   );
@@ -217,8 +260,8 @@ class ArmsRecipes {
     station: StationKind.mill,
     inputs: [ItemQty('steel', 2)],
     outputs: [ItemQty('gunfactory:barrel', 4), ItemQty('gunfactory:swarf', 1)],
-    // 12 s, as the receivers: two manual borers make 0.4 barrels/s.
-    seconds: 12,
+    // 9 s, as the receivers: two manual borers make 0.53 barrels/s.
+    seconds: 9,
     // Deep-hole drilling and button rifling: a long, hard-driven spindle.
     powerKw: 60,
   );
@@ -267,13 +310,14 @@ class ArmsRecipes {
     id: 'gunfactory:swageBullets',
     label: 'Swage Bullet Cores',
     station: StationKind.press,
-    // A charge of six bins: the press's hopper holds two charges (12
-    // bins), which is how far ahead its walkers can fetch — a small charge
-    // would starve it between their ~35 s round trips.
-    inputs: [ItemQty('gunfactory:swarf', 6)],
-    outputs: [ItemQty('gunfactory:bullet', 40)],
-    // 18 s: a manual press (30 s) takes 0.2 bins/s against 0.15.
-    seconds: 18,
+    // A charge of three bins: the press's hopper holds two charges (6
+    // bins). Small on purpose: the first bullets go out after three bins,
+    // not six, which brings the first ammo pallet in at ~200 s. Measured:
+    // nine walkers keep it fed through their ~35 s round trips.
+    inputs: [ItemQty('gunfactory:swarf', 3)],
+    outputs: [ItemQty('gunfactory:bullet', 20)],
+    // 9 s: a manual press (15 s) takes 0.2 bins/s against 0.15.
+    seconds: 9,
     // Chip compaction and swaging: a hydraulic press.
     powerKw: 80,
   );
@@ -346,10 +390,22 @@ const int _ammoX = 44;
 
 /// Workers on foot: swarf bins to the press (0.15/s, ~35 s round trips
 /// across the part belts) and gun cases to their door (0.03/s, a long
-/// walk). Measured: eight just hold the spec rate, seven fall ~15% short.
+/// walk). Measured: nine just hold the spec rate, eight fall ~11% short.
 /// Twelve is the template's honest overstaffing — a crew sized for the
 /// worst shift, and the first thing a designer trims.
 const int kArmsWalkers = 12;
+
+/// How the Arms Factory must be measured (library doc, "Measuring it"):
+/// 240 s warm-up — the floor settles by ~180 s, plus a minute's margin —
+/// and a full 1800 s window, so one 50-round ammo pallet is 2.8% of the
+/// window and one 10-gun case 1.9%. No early stop: the floor ships in
+/// lumps, so its sub-windows never agree before the cap anyway, and a
+/// fixed window keeps the reading free of chance agreement.
+const MeasureSettings kArmsMeasureSettings = MeasureSettings(
+  warmupS: 240,
+  windowS: 1800,
+  earlyStop: false,
+);
 
 /// One forklift moves 0.02 ammo pallets/s along a short aisle: light work,
 /// and its charging bay covers its battery.
