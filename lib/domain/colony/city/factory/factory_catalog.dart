@@ -30,7 +30,7 @@ library;
 
 import 'factory_item.dart';
 import 'factory_recipe.dart';
-import 'templates/refinery_template.dart';
+import 'templates/template_chains.dart';
 
 /// Recipe ids of the Steel Mill chain. Saved on machines: never rename.
 class SteelRecipes {
@@ -115,26 +115,21 @@ const List<FactoryItem> kCatalogItems = [];
 
 bool _loaded = false;
 
-/// Registers the built-in items and recipes. Idempotent: the registries
-/// accept the identical const object twice, and the flag skips the work.
+/// Registers the built-in items and recipes, and every plant template's
+/// own chain ([registerTemplateChains]): a floor loaded from a save or
+/// measured on a worker isolate calls only this, so it must bring them all.
+/// Idempotent: the registries accept the identical const object twice, and
+/// the flag skips the work.
 void ensureFactoryCatalog() {
   if (_loaded) return;
+  // Set FIRST: each chain's registrar calls back into this (so a template
+  // built alone still has the steel items), and must find it loaded.
+  _loaded = true;
   for (final i in kCatalogItems) {
     FactoryItems.register(i);
   }
   for (final r in SteelRecipes.all) {
     FactoryRecipes.register(r);
   }
-  for (final register in _kChainRegistrars) {
-    register();
-  }
-  _loaded = true;
+  registerTemplateChains();
 }
-
-/// Every plant chain that registers its own items and recipes from its
-/// template file. Loading a saved floor (`FactoryFloor.fromJson`,
-/// `fromBlueprint`) calls only [ensureFactoryCatalog], so a chain missing
-/// here goes dead after a save/load in a fresh process: its recipe ids
-/// resolve to nothing and the stations never run. (The import cycle with
-/// the template files is fine in Dart.)
-const List<void Function()> _kChainRegistrars = [registerRefineryChain];

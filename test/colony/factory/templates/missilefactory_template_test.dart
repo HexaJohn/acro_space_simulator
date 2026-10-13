@@ -4,9 +4,11 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:convert';
+import 'dart:isolate';
 
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_capex.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
@@ -26,16 +28,46 @@ import '../factory_test_support.dart';
 final CityBuildingSpec _spec =
     kUtilCatalog.firstWhere((s) => s.type == kMissileType);
 
-/// Steady state, the way the colony's off-screen mode measures it but over
-/// a long fixed window: 600 s of warm-up (a fresh floor takes ~8 minutes
-/// to fill its buffers — every station wants stock at once and the walkers
-/// are swamped) and 2400 s measured, so a ten-unit pallet or crate arriving
-/// a moment early or late moves a rate by well under the 5% budget.
+/// True steady state, as a check apart from the colony's own short
+/// measurement: 600 s of warm-up and 2400 s measured in full, long enough
+/// that neither the first pass nor any lump moves a rate. The design work
+/// (better layouts) is compared on this.
 const MeasureSettings _steady =
     MeasureSettings(warmupS: 600, windowS: 2400, earlyStop: false);
 
 MeasuredRates _measure(FloorBlueprint bp) =>
     measureBlueprint(bp, FactoryFloor.fromBlueprint, settings: _steady);
+
+/// Every spec input and output of [r] within 5% of the spec rate, and
+/// nothing else in or out.
+void _expectSpecRates(MeasuredRates r, String when) {
+  expect(r.inPerS.keys.toSet(), _spec.inputs.keys.toSet(),
+      reason: '$when: takes only tubes, rocket parts and electronics');
+  expect(r.outPerS.keys.toSet(), _spec.outputs.keys.toSet(),
+      reason: '$when: ships only missiles');
+  _spec.inputs.forEach((c, rate) {
+    expect(r.inPerS[c]!, closeTo(rate, rate * 0.05), reason: '$when in: $c');
+  });
+  _spec.outputs.forEach((c, rate) {
+    expect(r.outPerS[c]!, closeTo(rate, rate * 0.05),
+        reason: '$when out: $c');
+  });
+}
+
+/// In a fresh isolate (empty registries, as on the measure worker): only
+/// `ensureFactoryCatalog`, then load the saved floor and step it. Returns
+/// the blueprint's issues and the floor's JSON after [stepS].
+Future<(String, String)> _loadInFreshIsolate(String saved, double stepS) =>
+    Isolate.run(() {
+      ensureFactoryCatalog();
+      final j = (jsonDecode(saved) as Map).cast<String, Object?>();
+      final bp = FloorBlueprint.fromJson(
+          (j['bp'] as Map).cast<String, Object?>());
+      final f = FactoryFloor.fromJson(
+          (j['floor'] as Map).cast<String, Object?>());
+      f.step(stepS, InfiniteColonyPort());
+      return ('${bp.validate()}', jsonEncode(f.toJson()));
+    });
 
 /// A copy of [bp] with every placement passed through [f].
 FloorBlueprint _edit(FloorBlueprint bp, Placement Function(Placement) f) {
@@ -54,18 +86,32 @@ void main() {
   test('steady state is the spec rate within 5%, nothing else in or out',
       () {
     final r = _measure(missilefactoryTemplate());
-
-    expect(r.inPerS.keys.toSet(), _spec.inputs.keys.toSet(),
-        reason: 'takes only tubes, rocket parts and electronics');
-    expect(r.outPerS.keys.toSet(), _spec.outputs.keys.toSet(),
-        reason: 'ships only missiles: every intermediate is used in place');
-    _spec.inputs.forEach((c, rate) {
-      expect(r.inPerS[c]!, closeTo(rate, rate * 0.05), reason: 'in: $c');
-    });
-    _spec.outputs.forEach((c, rate) {
-      expect(r.outPerS[c]!, closeTo(rate, rate * 0.05), reason: 'out: $c');
-    });
+    _expectSpecRates(r, 'steady');
     expect(r.jobs, closeTo(_spec.jobs, _spec.jobs * 0.1));
+  });
+
+  /// The colony measures with `MeasureSettings.standard` (60 s warm-up,
+  /// at most 300 s, early stop), from a FRESH floor every time an editor
+  /// closes, and from a running floor's save when it re-measures. The
+  /// template must read its spec rate on exactly that path, or opening and
+  /// closing its floor would change the plant: a floor that settles slowly
+  /// reads low, and a ten-unit crate is 17% of a 300 s window.
+  test("reads the spec rate under the colony's own measurement settings",
+      () {
+    final fresh = measureBlueprint(
+        missilefactoryTemplate(), FactoryFloor.fromBlueprint);
+    _expectSpecRates(fresh, 'fresh floor');
+    expect(fresh.seconds, kMeasureWindowS,
+        reason: 'lumpy missile windows never stop the measurement early');
+    // Re-measured mid-run, at several phases of the line's cycle.
+    for (final t in [600.0, 637.0, 711.0, 1123.0]) {
+      final f = FactoryFloor.fromBlueprint(missilefactoryTemplate());
+      f.step(t, InfiniteColonyPort());
+      final saved = (jsonDecode(jsonEncode(f.toJson())) as Map)
+          .cast<String, Object?>();
+      _expectSpecRates(measureSaved(saved, FactoryFloor.fromJson),
+          'saved at ${t}s');
+    }
   });
 
   /// Placing a templated plant must cost what it always did (the spec's
@@ -107,11 +153,33 @@ void main() {
     }
   });
 
+  /// Statics are per isolate, and a floor loaded from a save or rebuilt
+  /// from blueprint JSON on the measure worker only ever calls
+  /// `ensureFactoryCatalog`. That call must bring this chain too, or such
+  /// a floor has no `missilefactory:` recipes (an unknown-recipe floor, or
+  /// a crash on lookup). The fresh isolate here starts with empty tables
+  /// and never touches the template.
+  test('a saved floor loads and runs where only the catalog was ensured',
+      () async {
+    final bp = missilefactoryTemplate();
+    final f = FactoryFloor.fromBlueprint(bp);
+    final port = InfiniteColonyPort();
+    f.step(437.3, port);
+    final saved = jsonEncode({'bp': bp.toJson(), 'floor': f.toJson()});
+
+    final (issues, after) = await _loadInFreshIsolate(saved, 75.1);
+    expect(issues, '[]', reason: 'every missile recipe is known');
+    f.step(75.1, port);
+    expect(after, jsonEncode(f.toJson()),
+        reason: 'continues as it would have here');
+  });
+
   /// The user's brief: workers move freight with forklifts, pallet jacks
   /// and cranes or on their own, and almost no plant is lights-out. So the
-  /// template unloads by hand and forklift (no dock conveyor), belts the
-  /// steady airframe flow, cranes every heavy lift, walks the hand loads,
-  /// and crews its stations.
+  /// template unloads by hand and crane into staging (no dock conveyor),
+  /// walks the hand loads, belts the steady segment and round flows,
+  /// forklifts the airframe pallets, cranes the heavy lifts, and crews its
+  /// stations.
   test('a realistic mix: people, forklifts, cranes, belts; crewed stations',
       () {
     final bp = missilefactoryTemplate();
@@ -126,7 +194,7 @@ void main() {
         reason: 'workers on foot really carry the hand loads');
     expect(l.equipmentSeconds[HandlerKind.forklift], greaterThan(0));
     expect(l.equipmentSeconds[HandlerKind.crane], greaterThan(0));
-    expect(floor.beltItems, isNotEmpty, reason: 'the airframe belts run');
+    expect(floor.beltItems, isNotEmpty, reason: 'the belts run');
 
     // Every receiving door unloads into staging: people and vehicles, not
     // a dock conveyor.
@@ -137,22 +205,26 @@ void main() {
     for (final d in bp.placements) {
       if (d.kind != EntityKind.receivingDock) continue;
       // The tile a door sets freight down on: just beyond it, the way it
-      // faces (doors here face east or west).
+      // faces.
       final f = d.footprint;
-      final front =
-          d.dir == Dir4.west ? TilePos(f.x0 - 1, f.y0) : TilePos(f.x1, f.y0);
+      final front = switch (d.dir) {
+        Dir4.east => TilePos(f.x1, f.y0),
+        Dir4.west => TilePos(f.x0 - 1, f.y0),
+        Dir4.north => TilePos(f.x0, f.y1),
+        Dir4.south => TilePos(f.x0, f.y0 - 1),
+      };
       expect(staging.any((s) => s.contains(front)), isTrue,
           reason: '${d.item} door unloads into staging');
     }
 
-    // Crewed, not lights-out: the only automated stations are the
-    // propellant cells, and they are a minority.
+    // Crewed, not lights-out: the only automated station is the
+    // propellant cell.
     final machines = [
       for (final p in bp.placements)
         if (p.kind == EntityKind.machine) p,
     ];
     final auto = machines.where((p) => p.crew == MachineMode.automated);
-    expect(auto.map((p) => p.recipe).toSet(), {MissileRecipes.motor.id});
+    expect(auto.map((p) => p.recipe).toSet(), {MissileRecipes.castMotor.id});
     expect(auto.length * 4, lessThan(machines.length));
 
     // Every station works once settled: nothing is unstaffed or broken.
@@ -164,31 +236,30 @@ void main() {
   });
 
   /// Engagement is optional but REWARDED (§3 "Reward"): the template must
-  /// leave a better design to find. Re-crewing every manual station
-  /// upstream of the test cells to one operator holds the missile rate for
-  /// a fifth fewer jobs (the labour lever); an assisted test cell — the
-  /// pacing station — ships more missiles from the same floor (the
-  /// throughput lever). (Re-crewing the test cells too outruns the walkers:
-  /// a faster line needs more hands carrying, not fewer.)
+  /// leave a better design to find. Its dock crews are overstaffed: a
+  /// designer who releases most of the walkers holds the missile rate on a
+  /// third fewer jobs (the labour lever). Crewing the three kitting
+  /// stations — the pace — as assisted ships far more from the same floor
+  /// (the throughput lever).
   test('a better design beats it: same output for fewer jobs, or more', () {
     final r0 = _measure(missilefactoryTemplate());
 
-    final recrewed = _edit(
-        missilefactoryTemplate(),
-        (p) => p.kind == EntityKind.machine &&
-                p.crew == MachineMode.manual &&
-                p.recipe != MissileRecipes.checkout.id
-            ? p.copyWith(mode: MachineMode.assisted)
-            : p);
-    final r1 = _measure(recrewed);
+    final lean = missilefactoryTemplate().copy()
+      ..roster[HandlerKind.onFoot] = 12;
+    final r1 = _measure(lean);
     expect(r1.jobs, lessThanOrEqualTo(r0.jobs * 0.85),
-        reason: '${r1.jobs} jobs against the template\'s ${r0.jobs}');
+        reason: "${r1.jobs} jobs against the template's ${r0.jobs}");
     expect(r1.outPerS['missiles']!,
         greaterThanOrEqualTo(r0.outPerS['missiles']! * 0.98));
 
+    final pacers = {
+      MissileRecipes.cutTubes.id,
+      MissileRecipes.kitElectronics.id,
+      MissileRecipes.kitMotor.id,
+    };
     final faster = _edit(
         missilefactoryTemplate(),
-        (p) => p.recipe == MissileRecipes.checkout.id
+        (p) => pacers.contains(p.recipe)
             ? p.copyWith(mode: MachineMode.assisted)
             : p);
     final r2 = _measure(faster);
