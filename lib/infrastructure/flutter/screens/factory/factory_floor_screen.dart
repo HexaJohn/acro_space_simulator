@@ -123,13 +123,15 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   /// A new sim or port means a new floor: the controller (camera, selection,
   /// rate window, heat map) and the static-layer cache (keyed only by
   /// layoutRev, which two sims can share) both belong to the old one.
+  /// New unlocks do NOT: a colony parent may build a fresh [FactoryUnlocks]
+  /// on every rebuild, so they are swapped into the live controller.
   @override
   void didUpdateWidget(FactoryFloorScreen old) {
     super.didUpdateWidget(old);
     if (identical(old.sim, widget.sim) &&
         identical(old.port, widget.port) &&
-        old.drivesSim == widget.drivesSim &&
-        identical(old.unlocks, widget.unlocks)) {
+        old.drivesSim == widget.drivesSim) {
+      controller.setUnlocks(widget.unlocks);
       return;
     }
     final oldController = controller, oldCache = _cache;

@@ -82,7 +82,8 @@ const double kRateSampleS = 1.0;
 /// effect shows within half a minute.
 const double kRateWindowS = 30.0;
 
-/// Sim seconds between heat-map decays (see [kHeatDecay]).
+/// The sim-time unit [kHeatDecay] is quoted per; decay is applied
+/// continuously as kHeatDecay^(simDt / kHeatSampleS).
 const double kHeatSampleS = 1.0;
 
 /// Tiles per side of one traffic heat-map cell (8 m: coarse enough to read
@@ -116,6 +117,18 @@ class GhostPiece {
 }
 
 /// The floor's lifetime counters at one wall-clock instant.
+/// What a [FactoryFloorEditor.check] verdict depends on besides the layout:
+/// every field of the trial placement (its id is always the sim's next).
+typedef _CheckKey = (
+  EntityKind,
+  int,
+  Dir4,
+  (int, int)?,
+  String?,
+  String?,
+  MachineMode?,
+);
+
 class _LifeSample {
   _LifeSample(this.wall, FactoryLedger l)
       : simSeconds = l.seconds,
@@ -146,10 +159,42 @@ class FactoryEditorController extends ChangeNotifier {
 
   /// What the colony has unlocked, for DISPLAY only (greyed roster rows and
   /// mode chips). The sim enforces its own unlocks and has the last word.
-  final FactoryUnlocks unlocks;
+  ///
+  /// Mutable, and swapped with [setUnlocks], because a colony parent may
+  /// build a fresh (equal) [FactoryUnlocks] on every rebuild: replacing the
+  /// whole controller for that would throw away the camera, tool, ghost,
+  /// heat map and the rate window, and the readout would never fill.
+  FactoryUnlocks unlocks;
 
-  /// The layout's build cost in ore (cheap: one walk of the placements).
-  FloorCapex get capex => capexOf(sim.blueprint);
+  /// Swaps the displayed unlocks in place (see [unlocks]).
+  void setUnlocks(FactoryUnlocks u) {
+    if (identical(u, unlocks)) return;
+    unlocks = u;
+    notifyListeners();
+  }
+
+  FloorCapex? _capex;
+  int _capexRev = -1;
+  List<int> _capexRoster = const [];
+
+  /// The layout's build cost in ore, cached per layout revision and roster.
+  /// The cost strip rebuilds on every hover and every live tick, and
+  /// [capexOf] walks every placement, so the walk runs only when the layout
+  /// or the hired fleet actually changed (the roster is compared directly:
+  /// a hire need not bump `layoutRev`).
+  FloorCapex get capex {
+    final bp = sim.blueprint;
+    final roster = [for (final k in HandlerKind.values) bp.roster[k] ?? 0];
+    final c = _capex;
+    if (c != null &&
+        _capexRev == sim.layoutRev &&
+        listEquals(roster, _capexRoster)) {
+      return c;
+    }
+    _capexRev = sim.layoutRev;
+    _capexRoster = roster;
+    return _capex = capexOf(bp);
+  }
 
   // ---- Camera ----------------------------------------------------------
 
@@ -463,11 +508,39 @@ class FactoryEditorController extends ChangeNotifier {
 
   bool get ghostValid => ghost.isNotEmpty && ghost.every((g) => g.check.ok);
 
+  /// [FactoryFloorEditor.check] verdicts for the current layout revision.
+  /// The real floor's check scans every placement, and a dragged run
+  /// re-checks every one of its pieces on each pointer move, so without
+  /// this a long belt drag in a big hall costs O(run × placements) per move.
+  /// A verdict depends only on the layout and the placement, so it is
+  /// reused until `layoutRev` changes and a drag checks only its new tiles.
+  final Map<_CheckKey, EditResult> _checks = {};
+  int _checksRev = -1;
+
+  /// [sim.check] through the per-revision memo (see [_checks]).
+  EditResult _simCheck(Placement p) {
+    final rev = sim.layoutRev;
+    if (rev != _checksRev) {
+      _checks.clear();
+      _checksRev = rev;
+    }
+    final key = (
+      p.kind,
+      p.pos.key,
+      p.dir,
+      p.span,
+      p.recipe,
+      p.item,
+      p.mode,
+    );
+    return _checks[key] ??= sim.check(p);
+  }
+
   /// The sim's dry-run verdict on [p], refused as an overlap when a tile of
   /// it is already claimed by an earlier piece of the same dragged run
   /// ([pending], tile keys) — the sim can't know about pieces not yet sent.
   EditResult _check(Placement p, {Set<int>? pending}) {
-    final r = sim.check(p);
+    final r = _simCheck(p);
     if (!r.ok || pending == null || pending.isEmpty) return r;
     for (final t in p.footprint.tiles) {
       if (pending.contains(t.key)) {
@@ -493,7 +566,7 @@ class FactoryEditorController extends ChangeNotifier {
           !(pending?.contains(t.key) ?? false)) {
         final p = Placement(id: 0, kind: k, pos: t, dir: under.dir);
         // The sim's only objection may be the belt it replaces.
-        final r = sim.check(p);
+        final r = _simCheck(p);
         final swap = !r.ok &&
             r.refusal == EditRefusal.overlaps &&
             r.otherId == under.id;
@@ -768,7 +841,6 @@ class FactoryEditorController extends ChangeNotifier {
 
   double _liveAcc = 0;
   double _sampleAcc = 0;
-  double _heatAcc = 0;
   double _wall = 0;
 
   /// The floor's sim clock at the last frame (heat accrues by sim time
@@ -800,11 +872,11 @@ class FactoryEditorController extends ChangeNotifier {
     _lastSim = now;
     if (simDt > 0) {
       _accumulateHeat(simDt);
-      _heatAcc += simDt;
-      if (_heatAcc >= kHeatSampleS) {
-        _heatAcc = 0;
-        _decayHeat();
-      }
+      // Decay by the sim time that actually passed, not once per frame: at
+      // 4x, or when the colony steps the floor in big jumps, a per-frame
+      // decay would stretch the ~30 s half-life with the warp and saturate
+      // the map.
+      _decayHeatBy(math.pow(kHeatDecay, simDt / kHeatSampleS).toDouble());
     }
     if (wallDt > 0) {
       _wall += wallDt;
@@ -844,10 +916,11 @@ class FactoryEditorController extends ChangeNotifier {
     }
   }
 
-  void _decayHeat() {
+  /// Scales the whole heat map by [k] (the decay for the sim time passed).
+  void _decayHeatBy(double k) {
     var m = 0.0;
     for (var i = 0; i < _heat.length; i++) {
-      final v = _heat[i] * kHeatDecay;
+      final v = _heat[i] * k;
       _heat[i] = v;
       if (v > m) m = v;
     }
