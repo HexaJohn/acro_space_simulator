@@ -5,6 +5,7 @@
 
 import 'dart:convert';
 
+import 'package:acro_space_simulator/domain/colony/city/economy/earth_market.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
@@ -248,6 +249,90 @@ void main() {
       expect(rep.given['tubes'], closeTo(4, 1e-9));
       expect(port.stock['steel'], 100);
       expect(f.takeLedger('s').shipped['steel'], closeTo(5, 1e-9));
+    });
+
+    test('one output refused: costs for what landed, revenue for it too',
+        () {
+      // Why: a refinery whose oxidizer sits at the storage cap while the
+      // colony takes its fuel still made the fuel. Charging by the WORST
+      // output booked no wages, power or inputs against the fuel's revenue
+      // — a free lunch on the plant's P&L. The landed fuel carries its
+      // share of the run's cost, split by fixed Earth value as the price
+      // solver splits a joint product's cost.
+      const refinery = MeasuredRates(
+        inPerS: {'ore': 2.0},
+        outPerS: {'fuel': 1.0, 'oxidizer': 3.0},
+        powerKw: 100,
+        jobs: 10,
+        seconds: 300,
+      );
+      final fuelW = 1.0 * earthPrice('fuel');
+      final fuelShare = fuelW / (fuelW + 3.0 * earthPrice('oxidizer'));
+      expect(fuelShare, inExclusiveRange(0.0, 1.0));
+
+      final f = FactoryFloors()..assign('r', _bp(), rates: refinery);
+      final port = StockColonyPort(
+        stock: {'ore': 100, 'oxidizer': 50, 'fuel': 0},
+        cap: 50,
+      );
+      final rep = f.stepAggregate(10, 'r', port);
+      expect(rep.given['fuel'], closeTo(10, 1e-9));
+      expect(rep.given.containsKey('oxidizer'), isFalse);
+      final l = f.takeLedger('r');
+      expect(l.shipped['fuel'], closeTo(10, 1e-9));
+      expect(l.shipped['oxidizer'] ?? 0, 0, reason: 'lost, never sold');
+      expect(l.energyKJ, closeTo(1000 * fuelShare, 1e-9));
+      expect(
+        l.workerSeconds[WorkRole.station],
+        closeTo(100 * fuelShare, 1e-9),
+      );
+      expect(l.received['ore'], closeTo(20 * fuelShare, 1e-9));
+
+      // Half the fuel fits: half the fuel's share.
+      port.stock['fuel'] = 45;
+      f.stepAggregate(10, 'r', port);
+      final half = f.takeLedger('r');
+      expect(half.shipped['fuel'], closeTo(5, 1e-9));
+      expect(half.energyKJ, closeTo(500 * fuelShare, 1e-9));
+
+      // Everything lands: the whole run, as before.
+      port
+        ..stock['fuel'] = 0
+        ..stock['oxidizer'] = 0;
+      f.stepAggregate(10, 'r', port);
+      final all = f.takeLedger('r');
+      expect(all.energyKJ, closeTo(1000, 1e-9));
+      expect(all.received['ore'], closeTo(20, 1e-9));
+
+      // Every output refused: the colony's stall, nothing booked.
+      port
+        ..stock['fuel'] = 50
+        ..stock['oxidizer'] = 50;
+      f.stepAggregate(10, 'r', port);
+      final none = f.takeLedger('r');
+      expect(none.energyKJ, 0);
+      expect(none.workerSeconds[WorkRole.station] ?? 0, 0);
+      expect(none.shipped, isEmpty);
+    });
+
+    test('a live floor books energy in calibrated colony units', () {
+      // Why: rates are calibrated into the colony's power units, the live
+      // sim counts raw floor-model kW; uncalibrated, a plant's power bill
+      // fell 8-100x the moment its editor opened.
+      final f = FactoryFloors()..assign('live', _bp(), rates: _mill);
+      f.open('live', (bp) => FakeSim(bp, startupS: 0), powerCalibration: 3);
+      final port = StockColonyPort(stock: {'ore': 1000});
+      // Raw fake draws kFakeKw (100); the record's rates say 100 too, so a
+      // calibration of 3 must book 3x the raw energy, live or at close.
+      f.stepAggregate(10, 'live', port);
+      expect(f.takeLedger('live').energyKJ, closeTo(3 * 1000, 1e-6));
+      f.stepAggregate(10, 'live', port);
+      f.close('live');
+      expect(f.takeLedger('live').energyKJ, closeTo(3 * 1000, 1e-6));
+      // Reopened without a calibration: raw again (the default is 1).
+      f.open('live', (bp) => FakeSim(bp, startupS: 0));
+      f.stepAggregate(10, 'live', port);
+      expect(f.takeLedger('live').energyKJ, closeTo(1000, 1e-6));
     });
 
     test('unmeasured floors move nothing; live floors step themselves', () {

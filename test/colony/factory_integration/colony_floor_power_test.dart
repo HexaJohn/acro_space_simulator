@@ -13,6 +13,7 @@ library;
 
 import 'package:acro_space_simulator/application/factory/colony_floor_measurer.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_factories.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_measure.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
@@ -67,5 +68,37 @@ void main() {
         seconds: m.seconds);
     expect(sim.applyFloorMeasure(lot, half, rev: rec.rev), isTrue);
     expect(rec.rates.powerKw, closeTo(flat / 2, flat * 0.03));
+  });
+
+  // The same plant over the same period books the same power bill with its
+  // editor open as closed. The live floor counts its stations' real kW;
+  // uncalibrated, opening the editor cut the firm's power cost 8-100x.
+  test('a live floor books the energy its aggregate would', () {
+    const type = 'electronics';
+    final settings = measureSettingsFor(type);
+    final sim = foundedColony();
+    final lot = placeOnFreeLot(sim, specOf(type));
+    final floors = sim.factoryFloors;
+    final port = InfiniteColonyPort();
+
+    final window = settings.windowS;
+    floors.takeLedger(lot);
+    floors.stepAggregate(window, lot, port);
+    final aggregate = floors.takeLedger(lot).energyKJ;
+    expect(aggregate, greaterThan(0));
+
+    expect(sim.openFloor(lot), isNotNull);
+    for (var t = 0.0; t < settings.warmupS; t += 10) {
+      floors.stepAggregate(10, lot, port);
+    }
+    floors.takeLedger(lot); // discard the start-up
+    for (var t = 0.0; t < window; t += 10) {
+      floors.stepAggregate(10, lot, port);
+    }
+    final live = floors.takeLedger(lot).energyKJ;
+    expect(live, closeTo(aggregate, aggregate * 0.05),
+        reason: 'live ${live.toStringAsFixed(0)} kJ vs '
+            'aggregate ${aggregate.toStringAsFixed(0)} kJ');
+    sim.closeFloor(lot);
   });
 }

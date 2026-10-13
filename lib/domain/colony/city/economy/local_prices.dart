@@ -322,7 +322,8 @@ LocalMarket solveLocalMarket(
     // plant that SETS a price breaks even at it, plus its capital: without
     // the freight fee and its handlers' wear a price-setting floor plant
     // ran at a loss by construction, and failed on every world whose
-    // prices aren't pinned to Earth's.
+    // prices aren't pinned to Earth's. Both apply to floor plants only,
+    // the only buildings that pay them.
     double running(CityBuildingSpec s) {
       var cost = s.jobs * wage +
           s.powerDraw * powerUnit +
@@ -337,7 +338,11 @@ LocalMarket solveLocalMarket(
       for (final v in s.outputs.values) {
         units += v;
       }
-      return cost + units * kLogisticsFeePerUnit;
+      // Only a floor plant's books pay the freight fee (`pnlFor` charges it
+      // from the floor's ledger); a farm, a water pump or a harvester pays
+      // none, so their goods, and the wage built from them, carry none.
+      final fee = _floorPlantTypes.contains(s.type) ? kLogisticsFeePerUnit : 0.0;
+      return cost + units * fee;
     }
 
     var nextPower = double.infinity;
@@ -453,6 +458,10 @@ final DeltaVTransportModel _defaultTransport = DeltaVTransportModel();
 final Map<String, double> _templateWearPerS = {
   for (final t in kFactoryPlantTypes) t: _rosterWearPerS(t),
 };
+
+/// Spec types whose running cost includes the freight fee: the plants that
+/// run a factory floor and so keep a ledger `pnlFor` charges it on.
+final Set<String> _floorPlantTypes = {...kFactoryPlantTypes};
 
 double _rosterWearPerS(String plantType) {
   final roster = factoryTemplateFor(plantType)?.roster ?? const {};

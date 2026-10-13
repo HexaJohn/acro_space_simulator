@@ -419,10 +419,18 @@ extension CityFactories on CitySim {
   /// Opens [site]'s floor at full fidelity for the editor, built with the
   /// colony's [factoryUnlocks]. The colony keeps stepping it (open the
   /// screen with `drivesSim: false`). Null when the site has no floor.
-  FactorySim? openFloor(String site) => factoryFloors.open(
-    site,
-    (bp) => FactoryFloor.fromBlueprint(bp, unlocks: factoryUnlocks),
-  );
+  ///
+  /// The live floor books its energy in the colony's units, calibrated like
+  /// its measured rates ([floorPowerCalibration]), so the plant's P&L reads
+  /// the same with the editor open as closed.
+  FactorySim? openFloor(String site) {
+    final spec = siteSpec(site);
+    return factoryFloors.open(
+      site,
+      (bp) => FactoryFloor.fromBlueprint(bp, unlocks: factoryUnlocks),
+      powerCalibration: spec == null ? 1 : floorPowerCalibration(spec),
+    );
+  }
 
   /// Closes [site]'s editor. An edited layout becomes designed and dirty
   /// (the runner re-measures it); its change in build cost is added to

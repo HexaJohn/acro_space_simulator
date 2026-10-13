@@ -32,6 +32,7 @@ library;
 
 import 'dart:collection';
 
+import '../economy/earth_market.dart';
 import '../economy/economy_contracts.dart';
 import 'factory_colony_port.dart';
 import 'factory_ledger.dart';
@@ -79,6 +80,19 @@ class FloorRecord {
 
   /// [live]'s `layoutRev` when it was opened, to tell an edit from a look.
   int _openLayoutRev = 0;
+
+  /// Colony kW per floor-model kW for [live] (given to
+  /// [FactoryFloors.open]): a live sim's ledger counts its stations' real
+  /// kilowatts, while [rates] (and so every aggregate step) are in the
+  /// colony's calibrated units. Runtime only, like [live].
+  double _livePowerCalibration = 1;
+
+  /// [live]'s counters since its last take, with energy in colony units.
+  FactoryLedger _takeLiveLedger(FactorySim sim) {
+    final l = sim.takeLedger();
+    l.energyKJ *= _livePowerCalibration;
+    return l;
+  }
 
   /// Aggregate-mode counters since the last [FactoryFloors.takeLedger].
   final FactoryLedger _ledger = FactoryLedger();
@@ -239,7 +253,17 @@ class FactoryFloors {
 
   /// Starts (or returns) the full-fidelity sim for [siteId]. Null when the
   /// site has no floor.
-  FactorySim? open(String siteId, FloorSimBuilder build) {
+  ///
+  /// [powerCalibration] converts the sim's floor-model kilowatts into the
+  /// colony's units, the same factor its measured rates were scaled by
+  /// (`floorPowerCalibration`), so the plant's power bill doesn't jump when
+  /// the editor opens. It applies to the energy the live sim books, not to
+  /// the sim itself (whose own counters stay raw for measuring).
+  FactorySim? open(
+    String siteId,
+    FloorSimBuilder build, {
+    double powerCalibration = 1,
+  }) {
     final rec = _sites[siteId];
     if (rec == null) return null;
     final have = rec.live;
@@ -249,6 +273,7 @@ class FactoryFloors {
     final sim = build(rec.blueprint.copy());
     rec.live = sim;
     rec._openLayoutRev = sim.layoutRev;
+    rec._livePowerCalibration = powerCalibration;
     return sim;
   }
 
@@ -261,7 +286,7 @@ class FactoryFloors {
     final sim = rec.live;
     if (sim == null) return rec;
     // Counters run up while open still belong to the plant's books.
-    rec._ledger.absorb(sim.takeLedger());
+    rec._ledger.absorb(rec._takeLiveLedger(sim));
     if (sim.layoutRev != rec._openLayoutRev) {
       rec.blueprint = sim.blueprint.copy();
       rec.designed = true;
@@ -319,7 +344,9 @@ class FactoryFloors {
   /// it); the scarcest grant sets the share of output made, inputs taken
   /// beyond that share go back to stock, and outputs are offered at
   /// `rate × dt × share`. Storage refusals are lost, as an over-full
-  /// colony's flat-rate plants lose theirs.
+  /// colony's flat-rate plants lose theirs. The ledger books what landed as
+  /// shipped, and charges the run's costs (energy, work, inputs) at the
+  /// Earth-value share of its output that landed (see the body).
   FloorStepReport stepAggregate(
     double dt,
     String siteId,
@@ -363,33 +390,56 @@ class FactoryFloors {
       final extra = got[c]! - keep;
       if (extra > 1e-12) tally.refund(c, extra);
     }
-    // What the colony accepted of what the plant offered: a full warehouse
-    // (the storage cap) or the reward cap refuses some or all of it.
-    var accepted = 1.0;
+    // How much of the production run the colony accepted, by VALUE: what
+    // landed over what was offered, each output weighted by its fixed Earth
+    // price (`earthPrice`). A full warehouse (the storage cap) or the
+    // reward cap refuses some or all of an output.
+    var offeredValue = 0.0, landedValue = 0.0;
+    var offeredUnits = 0.0, landedUnits = 0.0;
     if (share > 0) {
       for (final c in _sortedKeys(r.outPerS)) {
         final u = r.outPerS[c]! * dt * share;
         if (!(u > 0)) continue;
-        final a = tally.give(c, u) / u;
-        if (a < accepted) accepted = a > 0 ? a : 0;
+        final landed = tally.give(c, u);
+        final w = earthPrice(c);
+        offeredUnits += u;
+        landedUnits += landed > 0 ? landed : 0;
+        if (w > 0) {
+          offeredValue += u * w;
+          landedValue += (landed > 0 ? landed : 0) * w;
+        }
       }
     }
+    // A plant that offers nothing (a sink, or a stopped step) is charged
+    // whatever it ran; outputs without an Earth price weigh by units.
+    final run = offeredValue > 0
+        ? _unit(landedValue / offeredValue)
+        : (offeredUnits > 0 ? _unit(landedUnits / offeredUnits) : 1.0);
 
-    // The books charge only the work the colony let the plant do. Staff
-    // with nothing to do (inputs short: [share]) are stood down, and a
-    // plant whose goods the colony refuses ([accepted]) has stalled on the
-    // colony's account, not its own: charged full wages against output
-    // nobody took, a template plant in a colony with no consumer for its
-    // steel would read as a failing firm and be laid off to nothing. The
-    // inputs a refused step burned are the colony's loss too.
-    final worked = share * accepted;
+    // The books charge the production whose goods LANDED, and sell only
+    // what landed. Staff with nothing to do (inputs short: [share]) are
+    // stood down. A joint run whose outputs the colony takes in part is
+    // charged the landed outputs' share of its cost, split by the same
+    // fixed Earth-value weights `local_prices.dart` splits a joint
+    // product's cost by: a refinery whose oxidizer sits at the storage cap
+    // while the colony takes its fuel pays the fuel's share of wages, power
+    // and inputs and sells the fuel, which is exactly what the fuel's price
+    // was built from. (Charging by the worst-accepted output booked no costs
+    // at all against the fuel's revenue; charging the whole run against
+    // the fuel alone made every mill whose steel piled up a failing firm.)
+    // The refused share is the colony's stall, not the firm's loss: charged
+    // full wages against output nobody took, a template plant in a colony
+    // with no consumer for its steel would read as a failing firm and be
+    // laid off to nothing. The inputs a refused share burned are the
+    // colony's loss too.
+    final worked = share * run;
     final l = rec._ledger
       ..seconds += dt
       ..energyKJ += r.powerKw * dt * worked;
     // Aggregate mode knows the layout's job demand, not its role split.
     if (r.jobs > 0) l.addWork(WorkRole.station, r.jobs * dt * worked);
     for (final e in tally.taken.entries) {
-      l.addReceived(e.key, e.value * accepted);
+      l.addReceived(e.key, e.value * run);
     }
     tally.given.forEach(l.addShipped);
 
@@ -415,7 +465,7 @@ class FactoryFloors {
     out.absorb(rec._ledger);
     rec._ledger.reset();
     final sim = rec.live;
-    if (sim != null) out.absorb(sim.takeLedger());
+    if (sim != null) out.absorb(rec._takeLiveLedger(sim));
     return out;
   }
 

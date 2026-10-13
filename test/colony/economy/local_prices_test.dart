@@ -13,6 +13,8 @@ import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.da
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/local_prices.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/plant_pnl.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
 import 'package:acro_space_simulator/domain/planetary/atmospheric_composition.dart';
 import 'package:acro_space_simulator/domain/planetary/planet_surface.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
@@ -244,19 +246,16 @@ void main() {
     final m = solveLocalMarket(thin);
     expect(m.sourceOf[Commodity.oxygen], 'o2harvester');
     // Exactly the nameplate: its running cost over its full 2.0/s — wages,
-    // power, capital and the freight fee on every unit through its docks,
-    // as its books charge them.
+    // power and capital. NO freight fee: only a factory-floor plant's books
+    // pay one (`pnlFor`), and a fee no building pays would inflate oxygen
+    // and, through the basket, the wage itself.
     final harvester = kUtilCatalog.firstWhere((s) => s.type == 'o2harvester');
     final w = m.book.wagePerWorkerS;
     final power = m.book.powerPerKJ * kKjPerPowerUnitS;
     final capex = harvester.buildCost * m.book.price(Commodity.ore) /
         (kCapitalRecoveryYears * kGameYearSec);
-    final freight = [...harvester.inputs.values, ...harvester.outputs.values]
-            .fold(0.0, (a, b) => a + b) *
-        kLogisticsFeePerUnit;
-    final unit =
-        (harvester.jobs * w + harvester.powerDraw * power + capex + freight) /
-            harvester.outputs[Commodity.oxygen]!;
+    final unit = (harvester.jobs * w + harvester.powerDraw * power + capex) /
+        harvester.outputs[Commodity.oxygen]!;
     expect(m.localCost[Commodity.oxygen], closeTo(unit, unit * 1e-6));
 
     // Earth-thick oxygen air the aggregate says is NOT harvestable stays
@@ -267,6 +266,33 @@ void main() {
         airDensity: 1, o2Harvestable: false, population: 100);
     expect(solveLocalMarket(flagged).sourceOf[Commodity.oxygen],
         isNot('o2harvester'));
+  });
+
+  /// The freight fee and handler wear are what a FLOOR plant's books pay
+  /// (`pnlFor`); a farm, a pump or a harvester has no floor ledger and pays
+  /// neither, so neither may sit in the price it sets.
+  test('only a factory-floor plant carries freight and wear', () {
+    CityBuildingSpec maker(String type) => CityBuildingSpec(
+        type: type, label: type, colorArgb: 0, group: 'industry',
+        buildCost: 0, outputs: const {Commodity.steel: 2});
+    final facts = MarketFacts(
+        bodyId: 'mars', economy: EconomyKind.capitalism,
+        atmosphere: const {'CO2': 0.95}, population: 500);
+    double cost(String type) =>
+        solveLocalMarket(facts, recipes: [maker(type)])
+            .localCost[Commodity.steel]!;
+
+    // Free inputs, no labour, power or capital: nothing to pay.
+    expect(cost('widgetworks'), 0);
+    // The same recipe as a floor plant pays the fee on its 2 units/s and
+    // its template roster's wear.
+    final roster = factoryTemplateFor('rationsfactory')!.roster;
+    var wear = 0.0;
+    for (final k in HandlerKind.values) {
+      wear += (roster[k] ?? 0) * equipmentWearPerS(k);
+    }
+    final unit = (2 * kLogisticsFeePerUnit + wear) / 2;
+    expect(cost('rationsfactory'), closeTo(unit, unit * 1e-9));
   });
 
   /// Power mirrors `CitySim.powerFactor`: only the 'solar' farm scales
