@@ -372,6 +372,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
   String? _floorSite;
   CitySim? _floorCity;
 
+  /// The misfit-blueprint refusal the toolbar was last given by the hover,
+  /// so the hover can take back its OWN message once the pick fits again
+  /// (and leave any other refusal alone).
+  String? _shownMisfit;
+
   /// Re-measures every colony's edited floors off the frame, pumped once a
   /// frame (cheap) and disposed with the view.
   final ColonyFloorMeasurer _floorMeasurer = ColonyFloorMeasurer();
@@ -2940,7 +2945,15 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
       // body, so this flight stack covered the city toolbar and HUD however
       // topmost they sat in the body. The city's few controls live in the
       // body instead, under both (see [_cityViewControls]).
-      floatingActionButton: widget.cityMode ? null : SafeArea(
+      //
+      // Nor while a factory floor is open over the world: the FABs would
+      // paint (and take clicks) over the editor's panels, and several of
+      // them pull the keyboard back to the world's key node, which is not
+      // under the editor's key-swallowing Focus — R, Del and WASD would
+      // then act on the world behind the editor.
+      floatingActionButton: widget.cityMode || _floorSite != null
+          ? null
+          : SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -3643,6 +3656,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                     child: CityEditOverlay(
                       controller: _cityEdit,
                       city: _editingCity!,
+                      // Out of city mode there is no HUD: the editor shows
+                      // a failed firm's offer and the plant notices itself.
+                      hostsPlantEconomy: !widget.cityMode,
                       // In the city game there is nothing under the editor
                       // to go back to: closing it left a bare planet with
                       // no toolbar, no HUD and so no way out. Leaving is

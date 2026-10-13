@@ -17,12 +17,13 @@ import 'package:acro_space_simulator/domain/universe/real_solar_system.dart';
 List<CelestialBody> fixtureBodies() =>
     RealSolarSystem.build().all.where((b) => !b.isStar).toList();
 
-/// A relaxed Earth starter colony, with the random disasters off
-/// (hostility 0) and its people pinned, so two copies run alike.
-CitySim foundedColony() {
+/// A relaxed starter colony on [bodyId] (Earth by default), with the
+/// random disasters off (hostility 0) and its people pinned, so two copies
+/// run alike.
+CitySim foundedColony({String bodyId = 'earth'}) {
   final sim = CityStarterKit.found(
     bodies: fixtureBodies(),
-    config: const CityConfig(bodyId: 'earth'),
+    config: CityConfig(bodyId: bodyId),
     start: CityStart.relaxed,
   );
   sim.hostility = 0;

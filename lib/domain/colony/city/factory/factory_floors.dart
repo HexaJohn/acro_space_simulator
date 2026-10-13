@@ -85,6 +85,10 @@ class FloorRecord {
 
   bool get measured => rates.seconds > 0;
 
+  /// Takes over [other]'s unbooked aggregate counters (a record re-created
+  /// on load keeps the part of the economy day it had already run).
+  void absorbLedgerOf(FloorRecord other) => _ledger.absorb(other._ledger);
+
   /// The layout to save or measure: the live one while open.
   FloorBlueprint get currentBlueprint {
     final l = live;
@@ -103,13 +107,19 @@ class FloorRecord {
       if (designed || edited) 'designed': true,
       'owner': ?owner?.toJson(),
       if (dirty || edited) 'dirty': true,
+      // The economy day's counters so far: the day clock is saved
+      // (`ColonyEconomy`), so without them a save 100 s into a 120 s day
+      // would close on 20 s of books spread over the whole day, and most
+      // of that day's tax and deficit would be lost on every load.
+      if (_ledger.seconds > 0) 'led': _ledger.toJson(),
     };
   }
 
   static FloorRecord fromJson(Map<String, Object?> j) {
     final r = j['rates'] as Map?;
     final o = j['owner'] as Map?;
-    return FloorRecord(
+    final led = j['led'] as Map?;
+    final rec = FloorRecord(
       blueprint: FloorBlueprint.fromJson(
         (j['bp'] as Map).cast<String, Object?>(),
       ),
@@ -120,6 +130,10 @@ class FloorRecord {
       owner: o == null ? null : Ownership.fromJson(o.cast<String, Object?>()),
       dirty: j['dirty'] == true,
     );
+    if (led != null) {
+      rec._ledger.absorb(FactoryLedger.fromJson(led.cast<String, Object?>()));
+    }
+    return rec;
   }
 }
 
@@ -349,21 +363,34 @@ class FactoryFloors {
       final extra = got[c]! - keep;
       if (extra > 1e-12) tally.refund(c, extra);
     }
+    // What the colony accepted of what the plant offered: a full warehouse
+    // (the storage cap) or the reward cap refuses some or all of it.
+    var accepted = 1.0;
     if (share > 0) {
       for (final c in _sortedKeys(r.outPerS)) {
         final u = r.outPerS[c]! * dt * share;
-        if (u > 0) tally.give(c, u);
+        if (!(u > 0)) continue;
+        final a = tally.give(c, u) / u;
+        if (a < accepted) accepted = a > 0 ? a : 0;
       }
     }
 
+    // The books charge only the work the colony let the plant do. Staff
+    // with nothing to do (inputs short: [share]) are stood down, and a
+    // plant whose goods the colony refuses ([accepted]) has stalled on the
+    // colony's account, not its own: charged full wages against output
+    // nobody took, a template plant in a colony with no consumer for its
+    // steel would read as a failing firm and be laid off to nothing. The
+    // inputs a refused step burned are the colony's loss too.
+    final worked = share * accepted;
     final l = rec._ledger
       ..seconds += dt
-      ..energyKJ += r.powerKw * dt * share;
+      ..energyKJ += r.powerKw * dt * worked;
     // Aggregate mode knows the layout's job demand, not its role split.
-    if (r.jobs > 0) {
-      l.addWork(WorkRole.station, r.jobs * dt * _unit(port.staffingShare));
+    if (r.jobs > 0) l.addWork(WorkRole.station, r.jobs * dt * worked);
+    for (final e in tally.taken.entries) {
+      l.addReceived(e.key, e.value * accepted);
     }
-    tally.taken.forEach(l.addReceived);
     tally.given.forEach(l.addShipped);
 
     return FloorStepReport(

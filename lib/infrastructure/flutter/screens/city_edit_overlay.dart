@@ -465,10 +465,17 @@ class CityEditOverlay extends StatefulWidget {
     required this.controller,
     required this.city,
     required this.onClose,
+    this.hostsPlantEconomy = false,
   });
 
   final CityEditController controller;
   final CitySim city;
+
+  /// Show a failed firm's offer ([FirmOfferCard]) and toast the plant
+  /// economy's notices ([toastEconomyNotices]) here. True in the flight
+  /// view, where no HUD does; false under the city game's HUD, which shows
+  /// both itself (twice would drain the notices from under each other).
+  final bool hostsPlantEconomy;
 
   /// Put the editor away; null where there is nothing to put it away TO
   /// (the city game, whose whole view is the editor), and then the toolbar
@@ -504,6 +511,12 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
     _maxWidth = math.max(240.0, MediaQuery.sizeOf(context).width - 24);
     controller.gateCity = city;
     controller.askFloorLoss = (site) => confirmFloorLoss(context, city, site);
+    if (widget.hostsPlantEconomy) {
+      // Draining mutates the sim: after the frame, never during build.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) toastEconomyNotices(context, city);
+      });
+    }
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) => Align(
@@ -519,6 +532,15 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // A plant whose firm failed waits on the player (§7 Q11): the
+              // flight view has no HUD to show it, so the toolbar does.
+              if (widget.hostsPlantEconomy &&
+                  city.colonyEconomy.offers.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: FirmOfferCard(
+                      city: city, onChanged: () => setState(() {})),
+                ),
               // What was refused — or, on a colony that takes no orders,
               // why every tool is greyed, before anything is tried.
               if ((controller.blocked ?? city.playerControl.reason)

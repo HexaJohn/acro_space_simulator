@@ -8,6 +8,8 @@ import 'dart:isolate';
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_measure.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_recipe.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -30,6 +32,26 @@ void main() {
       final spec = specOf(type);
       expect(bp.hall.widthM, lessThanOrEqualTo(spec.siteWidthM), reason: type);
       expect(bp.hall.depthM, lessThanOrEqualTo(spec.siteDepthM), reason: type);
+    }
+  });
+
+  /// The colony measures a re-laid floor (a design, a firm's layoff) with
+  /// measureSettingsFor: under those settings every template must read its
+  /// spec within 5%, or a re-measured template would burn full input for
+  /// short output (the Refinery read 22% under with the standard window).
+  test('measureSettingsFor reads every template within 5% of its spec', () {
+    ensureFactoryCatalog();
+    for (final type in kFactoryPlantTypes) {
+      final spec = specOf(type);
+      final r = measureBlueprint(
+          factoryTemplateFor(type)!, (bp) => FactoryFloor.fromBlueprint(bp),
+          settings: measureSettingsFor(type));
+      spec.outputs.forEach((c, v) {
+        expect(r.outPerS[c] ?? 0, closeTo(v, v * 0.05), reason: '$type $c');
+      });
+      spec.inputs.forEach((c, v) {
+        expect(r.inPerS[c] ?? 0, closeTo(v, v * 0.05), reason: '$type in $c');
+      });
     }
   });
 

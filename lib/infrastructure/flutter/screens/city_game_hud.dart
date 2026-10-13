@@ -137,6 +137,9 @@ class _CityGameHudState extends State<CityGameHud> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _drainToasts();
       _drainNotices();
+      // A floor edit undone for want of ore or funds, a design lost to a
+      // road edit: said once, as a toast.
+      if (mounted) toastEconomyNotices(context, city);
     });
 
     final narrow = MediaQuery.sizeOf(context).width < 900;

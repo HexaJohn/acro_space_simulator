@@ -67,6 +67,51 @@ const double kUnlockPalletJackPop = 120;
 const double kUnlockForkliftPop = 300;
 const double kUnlockAutomationPop = 600;
 
+/// Each template's power draw as the floor model measures it, kW, under
+/// [measureSettingsFor] (re-measured and pinned by
+/// `colony_floor_power_test.dart`).
+///
+/// The floor's stations draw REAL per-machine kilowatts (a smelter, a press,
+/// a pick-and-place line), while a spec's `powerDraw` is the colony's own
+/// power unit, sized for the city builder's grid and an order of magnitude
+/// or two above what the machines on the floor add up to. Stored raw, any
+/// measured floor (a belt moved, or a firm's layoff re-measuring a template
+/// the player never touched) would cut its plant's colony draw 8-100x:
+/// far outside the "a designed floor may beat its template" lever, and
+/// unbounded by the 1.5x cap, which only bounds output value.
+const Map<String, double> kTemplateMeasuredKw = {
+  'steelmill': 3621.178,
+  'refinery': 4063.818,
+  'electronics': 739.688,
+  'rocketfactory': 470.933,
+  'gunfactory': 394.452,
+  'missilefactory': 734.496,
+  'rationsfactory': 117.2,
+};
+
+/// Colony kW per floor-model kW for [spec]'s plant: the factor that makes its
+/// template measure exactly its spec draw, so a design that halves its
+/// stations' kilowatts halves the plant's draw on the grid. 1 for a plant
+/// without a pinned template.
+double floorPowerCalibration(CityBuildingSpec spec) {
+  final kw = kTemplateMeasuredKw[spec.type];
+  if (kw == null || !(kw > 0)) return 1;
+  return spec.powerDraw * kKjPerPowerUnitS / kw;
+}
+
+/// [rates] with the power scaled into [spec]'s colony units
+/// ([floorPowerCalibration]).
+MeasuredRates calibratedFloorRates(
+  MeasuredRates rates,
+  CityBuildingSpec spec,
+) => MeasuredRates(
+  inPerS: rates.inPerS,
+  outPerS: rates.outPerS,
+  powerKw: rates.powerKw * floorPowerCalibration(spec),
+  jobs: rates.jobs,
+  seconds: rates.seconds,
+);
+
 /// The spec's flat recipe as steady-state floor rates: its inputs and
 /// outputs per second, its jobs, and its power draw in kW (one power unit is
 /// one MW: `kKjPerPowerUnitS` kJ per unit-second).
@@ -201,6 +246,13 @@ extension CityFactories on CitySim {
   /// record gets its template (an old save, a plant placed by a path that
   /// predates floors), and a record whose site holds no floor plant goes.
   /// Run after load, so loading an old colony changes nothing.
+  ///
+  /// It also refuses to let a record run the wrong plant: one drawn for
+  /// another plant type (an id that came to name a different building) is
+  /// dropped and replaced by this plant's template. And a TEMPLATE record
+  /// (never designed, never cut by a layoff) is re-seeded from today's
+  /// template and spec, so a save made before a balance change runs the
+  /// template at today's flat rate, as the user's rule has it.
   void reconcileFactoryFloors() {
     final live = <String, CityBuildingSpec>{};
     for (final e in utils.entries) {
@@ -210,13 +262,36 @@ extension CityFactories on CitySim {
       if (isFloorPlant(e.value)) live[e.key] = e.value;
     }
     for (final id in factoryFloors.siteIds) {
-      if (!live.containsKey(id)) floorSiteGone(id);
+      final spec = live[id];
+      final rec = factoryFloors[id]!;
+      final drawnFor = rec.blueprint.plantType;
+      if (spec == null || (drawnFor != null && drawnFor != spec.type)) {
+        floorSiteGone(id);
+      }
     }
     for (final id in (live.keys.toList()..sort())) {
-      if (factoryFloors[id] != null) continue;
-      final template = factoryTemplateFor(live[id]!.type);
+      final spec = live[id]!;
+      final rec = factoryFloors[id];
+      if (rec != null) {
+        final laidOff = colonyEconomy.laidOff[id];
+        if (!rec.designed &&
+            rec.live == null &&
+            (laidOff == null || laidOff.isEmpty)) {
+          final template = factoryTemplateFor(spec.type);
+          if (template != null) {
+            // In place: the record keeps its owner and its day's books.
+            rec
+              ..blueprint = template
+              ..rates = flatRatesOf(spec)
+              ..dirty = false
+              ..rev += 1;
+          }
+        }
+        continue;
+      }
+      final template = factoryTemplateFor(spec.type);
       if (template != null) {
-        factoryFloors.assign(id, template, rates: flatRatesOf(live[id]!));
+        factoryFloors.assign(id, template, rates: flatRatesOf(spec));
       }
     }
     // Every floor has an owner, and no books outlive their plant.
@@ -239,6 +314,73 @@ extension CityFactories on CitySim {
     final bank = floorValueBank.remove(oldId);
     if (bank != null) floorValueBank[newId] = bank;
     colonyEconomy.renameSite(oldId, newId);
+  }
+
+  /// Every site id any floor-side state is kept under: the records, owed
+  /// ore, reward banks and the economy's books, throttles, stashes, layoffs
+  /// and offers. Sorted.
+  List<String> get floorStateSiteIds {
+    final e = colonyEconomy;
+    return {
+      ...factoryFloors.siteIds,
+      ...pendingFloorInvestment.keys,
+      ...floorValueBank.keys,
+      ...e.books.keys,
+      ...e.throttle.keys,
+      ...e.stashed.keys,
+      ...e.laidOff.keys,
+      ...e.lastPnl.keys,
+      for (final o in e.offers) o.site,
+    }.toList()..sort();
+  }
+
+  /// Carries every GRID floor across a renumbering of the grid's cells
+  /// (`expandLand`): a grid site id embeds its cell, so every `cell-N` id
+  /// changes. [rekeyCell] maps an old cell to its new one; it must be
+  /// injective and never decrease a cell, which growing the grid by rows
+  /// guarantees.
+  ///
+  /// Moved in DESCENDING cell order: a move replaces whatever is at its
+  /// target ([FactoryFloors.rename]), and with new >= old the only ids a
+  /// target could collide with are ones larger than its source, which have
+  /// already moved on. Ascending, a plant moving onto another's old id
+  /// would overwrite a record that had not moved yet, and the second plant
+  /// would come to run the first one's blueprint.
+  void rekeyGridFloors(int Function(int cell) rekeyCell) {
+    final moves = <(int, String)>[
+      for (final id in floorStateSiteIds)
+        if (CitySim.cellOfSiteId(id) case final c?) (c, id),
+    ]..sort((a, b) => b.$1.compareTo(a.$1));
+    for (final (cell, id) in moves) {
+      floorSiteRenamed(id, CitySim.siteIdOfCell(rekeyCell(cell)));
+    }
+  }
+
+  /// Ore a demolished plant at [site] ([spec] stood there) was worth, before
+  /// the bulldozer's refund fraction: what was really paid for it. A
+  /// designed floor cost its capex ([buildCostOf]), less any edit still
+  /// unpaid; a template, or a plant without a floor, the spec's own build
+  /// cost. Refunding the nameplate for a cheap design would print ore on
+  /// every place-and-bulldoze.
+  double floorBuildValueOf(String site, CityBuildingSpec spec) {
+    final rec = factoryFloors[site];
+    if (rec == null || !rec.designed) return spec.buildCost;
+    final owed = pendingFloorInvestment[site] ?? 0;
+    final paid = capexOf(rec.currentBlueprint).total - (owed > 0 ? owed : 0);
+    return paid > 0 ? paid : 0;
+  }
+
+  /// A placed plant's lot lost by something other than the player's
+  /// demolish (a road edit's re-plat left it no successor): drops the floor
+  /// like [floorSiteGone], and a DESIGNED one says so, since nothing asked
+  /// the player first.
+  void floorSiteLost(String site) {
+    final rec = factoryFloors[site];
+    if (rec != null && rec.designed) {
+      pushEconomyNotice('The road edit took the lot under the '
+          '${rec.blueprint.name} floor: the plant and its design are gone.');
+    }
+    floorSiteGone(site);
   }
 
   /// Drops [site]'s floor and its colony-side state (the plant is gone).
@@ -329,9 +471,17 @@ extension CityFactories on CitySim {
   /// A stored result for an edited floor settles the edit's cost
   /// ([CityEconomy.settleFloorInvestment]): only now is it known what the
   /// edit saves, which is what a private firm decides on.
+  ///
+  /// [rates] come from the floor model; their power is converted into the
+  /// colony's units first ([calibratedFloorRates]).
   bool applyFloorMeasure(String site, MeasuredRates rates, {int? rev}) {
     final old = factoryFloors[site]?.rates;
-    if (!factoryFloors.applyMeasured(site, rates, rev: rev)) return false;
+    final spec = siteSpec(site);
+    final colonyRates =
+        spec == null ? rates : calibratedFloorRates(rates, spec);
+    if (!factoryFloors.applyMeasured(site, colonyRates, rev: rev)) {
+      return false;
+    }
     if (old != null) settleFloorInvestment(site, old);
     return true;
   }

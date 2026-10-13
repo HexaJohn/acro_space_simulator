@@ -30,7 +30,48 @@ class CountingRunner extends SyncFloorMeasureRunner {
   }
 }
 
+/// A runner whose every measurement fails.
+class FailingRunner extends SyncFloorMeasureRunner {
+  FailingRunner() : super(buildFloorForMeasure);
+  int jobs = 0;
+
+  @override
+  Future<MeasuredRates> measure(FloorBlueprint bp,
+      {MeasureSettings settings = MeasureSettings.standard, String? key}) {
+    jobs++;
+    return Future.error(StateError('broken blueprint'));
+  }
+}
+
 void main() {
+  // A failed layout isn't re-sent every frame, but the memory of it only
+  // lasts while that layout stands: edited, it is forgotten (and the new
+  // layout tried), so the measurer never piles up failures — nor, keyed
+  // per colony, keeps a dropped colony alive.
+  test('a failure is not retried, and is forgotten once the layout changes',
+      () async {
+    final city = foundedColony();
+    final lot = placeOnFreeLot(city, specOf('steelmill'));
+    final rec = city.factoryFloors[lot]!
+      ..designed = true
+      ..dirty = true;
+    final runner = FailingRunner();
+    final m = ColonyFloorMeasurer(runner: runner);
+    addTearDown(m.dispose);
+    m.pump(city);
+    await Future<void>.delayed(Duration.zero);
+    expect(runner.jobs, 1);
+    expect(m.failedCount(city), 1);
+    m.pump(city);
+    await Future<void>.delayed(Duration.zero);
+    expect(runner.jobs, 1, reason: 'the same broken layout is not re-sent');
+    rec.rev++; // edited
+    m.pump(city);
+    await Future<void>.delayed(Duration.zero);
+    expect(runner.jobs, 2, reason: 'the new layout is tried');
+    expect(m.failedCount(city), 1, reason: 'only the newest failure is kept');
+  });
+
   // An edited floor is queued, measured and applied: its rates become the
   // measured ones (not the seeded nominal second) and it is clean.
   test('a dirty floor is measured and applied', () async {

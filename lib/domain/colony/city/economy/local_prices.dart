@@ -68,10 +68,13 @@ import '../../../universe/real_solar_system.dart';
 import '../../../universe/star_system.dart';
 import '../city_building_spec.dart';
 import '../commodity.dart';
+import '../factory/factory_handling.dart';
+import '../factory/factory_templates.dart';
 import 'commodity_mass.dart';
 import 'earth_market.dart';
 import 'economy_clock.dart';
 import 'economy_contracts.dart';
+import 'plant_pnl.dart';
 import 'transport_cost.dart';
 
 // ---- life support and the wage -------------------------------------------
@@ -315,15 +318,26 @@ LocalMarket solveLocalMarket(
   while (iterations < maxIterations) {
     iterations++;
     final p = prices;
+    // Everything the plant's own books charge (`plant_pnl.dart`), so the
+    // plant that SETS a price breaks even at it, plus its capital: without
+    // the freight fee and its handlers' wear a price-setting floor plant
+    // ran at a loss by construction, and failed on every world whose
+    // prices aren't pinned to Earth's.
     double running(CityBuildingSpec s) {
       var cost = s.jobs * wage +
           s.powerDraw * powerUnit +
           s.computeDraw * computeUnit +
-          s.buildCost * (p[Commodity.ore] ?? 0) * capexPerS;
+          s.buildCost * (p[Commodity.ore] ?? 0) * capexPerS +
+          (_templateWearPerS[s.type] ?? 0);
+      var units = 0.0;
       for (final e in s.inputs.entries) {
         cost += e.value * (p[e.key] ?? 0);
+        units += e.value;
       }
-      return cost;
+      for (final v in s.outputs.values) {
+        units += v;
+      }
+      return cost + units * kLogisticsFeePerUnit;
     }
 
     var nextPower = double.infinity;
@@ -432,6 +446,22 @@ LocalMarket solveLocalMarket(
 // ---- helpers -----------------------------------------------------------------
 
 final DeltaVTransportModel _defaultTransport = DeltaVTransportModel();
+
+/// Equipment wear of each floor plant's template roster, credits per colony
+/// second (what [running] adds for a plant that runs a factory floor).
+/// Built once, on first use.
+final Map<String, double> _templateWearPerS = {
+  for (final t in kFactoryPlantTypes) t: _rosterWearPerS(t),
+};
+
+double _rosterWearPerS(String plantType) {
+  final roster = factoryTemplateFor(plantType)?.roster ?? const {};
+  var wear = 0.0;
+  for (final k in HandlerKind.values) {
+    wear += (roster[k] ?? 0) * equipmentWearPerS(k);
+  }
+  return wear;
+}
 final StarSystem _realSystem = RealSolarSystem.build();
 
 final List<CityBuildingSpec> _defaultRecipes = [
@@ -520,12 +550,23 @@ String _computeSource(List<CityBuildingSpec> specs) =>
     specs.firstWhere((s) => s.computeOutput > 0).type;
 
 /// Price multiplier from days of cover.
+///
+/// A good the colony isn't drawing down is a GLUT only when it is also
+/// piling up: more than [kTargetCoverDays] of its own supply in stock.
+/// Most of what a plant makes (steel, tubes, fuel) has no flow consumer in
+/// the colony at all, so supply always beats demand; reading that as a glut
+/// priced every such good at 70% of its cost with nothing in stock, and the
+/// plants that make them failed by construction off Earth.
 double _scarcity(MarketFacts f, String c) {
   final demand = f.demandPerS[c] ?? 0;
   final supply = f.supplyPerS[c] ?? 0;
   if (demand <= 0 && supply <= 0) return 1; // no market activity, no signal
   final drain = demand - supply;
-  if (drain <= kScarcityEps) return kScarcityMin; // a glut
+  if (drain <= kScarcityEps) {
+    if (!(supply > 0)) return 1;
+    final heldDays = (f.stock[c] ?? 0) / (supply * kColonyDaySec);
+    return heldDays > kTargetCoverDays ? kScarcityMin : 1; // a glut, or not
+  }
   final coverDays = (f.stock[c] ?? 0) / drain / kColonyDaySec;
   if (coverDays <= 0) return kScarcityMax;
   return math

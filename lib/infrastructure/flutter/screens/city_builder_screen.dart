@@ -272,6 +272,9 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
     return tears ? site : null;
   }
 
+  /// Shows [site]'s floor over the page: the site menu's "Factory floor".
+  void openFactoryFloor(String site) => setState(() => _floorSite = site);
+
   /// A drag or a fill never asks: it skips a designed floor and says how to
   /// demolish it on purpose.
   static const String _floorDragSkip =
@@ -760,23 +763,43 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   @override
   Widget build(BuildContext context) {
     final floor = _floorSite;
-    final page = _page(context);
-    if (floor == null) return page;
-    // The open floor over the whole screen, app bar included; the screen
-    // (and its ticker, and so the colony) keeps running under it.
+    // Plant notices (an edit undone, a design lost) as toasts, drained
+    // after the frame: draining mutates the sim.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) toastEconomyNotices(context, _sim);
+    });
+    // ALWAYS this Stack, the page its first child: returning the bare page
+    // when no floor is open changed the root's type on every open and
+    // close, and Flutter re-inflated the whole builder (drawer scroll,
+    // expanded palette tiles and all) each time.
     return Stack(children: [
-      page,
-      Positioned.fill(
-        key: const Key('colony-floor-overlay'),
-        child: ColonyFloorOverlay(
-          key: ValueKey(floor),
-          city: _sim,
-          site: floor,
-          onClosed: (_) {
-            if (mounted) setState(() => _floorSite = null);
-          },
+      _page(context),
+      // A plant whose firm failed waits on the player (§7 Q11): this
+      // screen has no HUD, so the offer stands over the page.
+      if (floor == null && _sim.colonyEconomy.offers.isNotEmpty)
+        Positioned(
+          top: 64,
+          right: 12,
+          child: Material(
+            type: MaterialType.transparency,
+            child: FirmOfferCard(
+                city: _sim, onChanged: () => setState(() {})),
+          ),
         ),
-      ),
+      // The open floor over the whole screen, app bar included; the screen
+      // (and its ticker, and so the colony) keeps running under it.
+      if (floor != null)
+        Positioned.fill(
+          key: const Key('colony-floor-overlay'),
+          child: ColonyFloorOverlay(
+            key: ValueKey(floor),
+            city: _sim,
+            site: floor,
+            onClosed: (_) {
+              if (mounted) setState(() => _floorSite = null);
+            },
+          ),
+        ),
     ]);
   }
 
@@ -806,6 +829,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
               _sim.roads
                 ..clear()
                 ..add(_sim.hubKey);
+              // Every grid plant just went: their floors, owed ore, books
+              // and any firm offer go with them, or they'd be saved, booked
+              // every day and offered on the HUD for plants that are gone.
+              _sim.reconcileFactoryFloors();
               _sim.recompute();
             })),
           ),
@@ -1886,7 +1913,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// targeting in their place.
   CitySiteHooks _siteHooks(int anchor) => CitySiteHooks(
         onOpenVab: _openVab,
-        onOpenFactoryFloor: (site) => setState(() => _floorSite = site),
+        onOpenFactoryFloor: openFactoryFloor,
         extra: (site, spec) => [
           if (spec.type == 'spaceport') ...[
             gatedSiteAction(

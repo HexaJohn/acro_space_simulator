@@ -85,14 +85,15 @@ void main() {
     }
   });
 
-  // Communism: the plant is the state's; starved, it loses its wage bill
-  // every day, and that loss is charged to funds as the industry deficit.
-  // It never lays off, idles or closes — the player runs it.
+  // Communism: the plant is the state's; a losing floor loses money every
+  // day, and that loss is charged to funds as the industry deficit. It
+  // never lays off, idles or closes — the player runs it.
   test('a communist state plant never acts and its loss is the deficit', () {
     final sim = economyColony(economy: Economy.communism);
     final lot = placePlant(sim, 'steelmill');
+    makeLosing(sim, lot);
     final roster = {...sim.factoryFloors[lot]!.blueprint.roster};
-    runDays(sim, 10, specs: [specOf('steelmill')], inputs: 0);
+    runDays(sim, 10, specs: [specOf('steelmill')]);
     final pnl = sim.colonyEconomy.lastPnl[lot]!;
     expect(pnl.tax, 0);
     expect(pnl.preTax, lessThan(0));
@@ -110,7 +111,7 @@ void main() {
                 sim.roadUpkeepPaidRate -
                 sim.industryDeficitRate,
             1e-12));
-    expectFundsFollowNet(sim, ['steelmill'], inputs: 0);
+    expectFundsFollowNet(sim, ['steelmill']);
   });
 
   // A private plant left over from capitalism is taken over at the first

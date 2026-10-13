@@ -74,6 +74,29 @@ const List<HandlerKind> kLayoffOrder = [
   HandlerKind.crane,
 ];
 
+/// The most corporate tax one private plant pays the treasury, as a multiple
+/// of the worker tax its nameplate jobs pay (§/s in a typical colony of this
+/// economy: [kCapHappiness], the default tax rate).
+///
+/// [kCreditsToFunds] puts a Steel Mill's tax at about its workers' own, but
+/// the high-value templates (Rocket Parts, Missile Plant) add Earth-priced
+/// value per second that converts to a hundred or more §/s: hundreds of a
+/// colony's whole worker tax from one building, after which taxes, laws and
+/// road upkeep stop mattering. Four times its workers' tax keeps a plant
+/// worth having for the budget (the mill sits near one) without letting any
+/// one plant swamp it. The firm's books still carry its full tax: only the
+/// treasury's take is bounded.
+const double kCorporateTaxWorkerMultiple = 4;
+
+/// The happiness the tax cap's reference colony has: the "typical" 60% the
+/// [kCreditsToFunds] calibration uses.
+const double kCapHappiness = 0.6;
+
+/// Most messages [ColonyEconomy.notices] holds: the newest few are what a
+/// HUD shows, and the list must not grow for a colony's whole life when no
+/// host drains it.
+const int kEconomyNoticeCap = 8;
+
 extension CityEconomy on CitySim {
   /// The colony's [Economy] as the economy layer names it (the enums mirror
   /// each other by name).
@@ -167,10 +190,57 @@ extension CityEconomy on CitySim {
     factoryFloors.setOwner(site, defaultOwnerFor(site));
   }
 
+  /// A new operator takes [site] over with fresh books, full throttle and
+  /// the staff the last one laid off hired back: a closed plant reopened
+  /// with a stripped roster would ship nothing and (as a state plant) charge
+  /// its station wages as a standing deficit.
   void _setOwner(String site, Ownership owner) {
     factoryFloors.setOwner(site, owner);
     colonyEconomy.books[site] = FirmBook(owner: owner);
     colonyEconomy.throttle.remove(site);
+    _rehire(site);
+  }
+
+  /// Puts [site]'s laid-off handlers back on its roster and has the runner
+  /// re-measure the fuller floor. No-op when nobody was laid off.
+  void _rehire(String site) {
+    final gone = colonyEconomy.laidOff.remove(site);
+    final rec = factoryFloors[site];
+    if (gone == null || gone.isEmpty || rec == null) return;
+    var operators = 0;
+    for (final k in (gone.keys.toList()..sort((a, b) => a.index - b.index))) {
+      final n = gone[k]!;
+      rec.blueprint.roster[k] = (rec.blueprint.roster[k] ?? 0) + n;
+      operators += n * kHandlerSpecs[k]!.operators;
+    }
+    // Their jobs are back today; the runner re-measures the output.
+    final r = rec.rates;
+    rec.rates = MeasuredRates(
+      inPerS: r.inPerS,
+      outPerS: r.outPerS,
+      powerKw: r.powerKw,
+      jobs: r.jobs + operators,
+      seconds: r.seconds,
+    );
+    rec.dirty = true;
+    rec.rev++;
+  }
+
+  /// Adds [why] to the HUD's notices, keeping only the newest
+  /// [kEconomyNoticeCap].
+  void pushEconomyNotice(String why) {
+    final n = colonyEconomy.notices..add(why);
+    if (n.length > kEconomyNoticeCap) {
+      n.removeRange(0, n.length - kEconomyNoticeCap);
+    }
+  }
+
+  /// Takes every notice queued for the HUD (each host shows them as toasts).
+  List<String> drainEconomyNotices() {
+    final n = colonyEconomy.notices;
+    final out = List<String>.of(n);
+    n.clear();
+    return out;
   }
 
   /// Site action: the state takes [site]'s plant over, with fresh books. A
@@ -235,7 +305,16 @@ extension CityEconomy on CitySim {
     final book = market.book;
     final econ = economyKind;
 
-    var tax = 0.0;
+    final day = e.dayClockS > 0 ? e.dayClockS : kColonyDaySec;
+    // One nameplate job's worker tax, §/s, in a typical colony: the
+    // per-plant tax cap's unit. A reference colony, not this one's mood of
+    // the day: a cap that followed happiness would let one bad week (or a
+    // tax holiday) zero every plant's tax.
+    final workerTaxPerJob = kCapHappiness *
+        CitySim.defaultTaxRate *
+        CitySim.taxPerWorkerPerSec *
+        economy.fundsMult;
+    var taxFunds = 0.0;
     var deficit = 0.0;
     for (final site in factoryFloors.siteIds) {
       final rec = factoryFloors[site]!;
@@ -258,11 +337,28 @@ extension CityEconomy on CitySim {
       if (firm.isClosed) continue;
       final pnl = pnlFor(ledger, book, owner: owner, economy: econ);
       e.lastPnl[site] = pnl;
+      // A day the colony never let the plant work (no inputs, or every
+      // crate refused at a full warehouse) books nothing (the floor stands
+      // its staff down then) and is no evidence about the firm: folding it
+      // in would only decay the rolling books toward zero.
+      if (ledger.totalWorkerSeconds <= 0 &&
+          ledger.shipped.isEmpty &&
+          ledger.energyKJ <= 0) {
+        continue;
+      }
       firm.record(pnl);
       if (owner.isState) {
         deficit += math.max(0.0, -pnl.preTax);
       } else {
-        tax += pnl.tax;
+        // Paid over the next day at the rate the day ran up, bounded per
+        // plant ([kCorporateTaxWorkerMultiple]).
+        final jobs = siteSpec(site)?.jobs ?? rec.rates.jobs;
+        final cap = jobs * workerTaxPerJob * kCorporateTaxWorkerMultiple;
+        taxFunds += math.min(pnl.tax * kCreditsToFunds / day, cap);
+      }
+      // A firm back in health hires back whoever it let go.
+      if (firm.health == FirmHealth.healthy && rec.live == null) {
+        _rehire(site);
       }
       final action = firm.decide(
         canLayOff: rec.live == null && _layoffKind(rec.blueprint) != null,
@@ -271,20 +367,24 @@ extension CityEconomy on CitySim {
       _apply(site, action);
     }
 
-    // Paid over the next day, at the rate the day ran up. Over the day's
-    // own length (not the plants' booked seconds, which a plant placed
-    // mid-day has fewer of) so a day's tax is paid exactly once.
-    final day = e.dayClockS > 0 ? e.dayClockS : kColonyDaySec;
-    e.corporateTaxFundsPerS = tax * kCreditsToFunds / day;
+    // Over the day's own length (not the plants' booked seconds, which a
+    // plant placed mid-day has fewer of) so a day's tax is paid exactly
+    // once.
+    e.corporateTaxFundsPerS = taxFunds;
     e.industryDeficitFundsPerS = deficit * kCreditsToFunds / day;
     e.dayClockS = 0;
     e.demandUnits.clear();
     e.supplyUnits.clear();
   }
 
+  /// The handler a layoff lets go: the cheapest kind with more than one on
+  /// the roster. Never the LAST of a kind: every template's routes need each
+  /// kind it hires (a template with its handlers emptied ships nothing but
+  /// keeps its station jobs), so cutting the last one costs revenue faster
+  /// than it saves wages, and each layoff would force the next.
   HandlerKind? _layoffKind(FloorBlueprint bp) {
     for (final k in kLayoffOrder) {
-      if ((bp.roster[k] ?? 0) > 0 && kHandlerSpecs[k]!.operators > 0) return k;
+      if ((bp.roster[k] ?? 0) > 1 && kHandlerSpecs[k]!.operators > 0) return k;
     }
     return null;
   }
@@ -302,6 +402,10 @@ extension CityEconomy on CitySim {
         } else {
           rec.blueprint.roster.remove(k);
         }
+        // Remembered (and saved), so a new owner or the firm's recovery
+        // hires them back ([_rehire]).
+        final gone = e.laidOff.putIfAbsent(site, () => {});
+        gone[k] = (gone[k] ?? 0) + 1;
         // The staff are gone today; the runner re-measures what the
         // thinner floor really makes (a stale result is dropped by rev).
         final r = rec.rates;
@@ -394,7 +498,10 @@ extension CityEconomy on CitySim {
     final rec = factoryFloors[site];
     if (rec == null || oreDue.abs() < 1e-9) return InvestmentSettlement.none;
     if (oreDue < 0) {
-      stock[Commodity.ore] = stockOf(Commodity.ore) - oreDue;
+      // Freed kit is salvage, at the bulldozer's rate: credited in full, a
+      // strip-then-demolish cycle would print ore.
+      stock[Commodity.ore] =
+          stockOf(Commodity.ore) - oreDue * CitySim.refundFraction;
       return InvestmentSettlement.none;
     }
     final book = localMarket.book;
@@ -410,7 +517,9 @@ extension CityEconomy on CitySim {
           ..dirty = false;
         rec.rev++;
       }
-      e.notices.add(why);
+      pushEconomyNotice(why);
+      // Kept for the site panel after the toast is gone.
+      e.lastRevert[site] = why;
       return InvestmentSettlement.reverted;
     }
 

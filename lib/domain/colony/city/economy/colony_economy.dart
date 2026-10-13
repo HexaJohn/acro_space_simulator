@@ -36,6 +36,7 @@ library;
 
 import 'dart:collection';
 
+import '../factory/factory_handling.dart';
 import '../factory/factory_sim_api.dart';
 import '../factory/floor_blueprint.dart';
 import 'economy_contracts.dart';
@@ -75,8 +76,10 @@ import 'local_prices.dart';
 /// Refinery ≈ 0.3 §/s, Rations Plant ≈ 0.02, Arms ≈ 1.4, Electronics ≈ 5.4,
 /// Rocket Parts ≈ 120, Missile Plant ≈ 610. The last two are the spec
 /// recipes' value added at Earth prices (43 kg of tube and boards into
-/// 40 kg of $1,000/kg engine parts every colony second), not this constant:
-/// left for the balance pass, flagged in the wave-3 report.
+/// 40 kg of $1,000/kg engine parts every colony second), not this constant;
+/// what reaches the treasury from any one plant is bounded at a few times
+/// its own workers' tax (`kCorporateTaxWorkerMultiple`, `city_economy.dart`)
+/// so those two can't swamp a colony's budget.
 const double kCreditsToFunds = 0.015;
 
 /// Production multiplier a firm sets when it idles stations (firm policy's
@@ -165,6 +168,16 @@ class ColonyEconomy {
   /// Pre-edit layouts of edited floors whose capex isn't settled yet.
   final SplayTreeMap<String, FloorEditStash> stashed = SplayTreeMap();
 
+  /// Handlers each plant's firm has laid off, by site and kind. Saved: a
+  /// new owner, or the firm once it is healthy again, hires them back, so a
+  /// plant that reopens doesn't run for ever on the roster its failing
+  /// operator stripped.
+  final SplayTreeMap<String, Map<HandlerKind, int>> laidOff = SplayTreeMap();
+
+  /// Why each site's last floor edit was undone (nobody could pay for it):
+  /// the site panel's line once the toast is gone. Runtime only.
+  final SplayTreeMap<String, String> lastRevert = SplayTreeMap();
+
   /// Colony seconds into the current economy day.
   double dayClockS = 0;
 
@@ -217,6 +230,10 @@ class ColonyEconomy {
     if (t != null) throttle[newId] = t;
     final s = stashed.remove(oldId);
     if (s != null) stashed[newId] = s;
+    final l = laidOff.remove(oldId);
+    if (l != null) laidOff[newId] = l;
+    final why = lastRevert.remove(oldId);
+    if (why != null) lastRevert[newId] = why;
     final p = lastPnl.remove(oldId);
     if (p != null) lastPnl[newId] = p;
     for (var i = 0; i < offers.length; i++) {
@@ -231,6 +248,8 @@ class ColonyEconomy {
     books.remove(site);
     throttle.remove(site);
     stashed.remove(site);
+    laidOff.remove(site);
+    lastRevert.remove(site);
     lastPnl.remove(site);
     offers.removeWhere((o) => o.site == site);
   }
@@ -243,6 +262,7 @@ class ColonyEconomy {
       throttle.isNotEmpty ||
       offers.isNotEmpty ||
       stashed.isNotEmpty ||
+      laidOff.isNotEmpty ||
       firmSerial != 1 ||
       corporateTaxFundsPerS != 0 ||
       industryDeficitFundsPerS != 0 ||
@@ -255,6 +275,14 @@ class ColonyEconomy {
         if (offers.isNotEmpty) 'offers': [for (final o in offers) o.toJson()],
         if (stashed.isNotEmpty)
           'stash': {for (final e in stashed.entries) e.key: e.value.toJson()},
+        if (laidOff.isNotEmpty)
+          'laid': {
+            for (final e in laidOff.entries)
+              e.key: {
+                for (final k in HandlerKind.values)
+                  if ((e.value[k] ?? 0) > 0) k.name: e.value[k],
+              },
+          },
         'day': dayClockS,
         'serial': firmSerial,
         if (demandUnits.isNotEmpty) 'dem': {...demandUnits},
@@ -280,6 +308,12 @@ class ColonyEconomy {
     }
     m(j['stash']).forEach((k, v) {
       stashed[k] = FloorEditStash.fromJson(m(v));
+    });
+    m(j['laid']).forEach((site, v) {
+      laidOff[site] = {
+        for (final e in m(v).entries)
+          HandlerKind.values.byName(e.key): (e.value as num).toInt(),
+      };
     });
     dayClockS = d(j['day']);
     firmSerial = (j['serial'] as num?)?.toInt() ?? 1;

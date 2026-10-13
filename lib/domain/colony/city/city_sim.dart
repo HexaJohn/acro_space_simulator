@@ -1758,9 +1758,11 @@ class CitySim {
             k,
             u * biomeMult(k) * bountyMult * eventProductionMult / dt,
             isLifeSupport(s)));
-        // A live floor reports no share: it smokes at the colony's throttle.
-        final run =
-            r.live ? math.min(plantPower, restStaff) * atWork : r.share;
+        // A live floor reports no share: it smokes at the colony's throttle,
+        // times the firm's own (an idled or closed plant makes less smoke).
+        final run = r.live
+            ? math.min(plantPower, restStaff) * atWork * floorThrottleOf(site)
+            : r.share;
         pollutionRate += s.pollution * run * emissionCut;
       }
     }
@@ -3881,8 +3883,10 @@ class CitySim {
     }
     final u = utils[anchor];
     if (u != null) {
-      stock[Commodity.ore] =
-          stockOf(Commodity.ore) + u.buildCost * refundFraction;
+      // What was paid, not the nameplate: a designed floor cost its capex
+      // ([CityFactories.floorBuildValueOf]), read before the floor goes.
+      stock[Commodity.ore] = stockOf(Commodity.ore) +
+          floorBuildValueOf(siteIdOfCell(anchor), u) * refundFraction;
       // Free every cell the footprint covered.
       for (final c in footCells(anchor % grid, anchor ~/ grid, u)) {
         footprint.remove(c);
@@ -3972,6 +3976,8 @@ class CitySim {
       for (final c in craft) {
         c.site = rekeySite(c.site);
       }
+      // Plant floors and their books, likewise (`city_factories.dart`).
+      rekeyGridFloors(rekey);
       if (beaconCell != null) beaconCell = rekey(beaconCell!);
       grid = next;
       genElevation(); // re-sculpt terrain for the enlarged grid
@@ -4525,8 +4531,9 @@ class CitySim {
     craft.removeWhere((c) => lost(c.site));
     // Over the floors' own ids, never `dropMissing(lots)`: that would drop
     // every grid (`cell-N`) floor, which `lost` rightly leaves alone.
+    // A designed floor lost this way is announced: no one asked first.
     for (final id in factoryFloors.siteIds) {
-      if (lost(id)) floorSiteGone(id);
+      if (lost(id)) floorSiteLost(id);
     }
     final pad = landerPad;
     if (pad != null && lost(pad)) landerPad = null;
@@ -5892,6 +5899,8 @@ class CitySim {
                 owner: saved.owner,
                 rates: saved.measured ? saved.rates : null)
             .dirty = saved.dirty || !saved.measured;
+        // The economy day's counters so far, so the day closes whole.
+        sim.factoryFloors[id]!.absorbLedgerOf(saved);
       }
       for (final e in f.library.entries) {
         sim.factoryFloors.saveBlueprint(e.key, e.value);

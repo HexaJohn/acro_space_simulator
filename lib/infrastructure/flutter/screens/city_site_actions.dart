@@ -20,6 +20,7 @@ import 'package:flutter/material.dart';
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
 import '../../../domain/colony/city/city_economy.dart';
+import '../../../domain/colony/city/economy/firm_policy.dart';
 import '../../../domain/colony/city/city_factories.dart';
 import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
@@ -500,7 +501,30 @@ void showCitySiteMenu({
   }
   // Who runs it (§7 Q9-Q11): nationalise a firm's plant, or privatise a
   // state one where the economy allows a buyer.
-  if (rec != null) {
+  // A CLOSED plant's offer comes first: its own options (nationalise, or
+  // sell to a new firm where the economy has buyers), reachable from the
+  // plant itself in every host, HUD or none.
+  final offer =
+      sim.pendingFirmOffers.where((o) => o.site == site).firstOrNull;
+  if (rec != null && offer != null) {
+    for (final o in offer.options) {
+      actions.add(gatedSiteAction(
+          context,
+          sim,
+          o == ClosureOption.nationalise
+              ? Icons.account_balance
+              : Icons.storefront,
+          FirmOfferCard.label(o),
+          o == ClosureOption.nationalise
+              ? 'Its firm closed: run it as a state plant (its losses are '
+                  'the industry deficit).'
+              : 'Its firm closed: sell it to a new firm, which reopens it.',
+          AppTheme.warn, () {
+        if (sim.resolveFirmOffer(site, o)) sim.attend();
+        onChanged();
+      }));
+    }
+  } else if (rec != null) {
     final state = sim.ownerOf(site).isState;
     final communist = sim.economy == Economy.communism;
     if (!state || !communist) {

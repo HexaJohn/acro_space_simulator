@@ -163,8 +163,11 @@ extension _SimulationViewColony on _SimulationViewState {
       CityNodes.cursorBad = misfit != null ||
           (held.claimsOwnSite &&
               _siteStatusAt(city, held, Vec2(hit.east, hit.north)) != 0);
-      if (misfit != null && _cityEdit.blocked != misfit) {
-        _cityEdit.blocked = misfit;
+      final next = misfitRefusal(
+          misfit: misfit, blocked: _cityEdit.blocked, shown: _shownMisfit);
+      _shownMisfit = next.shown;
+      if (next.blocked != _cityEdit.blocked) {
+        _cityEdit.blocked = next.blocked;
         _cityEdit.changed();
       }
     } else {
@@ -782,10 +785,16 @@ extension _SimulationViewColony on _SimulationViewState {
     return true;
   }
 
-  /// The floor overlay is done (closed, or its plant gone): take it down
-  /// and give the keyboard back to the world.
-  void _onFactoryFloorClosed(FloorEditOutcome? outcome) {
+  /// The floor overlay for [site] of [city] is done (closed, or its plant
+  /// gone): take it down and give the keyboard back to the world.
+  ///
+  /// Ignored when another floor has replaced it: opening B over A closes
+  /// A, and A's overlay, still mounted for one more frame, sees its floor
+  /// gone and reports it. Taken at its word, that took B down with it.
+  void _onFactoryFloorClosed(
+      String site, CitySim city, FloorEditOutcome? outcome) {
     if (!mounted) return;
+    if (site != _floorSite || !identical(city, _floorCity)) return;
     rebuild(() {
       _floorSite = null;
       _floorCity = null;
@@ -803,7 +812,7 @@ extension _SimulationViewColony on _SimulationViewState {
         key: ValueKey('${identityHashCode(city)}/$site'),
         city: city,
         site: site,
-        onClosed: _onFactoryFloorClosed,
+        onClosed: (o) => _onFactoryFloorClosed(site, city, o),
       ),
     );
   }
@@ -811,7 +820,9 @@ extension _SimulationViewColony on _SimulationViewState {
   /// `SimViewControl.factoryFloor`: open [site] on the colony being
   /// edited, or close the open floor (null), as the player's clicks do.
   Map<String, Object?> _factoryFloorControl(String? site) {
-    final city = _editingCity;
+    // The colony being edited; in a studio view with none open yet, the
+    // colony the view was handed.
+    final city = _editingCity ?? widget.injectedCity;
     if (site != null) {
       final ok = city != null && _openFactoryFloor(city, site);
       return {'open': _floorSite, if (!ok) 'error': 'no floor at $site'};
@@ -821,7 +832,7 @@ extension _SimulationViewColony on _SimulationViewState {
     // Closed here, settled by the colony; the overlay sees its floor gone
     // on its next frame and takes itself down.
     final outcome = openCity.closeFloor(open);
-    _onFactoryFloorClosed(outcome);
+    _onFactoryFloorClosed(open, openCity, outcome);
     return {'open': null, 'closed': open, 'capexDelta': outcome.capexDelta};
   }
 

@@ -1,0 +1,71 @@
+// Copyright (c) 2026 John Peroutka
+//
+// This work is licensed under the PolyForm Noncommercial License 1.0.0.
+// To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
+
+/// A measured floor draws in the COLONY's power units
+/// (docs/plans/factory-floors.md §3 "Coupling to the colony", "Templates":
+/// the template runs at the spec's rate, ±5%). The floor model's stations
+/// draw real per-machine kilowatts, 8-100x below a spec's power units; a
+/// measured template must still draw its spec's power, or moving one belt
+/// (or a firm's layoff) would cut a plant's grid draw a hundredfold.
+library;
+
+import 'package:acro_space_simulator/application/factory/colony_floor_measurer.dart';
+import 'package:acro_space_simulator/domain/colony/city/city_factories.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_measure.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'factory_colony_fixture.dart';
+
+void main() {
+  final measured = <String, MeasuredRates>{};
+  setUpAll(() {
+    for (final t in kFactoryPlantTypes) {
+      measured[t] = measureBlueprint(factoryTemplateFor(t)!,
+          buildFloorForMeasure, settings: measureSettingsFor(t));
+    }
+  });
+
+  // The pins are what the calibration divides by: a template edit that
+  // changes its stations' draw must re-pin, or every measured floor of
+  // that plant draws the wrong power.
+  test('the pinned template draws are what the measurer reads', () {
+    for (final t in kFactoryPlantTypes) {
+      expect(measured[t]!.powerKw,
+          closeTo(kTemplateMeasuredKw[t]!, kTemplateMeasuredKw[t]! * 0.01),
+          reason: t);
+    }
+  });
+
+  test('every measured template draws its spec power, calibrated', () {
+    for (final t in kFactoryPlantTypes) {
+      final spec = specOf(t);
+      final flat = flatRatesOf(spec).powerKw;
+      expect(calibratedFloorRates(measured[t]!, spec).powerKw,
+          closeTo(flat, flat * 0.05), reason: t);
+    }
+  });
+
+  // Through the colony: a measurement stored for a placed plant keeps its
+  // grid draw, and a design that halves its stations' kW halves it.
+  test('applyFloorMeasure stores colony power', () {
+    final sim = foundedColony();
+    final lot = placeOnFreeLot(sim, specOf('electronics'));
+    final m = measured['electronics']!;
+    final rec = sim.factoryFloors[lot]!;
+    expect(sim.applyFloorMeasure(lot, m, rev: rec.rev), isTrue);
+    final flat = flatRatesOf(specOf('electronics')).powerKw;
+    expect(rec.rates.powerKw, closeTo(flat, flat * 0.05));
+    final half = MeasuredRates(
+        inPerS: m.inPerS,
+        outPerS: m.outPerS,
+        powerKw: m.powerKw / 2,
+        jobs: m.jobs,
+        seconds: m.seconds);
+    expect(sim.applyFloorMeasure(lot, half, rev: rec.rev), isTrue);
+    expect(rec.rates.powerKw, closeTo(flat / 2, flat * 0.03));
+  });
+}

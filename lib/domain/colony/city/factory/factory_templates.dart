@@ -126,10 +126,26 @@ const List<String> kFactoryPlantTypes = [
 /// crate) needs a longer window or one lump either side of the window
 /// reads as a 5-10% swing (see each template's doc).
 MeasureSettings measureSettingsFor(String plantType) => switch (plantType) {
+      kSteelMillType || kRefineryType => kSlowLineMeasureSettings,
       kElectronicsType => kElectronicsMeasureSettings,
       kArmsType => kArmsMeasureSettings,
       _ => MeasureSettings.standard,
     };
+
+/// The Steel Mill's and the Refinery's measurement: five minutes to settle,
+/// twenty measured, never cut short. Both fill long tanks and buffers before
+/// their slow stations reach their pace (the refinery's cracking column, the
+/// mill's slag-to-tube press), so the standard window with its early stop
+/// reads the Refinery 22% under its spec (0.31 fuel / 0.23 oxidizer per
+/// second against 0.4 / 0.3, while drawing the full 1.0 ore) and the mill's
+/// tubes 8% under. A designed or laid-off floor measured that way would burn
+/// full input for short output, and its firm's books would follow. Pinned by
+/// `template_wiring_test.dart` (every template within 5% of its spec).
+const MeasureSettings kSlowLineMeasureSettings = MeasureSettings(
+  warmupS: 300,
+  windowS: 1200,
+  earlyStop: false,
+);
 
 /// Hands out placement ids in order, so the template is stable across
 /// builds (saves key runtime state by id).

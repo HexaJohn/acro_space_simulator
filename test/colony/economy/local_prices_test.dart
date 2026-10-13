@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/domain/colony/city/economy/earth_market.dar
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/local_prices.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/plant_pnl.dart';
 import 'package:acro_space_simulator/domain/planetary/atmospheric_composition.dart';
 import 'package:acro_space_simulator/domain/planetary/planet_surface.dart';
 import 'package:acro_space_simulator/domain/universe/celestial_body.dart';
@@ -242,14 +243,20 @@ void main() {
         surfacePressureKPa: 5, airDensity: 0.05, population: 100);
     final m = solveLocalMarket(thin);
     expect(m.sourceOf[Commodity.oxygen], 'o2harvester');
-    // Exactly the nameplate: its running cost over its full 2.0/s.
+    // Exactly the nameplate: its running cost over its full 2.0/s — wages,
+    // power, capital and the freight fee on every unit through its docks,
+    // as its books charge them.
     final harvester = kUtilCatalog.firstWhere((s) => s.type == 'o2harvester');
     final w = m.book.wagePerWorkerS;
     final power = m.book.powerPerKJ * kKjPerPowerUnitS;
     final capex = harvester.buildCost * m.book.price(Commodity.ore) /
         (kCapitalRecoveryYears * kGameYearSec);
-    final unit = (harvester.jobs * w + harvester.powerDraw * power + capex) /
-        harvester.outputs[Commodity.oxygen]!;
+    final freight = [...harvester.inputs.values, ...harvester.outputs.values]
+            .fold(0.0, (a, b) => a + b) *
+        kLogisticsFeePerUnit;
+    final unit =
+        (harvester.jobs * w + harvester.powerDraw * power + capex + freight) /
+            harvester.outputs[Commodity.oxygen]!;
     expect(m.localCost[Commodity.oxygen], closeTo(unit, unit * 1e-6));
 
     // Earth-thick oxygen air the aggregate says is NOT harvestable stays
@@ -447,6 +454,20 @@ void main() {
         supply: {Commodity.water: 3}));
     expect(short.price(Commodity.water), greaterThan(neutral));
     expect(glut.price(Commodity.water), lessThan(neutral));
+  });
+
+  /// A good made and not drawn down is a glut only once it PILES UP: steel
+  /// out of a mill with nothing in stock (no flow consumer in the colony,
+  /// the usual case for a plant's goods) sells at cost, not at the 70%
+  /// floor that failed every price-setting plant off Earth.
+  test('made but not stocked is no glut', () {
+    final m = solveLocalMarket(_mars(Biome.iceCap,
+        stock: {Commodity.steel: 0}, supply: {Commodity.steel: 1.5}));
+    expect(m.scarcity[Commodity.steel], 1);
+    final piled = solveLocalMarket(_mars(Biome.iceCap,
+        stock: {Commodity.steel: 1.5 * kColonyDaySec * kTargetCoverDays * 2},
+        supply: {Commodity.steel: 1.5}));
+    expect(piled.scarcity[Commodity.steel], kScarcityMin);
   });
 
   /// Another colony is a source too: tubes on a young lunar colony (no

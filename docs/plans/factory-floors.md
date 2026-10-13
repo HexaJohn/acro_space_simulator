@@ -195,7 +195,9 @@ natural follow-on but touches `city_sim.dart`, so it belongs to phase 3 or later
 It is omitted when empty, following the `war` / `trails` pattern. Lot rename and drop go
 through the existing `_carryRenamedLots` / `_dropLostLots` / `clearParcel`.
 Demolishing a plant that has a designed floor asks for confirmation first, since the floor is
-lost. Because only the player demolishes placed plants, that's the only path that loses a floor.
+lost. *(As built: a road edit whose re-plat leaves a placed plant's lot no successor drops it
+too, without asking; a designed floor lost that way raises a notice naming it. Refusing such
+an edit in the road tool's trial is the road tool owner's call.)*
 
 **Ownership and money** (raised by the user, 2026-10-12: *"if they are private corps,
 they must still be able to make money and afford the labor, logistics, materials"*).

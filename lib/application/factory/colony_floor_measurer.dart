@@ -58,7 +58,12 @@ class ColonyFloorMeasurer {
 
   /// Per colony, the revision whose measurement FAILED: not retried until
   /// the layout changes, or a broken blueprint would be re-sent every frame.
-  final Map<CitySim, Map<String, int>> _failed = HashMap.identity();
+  ///
+  /// An [Expando], not a map keyed by the colony: a failure is rare and
+  /// nothing else ever clears it, so a map would keep a colony the host has
+  /// dropped (a reload, a closed save) and its whole layout alive for the
+  /// measurer's life. Attached to the colony, the entry goes with it.
+  final Expando<Map<String, int>> _failed = Expando('floorMeasureFailed');
 
   var _disposed = false;
 
@@ -74,6 +79,10 @@ class ColonyFloorMeasurer {
     return n;
   }
 
+  /// Failed measurements remembered for [city]: pruned as layouts change,
+  /// never kept for ever (the tests read it).
+  int failedCount(CitySim city) => _failed[city]?.length ?? 0;
+
   /// Whether [site] of [city] is being measured.
   bool measuring(CitySim city, String site) =>
       _inFlight[city]?.containsKey(site) ?? false;
@@ -86,6 +95,10 @@ class ColonyFloorMeasurer {
     if (stale.isEmpty) return;
     final flying = _inFlight.putIfAbsent(city, () => {});
     final failed = _failed[city];
+    // A failure is only remembered while its layout stands: an edited (or
+    // demolished) floor's entry goes, so the map never outgrows the
+    // colony's few floors.
+    failed?.removeWhere((site, rev) => city.factoryFloors[site]?.rev != rev);
     for (final site in stale) {
       final rec = city.factoryFloors[site];
       if (rec == null) continue;
@@ -114,7 +127,7 @@ class ColonyFloorMeasurer {
   void _fail(CitySim city, String site, int rev) {
     _clear(city, site, rev);
     if (_disposed) return;
-    _failed.putIfAbsent(city, () => {})[site] = rev;
+    (_failed[city] ??= {})[site] = rev;
   }
 
   /// Forgets [site]'s job when it is still the one recorded (a newer one
@@ -133,6 +146,5 @@ class ColonyFloorMeasurer {
     _disposed = true;
     runner.dispose();
     _inFlight.clear();
-    _failed.clear();
   }
 }

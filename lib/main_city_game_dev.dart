@@ -417,7 +417,9 @@ Map<String, Object?> _economyStatus(CitySim c) {
 }
 
 /// `factory=place:<type>|open:<site>|close:<site>` (see the header).
-Object? _factoryHook(CitySim c, String spec) {
+/// Public for its test only.
+@visibleForTesting
+Object? factoryHook(CitySim c, String spec) {
   final i = spec.indexOf(':');
   if (i <= 0) return {'error': 'want place:TYPE, open:SITE or close:SITE'};
   final verb = spec.substring(0, i), arg = spec.substring(i + 1);
@@ -433,6 +435,13 @@ Object? _factoryHook(CitySim c, String spec) {
     case 'open':
     case 'close':
       final drive = SimViewControl.instance.factoryFloor;
+      // The view closes whichever floor is open, so a scripted close names
+      // the one it means: SITE must be that floor (its sim is live only
+      // while its editor shows it), or another plant's floor would be
+      // closed and settled in its place.
+      if (drive != null && verb == 'close' && c.factoryFloors[arg]?.live == null) {
+        return {'error': '$arg is not open'};
+      }
       if (drive != null) return drive(verb == 'open' ? arg : null);
       // No view yet: the colony side alone.
       if (verb == 'open') return {'open': null, 'error': 'no view yet'};
@@ -524,7 +533,7 @@ Map<String, Object?> _agentHooks(CitySim c, Map<String, String> p) {
   if (p['traffic'] == 'stats') did['traffic'] = _trafficStats(c);
   if (p['graph'] == 'audit') did['graph'] = _graphAudit(a);
   if (p['site'] == 'plan') did['site'] = _sitePlan(c, p['id']);
-  if (p['factory'] case final f?) did['factory'] = _factoryHook(c, f);
+  if (p['factory'] case final f?) did['factory'] = factoryHook(c, f);
   return did;
 }
 

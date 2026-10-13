@@ -26,7 +26,7 @@ void main() {
   // the save key a reload would reopen the closed plant, forget the offer,
   // and pay its next day's tax twice.
   test('the economy round-trips through a save', () {
-    final r = starvedMill();
+    final r = losingMill();
     final sim = r.sim;
     final refinery = specOf('refinery');
     final lot2 = placePlant(sim, 'refinery');
@@ -53,7 +53,7 @@ void main() {
   });
 
   // Determinism: two colonies founded and driven alike — same plants, a
-  // starving one and a fed one, across several day closes with layoffs and
+  // losing one and a healthy one, across several day closes with layoffs and
   // a price solve each day — save byte-identical economies.
   test('two colonies stepped alike keep identical economies', () {
     String run() {
@@ -62,12 +62,13 @@ void main() {
       placePlant(sim, 'gunfactory');
       sim.factoryFloors[lot]!.blueprint.roster
         ..clear()
-        ..[HandlerKind.onFoot] = 1;
-      // The mill gets no ore; the arms plant is fed (after each tick, so
+        ..[HandlerKind.onFoot] = 2;
+      makeLosing(sim, lot);
+      // The mill loses money; the arms plant is fed (after each tick, so
       // ready for the next).
       final guns = specOf('gunfactory');
       holdStock(sim, guns);
-      runDays(sim, 10.5, specs: [specOf('steelmill')], inputs: 0, after: () {
+      runDays(sim, 10.5, specs: [specOf('steelmill')], after: () {
         holdStock(sim, guns);
         return false;
       });
@@ -78,7 +79,23 @@ void main() {
     final a = run();
     final b = run();
     expect(a, b);
-    expect(a, contains('"thr"'), reason: 'the starving mill was cut');
+    expect(a, contains('"thr"'), reason: 'the losing mill was cut');
+  });
+
+  // The floors' day-so-far books are saved with the day clock: a save 0.6
+  // into a day used to close that day on the 0.4 run after the load,
+  // spread over the whole day, and most of its tax was lost.
+  test('a save mid-day closes the day on all of its books', () {
+    final sim = economyColony();
+    placePlant(sim, 'steelmill');
+    final mill = specOf('steelmill');
+    runDays(sim, 1.6, specs: [mill]);
+    final loaded = reload(sim.toJson());
+    runDays(sim, 0.5, specs: [mill]);
+    runDays(loaded, 0.5, specs: [mill]);
+    expect(sim.corporateTaxRate, greaterThan(0));
+    expect(loaded.corporateTaxRate,
+        closeTo(sim.corporateTaxRate, sim.corporateTaxRate * 0.02));
   });
 
   // The day clock is saved, so a save mid-day doesn't restart the day

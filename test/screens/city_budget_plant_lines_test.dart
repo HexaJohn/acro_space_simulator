@@ -48,11 +48,13 @@ void main() {
     expect(find.text('Industry deficit'), findsNothing);
   });
 
-  // A losing state plant shows the deficit the treasury pays for it.
+  // A losing state plant shows the deficit the treasury pays for it (a
+  // badly designed floor: a starved one stands its staff down and loses
+  // nothing).
   testWidgets('a losing state plant shows the industry deficit', (t) async {
     final city = economyColony(economy: Economy.communism);
-    placePlant(city, 'steelmill');
-    runDays(city, 1.01, specs: [specOf('steelmill')], inputs: 0);
+    makeLosing(city, placePlant(city, 'steelmill'));
+    runDays(city, 1.01, specs: [specOf('steelmill')]);
     await openBudget(t, city);
     expect(find.text('Industry deficit'), findsOneWidget);
     expect(find.text('−${city.industryDeficitRate.toStringAsFixed(2)} §/s'),

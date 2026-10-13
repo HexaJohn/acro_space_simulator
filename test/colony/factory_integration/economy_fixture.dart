@@ -16,6 +16,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/colony_economy.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
 
 import 'factory_colony_fixture.dart';
 
@@ -27,8 +28,9 @@ const double kEconTickS = 0.5;
 /// ([CitySim.infinitePower]): these tests ask whether a plant pays at the
 /// colony's derived prices, not whether the starter grid can carry a 50 MW
 /// plant or already has a data centre.
-CitySim economyColony({Economy economy = Economy.capitalism}) {
-  final sim = foundedColony()
+CitySim economyColony(
+    {Economy economy = Economy.capitalism, String bodyId = 'earth'}) {
+  final sim = foundedColony(bodyId: bodyId)
     ..population = kEconPopulation
     ..infinitePower = true
     ..economy = economy;
@@ -43,10 +45,15 @@ String placePlant(CitySim sim, String type) =>
 /// (0 = starved) and outputs emptied, as if the colony's consumers took
 /// everything the plant made (otherwise its shipping stops at the storage
 /// cap and the books measure a full warehouse, not the plant).
-void holdStock(CitySim sim, CityBuildingSpec spec, {double inputs = 300}) {
+///
+/// [emptyOutputs] false leaves the outputs to pile up against the storage
+/// cap, as they do in a colony with no consumer for them.
+void holdStock(CitySim sim, CityBuildingSpec spec,
+    {double inputs = 300, bool emptyOutputs = true}) {
   for (final k in spec.inputs.keys) {
     sim.stock[k] = inputs;
   }
+  if (!emptyOutputs) return;
   for (final k in spec.outputs.keys) {
     sim.stock[k] = 0;
   }
@@ -68,13 +75,14 @@ void runDays(
   double days, {
   List<CityBuildingSpec> specs = const [],
   double inputs = 300,
+  bool emptyOutputs = true,
   bool Function()? after,
 }) {
   final ticks = (days * kColonyDaySec / kEconTickS).round();
   for (var i = 0; i < ticks; i++) {
     sim.population = kEconPopulation;
     for (final s in specs) {
-      holdStock(sim, s, inputs: inputs);
+      holdStock(sim, s, inputs: inputs, emptyOutputs: emptyOutputs);
     }
     sim.advance(kEconTickS);
     if (after != null && after()) return;
@@ -89,25 +97,54 @@ class Walk {
   double? layoff, idle, close;
 }
 
-/// A private Steel Mill with no ore, run until it closes (at most 45 days).
-/// Its roster is cut to ONE walker first: a layoff lets one handler go a
-/// week, so the template's full crew would take months to walk through,
-/// and one is enough to show the order.
-({CitySim sim, String lot, Walk walk, int jobsBefore}) starvedMill() {
+/// How many times its template's jobs a [makeLosing] floor needs.
+const double kLosingJobsFactor = 10;
+
+/// Makes [lot]'s plant structurally unprofitable, as a badly designed floor
+/// is: it reads as needing [kLosingJobsFactor] times its workers for the
+/// same output, so its wage bill outruns its revenue at any of the colony's
+/// prices. Marked designed, so a reload never re-seeds it as a template.
+///
+/// Not a STARVED plant: a floor with no inputs stands its staff down and
+/// books nothing (`FactoryFloors.stepAggregate`) — a stall the colony
+/// causes is not the firm's loss — so starving one no longer fails it.
+void makeLosing(CitySim sim, String lot) {
+  final rec = sim.factoryFloors[lot]!;
+  final r = rec.rates;
+  rec
+    ..rates = MeasuredRates(
+      inPerS: r.inPerS,
+      outPerS: r.outPerS,
+      powerKw: r.powerKw,
+      jobs: r.jobs * kLosingJobsFactor,
+      seconds: r.seconds,
+    )
+    ..designed = true;
+}
+
+/// A private Steel Mill that loses money ([makeLosing]), fed and emptied,
+/// run until it closes (at most 45 days). Its roster is cut to TWO walkers
+/// first: a layoff lets one handler go a week and never the last of a kind,
+/// so the template's full crew would take months to walk through, and one
+/// layoff is enough to show the order.
+({CitySim sim, String lot, Walk walk, int jobsBefore}) losingMill() {
   final sim = economyColony();
   final mill = specOf('steelmill');
   final lot = placePlant(sim, 'steelmill');
   sim.factoryFloors[lot]!.blueprint.roster
     ..clear()
-    ..[HandlerKind.onFoot] = 1;
-  runDays(sim, 0.1, specs: [mill], inputs: 0);
+    ..[HandlerKind.onFoot] = 2;
+  makeLosing(sim, lot);
+  runDays(sim, 0.1, specs: [mill]);
   final jobsBefore = sim.jobs;
   final walk = Walk();
   var t = 0.1 * kColonyDaySec; // colony seconds since placement
-  runDays(sim, 45, specs: [mill], inputs: 0, after: () {
+  runDays(sim, 45, specs: [mill], after: () {
     t += kEconTickS;
     final rec = sim.factoryFloors[lot]!;
-    if (walk.layoff == null && rec.blueprint.roster.isEmpty) walk.layoff = t;
+    if (walk.layoff == null && rec.blueprint.roster[HandlerKind.onFoot] == 1) {
+      walk.layoff = t;
+    }
     final thr = sim.floorThrottleOf(lot);
     if (walk.idle == null && thr == kIdleStationsThrottle) walk.idle = t;
     if (walk.close == null && thr == 0) walk.close = t;

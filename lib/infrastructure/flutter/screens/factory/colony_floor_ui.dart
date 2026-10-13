@@ -387,6 +387,47 @@ class FloorBlueprintPicker extends StatelessWidget {
   }
 }
 
+/// The toolbar's refusal after a placement hover with the held plant's
+/// [misfit] (its picked blueprint doesn't fit its site; null = it fits):
+/// what the toolbar should now say, and the misfit text the hover is now
+/// showing ([shown] is the one it showed before).
+///
+/// A misfit is said once, not re-set on every mouse move. When the pick
+/// fits again (back to Template, or a design that fits) the hover takes
+/// back ITS refusal — but only its own: a refusal something else put up
+/// since stays, and the toolbar never keeps saying "does not fit" over a
+/// green ghost.
+({String? blocked, String? shown}) misfitRefusal({
+  required String? misfit,
+  required String? blocked,
+  required String? shown,
+}) {
+  if (misfit != null) return (blocked: misfit, shown: misfit);
+  if (shown != null && blocked == shown) return (blocked: null, shown: null);
+  return (blocked: blocked, shown: null);
+}
+
+// ---- notices -------------------------------------------------------------
+
+/// Shows every plant-economy notice [city] has queued (an edit undone
+/// because nobody could pay for it, a design lost to a road edit) as a
+/// toast, and drains the queue. Each colony host calls it after a frame:
+/// the HUD in the city game, the in-world editor in the flight view, the
+/// flat builder. Without a [ScaffoldMessenger] it leaves the queue alone.
+void toastEconomyNotices(BuildContext context, CitySim city) {
+  if (city.colonyEconomy.notices.isEmpty) return;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  if (messenger == null) return;
+  for (final why in city.drainEconomyNotices()) {
+    messenger.showSnackBar(SnackBar(
+      key: const Key('economy-notice'),
+      content: Text(why),
+      backgroundColor: const Color(0xFF5A3A12),
+      duration: const Duration(seconds: 6),
+    ));
+  }
+}
+
 // ---- owners and books ----------------------------------------------------
 
 String _healthLabel(FirmHealth h) => switch (h) {
@@ -418,6 +459,9 @@ List<String> floorSiteLines(CitySim city, String site) {
     rec.designed
         ? (rec.dirty ? 'Designed floor — being measured' : 'Designed floor')
         : 'Template floor',
+    // Why the last edit snapped back, once its toast is gone.
+    if (city.colonyEconomy.lastRevert[site] case final why?)
+      'Last edit undone: $why',
   ];
   final pnl = city.colonyEconomy.lastPnl[site];
   if (pnl != null && pnl.seconds > 0) {

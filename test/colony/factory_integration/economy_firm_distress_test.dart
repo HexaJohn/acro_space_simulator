@@ -21,9 +21,9 @@ import 'factory_colony_fixture.dart';
 void main() {
   // The whole ladder, in order, a firm-policy cooldown apart: without the
   // apply step each would be a decision nobody carried out; without the
-  // order a starved firm would close with staff still on the books.
-  test('a starved private plant lays off, idles, closes and is offered', () {
-    final r = starvedMill();
+  // order a losing firm would close with staff still on the books.
+  test('a losing private plant lays off, idles, closes and is offered', () {
+    final r = losingMill();
     final w = r.walk;
     expect(w.layoff, isNotNull, reason: 'the walker is let go');
     expect(w.idle, isNotNull, reason: 'then stations idle');
@@ -44,14 +44,14 @@ void main() {
         [ClosureOption.nationalise, ClosureOption.sellToNewFirm]);
     // A closed plant employs nobody (from the next tick's job count; it
     // closed at the end of this one).
-    runDays(r.sim, 0.01, specs: [specOf('steelmill')], inputs: 0);
+    runDays(r.sim, 0.01, specs: [specOf('steelmill')]);
     expect(r.sim.jobs, lessThanOrEqualTo(r.jobsBefore - 30));
   });
 
   // Nationalising reopens it as a state plant with fresh books; the state
   // never closes it again (its loss becomes the industry deficit).
   test('nationalising a closed plant reopens it under the state', () {
-    final r = starvedMill();
+    final r = losingMill();
     final sim = r.sim;
     expect(sim.resolveFirmOffer(r.lot, ClosureOption.nationalise), isTrue);
     expect(sim.pendingFirmOffers, isEmpty);
@@ -61,9 +61,9 @@ void main() {
     final book = sim.firmBookOf(r.lot)!;
     expect(book.health, FirmHealth.healthy);
     expect(book.cash, 0);
-    // Still starved, and now a state plant: it never acts again, and its
+    // Still losing, and now a state plant: it never acts again, and its
     // loss is charged as the industry deficit.
-    runDays(sim, 2, specs: [specOf('steelmill')], inputs: 0);
+    runDays(sim, 2, specs: [specOf('steelmill')]);
     expect(sim.floorThrottleOf(r.lot), 1);
     expect(sim.pendingFirmOffers, isEmpty);
     expect(sim.industryDeficitRate, greaterThan(0));
@@ -71,7 +71,7 @@ void main() {
 
   // Selling hands it to a NEW firm (a fresh id), fresh books, full throttle.
   test('selling a closed plant reopens it under a new firm', () {
-    final r = starvedMill();
+    final r = losingMill();
     final sim = r.sim;
     final oldFirm = sim.ownerOf(r.lot).firmId;
     expect(sim.resolveFirmOffer(r.lot, ClosureOption.sellToNewFirm), isTrue);
@@ -90,7 +90,7 @@ void main() {
   // Demolishing a closed plant withdraws its offer and drops its books: an
   // offer for a plant that no longer stands would nationalise rubble.
   test('demolishing a closed plant withdraws its offer', () {
-    final r = starvedMill();
+    final r = losingMill();
     final sim = r.sim;
     sim.clearParcel(r.lot);
     expect(sim.pendingFirmOffers, isEmpty);

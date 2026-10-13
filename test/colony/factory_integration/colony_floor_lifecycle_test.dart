@@ -97,6 +97,24 @@ void main() {
       expect(sim.factoryFloors[CitySim.siteIdOfCell(5)], isNotNull,
           reason: 'the grid floor is not a lot');
     });
+
+    // Nothing asks before a road edit drops a lot, so losing a DESIGNED
+    // floor that way is at least said, by name; a template (rebuilt free)
+    // is not worth a notice.
+    test('a road edit that drops a designed floor says so', () {
+      final sim = streetColony();
+      sim.commitRoad(const [Vec2(0, 0), Vec2(0, 300)], RoadClass.street);
+      final far =
+          sim.layout.autoParcels.firstWhere((p) => p.centroid.n > 200);
+      expect(sim.placeOnParcel(far.id, mill), isTrue);
+      sim.factoryFloors[far.id]!
+        ..designed = true
+        ..blueprint.name = 'Night shift';
+      final r = sim.moveRoadEnd('r0', atStart: false, to: const Vec2(0, 100));
+      expect(r.quote.ok, isTrue, reason: r.quote.reason);
+      expect(sim.factoryFloors[far.id], isNull);
+      expect(sim.colonyEconomy.notices.single, contains('Night shift'));
+    });
   });
 
   group('demolition', () {
