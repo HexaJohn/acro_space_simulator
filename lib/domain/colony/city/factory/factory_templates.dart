@@ -1,10 +1,10 @@
-// Copyright (c) 2026 John Peroutka
+﻿// Copyright (c) 2026 John Peroutka
 //
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
-/// The floor every placed plant ships with (docs/plans/factory-floors.md §3
-/// "Templates", §8).
+/// The floor every placed plant ships with (docs/plans/factory-floors.md Â§3
+/// "Templates", Â§8).
 ///
 /// A template is a built-in [FloorBlueprint] whose MEASURED rate matches
 /// the plant's flat `CityBuildingSpec` rate within 5%, so opening a floor
@@ -21,10 +21,10 @@
 /// never get one (user decision, 2026-10-12), so the site menu's "Factory
 /// floor" action can key off `factoryTemplateFor(type) != null`.
 ///
-/// ## The Steel Mill (spec: 2 ore → 1.5 steel + 0.4 tubes /s, 35 jobs)
+/// ## The Steel Mill (spec: 2 ore â†’ 1.5 steel + 0.4 tubes /s, 35 jobs)
 ///
-/// A 66 × 56 m hall, two identical lines, a shared tube corner and a
-/// forklift aisle down the shipping wall — the plan's realistic mix (§3
+/// A 66 Ã— 56 m hall, two identical lines, a shared tube corner and a
+/// forklift aisle down the shipping wall â€” the plan's realistic mix (Â§3
 /// "Template plants"): conveyors where freight is steady, people where it
 /// is fiddly, a forklift for pallets and a crane over the heavy line.
 ///
@@ -32,10 +32,10 @@
 ///   1 ore/s straight onto a belt. Two pallets a second unloaded by hand
 ///   and forklift into staging would take ~16 forklifts of trips and
 ///   swamp the 35 jobs, so the template uses the expensive automated dock
-///   (§3 "Docks are manual by default … dock conveyors are the upgrade")
+///   (Â§3 "Docks are manual by default â€¦ dock conveyors are the upgrade")
 ///   and `capexOf` charges it as one. A designer who unloads by hand saves
 ///   that capex and pays in jobs: a real trade, not a free win.
-/// * Arms feed two smelters (ore → pig iron + slag) and drop pig iron onto
+/// * Arms feed two smelters (ore â†’ pig iron + slag) and drop pig iron onto
 ///   a belt to the furnace. Slag never leaves: an arm from each smelter
 ///   feeds the press between them, which makes tubes from it.
 /// * **Billets are heavy, so a crane moves them.** The furnace and the
@@ -53,7 +53,7 @@
 ///   forklift fetching them from the middle of the hall would be a full
 ///   forklift's work), crossing the aisle on crossings.
 ///
-/// Jobs: 9 manual stations × 2 + 4 assisted × 1 + 9 walkers + 2 forklift
+/// Jobs: 9 manual stations Ã— 2 + 4 assisted Ã— 1 + 9 walkers + 2 forklift
 /// drivers + 2 crane drivers = 35, the spec's count.
 library;
 
@@ -61,13 +61,13 @@ import 'factory_catalog.dart';
 import 'factory_entities.dart';
 import 'factory_grid.dart';
 import 'factory_handling.dart';
-import 'factory_recipe.dart';
 import 'floor_blueprint.dart';
+import 'template_layout.dart';
 
 /// The plant type the Steel Mill template is for (`CityBuildingSpec.type`).
 const String kSteelMillType = 'steelmill';
 
-/// Steel Mill hall: 33 × 28 tiles = 66 × 56 m — the two lines, the tube
+/// Steel Mill hall: 33 Ã— 28 tiles = 66 Ã— 56 m â€” the two lines, the tube
 /// corner and a 4 m forklift aisle along the shipping wall, no more (hall
 /// area is build cost).
 const HallSize kSteelMillHall = HallSize(33, 28);
@@ -98,42 +98,6 @@ FloorBlueprint? factoryTemplateFor(String plantType) {
 
 /// Hands out placement ids in order, so the template is stable across
 /// builds (saves key runtime state by id).
-class _Layout {
-  final List<Placement> out = [];
-  int _id = 1;
-
-  void add(EntityKind kind, int x, int y,
-      {Dir4 dir = Dir4.east,
-      String? recipe,
-      MachineMode? mode,
-      String? item,
-      (int, int)? span}) {
-    out.add(Placement(
-        id: _id++,
-        kind: kind,
-        pos: TilePos(x, y),
-        dir: dir,
-        recipe: recipe,
-        mode: mode,
-        item: item,
-        span: span));
-  }
-
-  void machine(int x, int y, FactoryRecipe r,
-          {MachineMode mode = MachineMode.manual}) =>
-      add(EntityKind.machine, x, y, recipe: r.id, mode: mode);
-
-  void arm(int x, int y, Dir4 dir, {String? only}) =>
-      add(EntityKind.arm, x, y, dir: dir, item: only);
-
-  /// An eastbound belt over x0..x1 inclusive; [crossings] are walkable.
-  void beltEast(int x0, int x1, int y, {Set<int> crossings = const {}}) {
-    for (var x = x0; x <= x1; x++) {
-      add(crossings.contains(x) ? EntityKind.crossing : EntityKind.belt, x, y);
-    }
-  }
-}
-
 /// x of the forklift aisle's west lane (two tiles wide).
 const int _aisleX = 29;
 
@@ -141,7 +105,7 @@ const int _aisleX = 29;
 const int _shipX = 31;
 
 /// One ore-to-steel line with its base row at [y].
-void _steelLine(_Layout l, int y, {Set<int> oreCrossings = const {}}) {
+void _steelLine(TemplateLayout l, int y, {Set<int> oreCrossings = const {}}) {
   // Ore in on a dock conveyor: dock on the west wall, belt past both
   // smelters.
   l.add(EntityKind.receivingDock, 0, y, item: 'ore');
@@ -152,8 +116,8 @@ void _steelLine(_Layout l, int y, {Set<int> oreCrossings = const {}}) {
   l.machine(4, y + 2, SteelRecipes.smelt);
   l.machine(9, y + 2, SteelRecipes.tube);
   l.machine(13, y + 2, SteelRecipes.smelt);
-  l.arm(8, y + 3, Dir4.east); // smelter A → press (takes slag only)
-  l.arm(12, y + 3, Dir4.west); // smelter B → press
+  l.arm(8, y + 3, Dir4.east); // smelter A â†’ press (takes slag only)
+  l.arm(12, y + 3, Dir4.west); // smelter B â†’ press
   // Pig iron to the furnace by belt, with a crossing to the press.
   l.arm(6, y + 6, Dir4.north, only: 'pigIron');
   l.arm(14, y + 6, Dir4.north, only: 'pigIron');
@@ -169,7 +133,7 @@ void _steelLine(_Layout l, int y, {Set<int> oreCrossings = const {}}) {
 }
 
 FloorBlueprint _steelMill() {
-  final l = _Layout();
+  final l = TemplateLayout();
   _steelLine(l, 2);
   // The tube corner between the lines: walkers bring tubes from both
   // presses; crates leave by arm and belt, crossing the forklift aisle.
