@@ -10,71 +10,97 @@
 /// steady state is the plant's flat `CityBuildingSpec` rate within 5%, whose
 /// jobs are the spec's within 10%, and whose build cost (`capexOf`) is the
 /// spec's `buildCost` within 10%, so opening the floor never changes what
-/// the colony gets or pays. And it is deliberately "fine, not great": a
-/// designer can beat it.
+/// the colony gets or pays. "Measured" means what the game really runs:
+/// `FloorMeasureRunner` re-measures a floor with `MeasureSettings.standard`
+/// (60 s warm-up, at most 300 s measured), and an untouched template must
+/// read the spec there, not only over a long test window. And it is
+/// deliberately "fine, not great": a designer can beat it.
 ///
 /// ## Mass balance (spec: 0.5 tubes + 0.3 electronics → 0.4 rocket parts /s)
 ///
 /// Per second, at the spec rate, in colony units:
 ///
-///     0.05 tube crates ──de-crate──► 0.5 tubes ──────weld 5→2──► 0.2 frames ──────┐
-///                                                                                 ├─assemble─► 0.4 rocket parts
-///     0.03 board crates ──unpack──► 0.3 electronics ──wire 3→2──► 0.2 harnesses ──┘
+///     0.5 tubes ─────── 6 welding cells, 5 → 2 ──► 0.2 frames ──────┐
+///                                                                   ├─ 4 bays ─► 0.4 rocket parts
+///     0.3 electronics ─ 6 wiring benches, 3 → 2 ─► 0.2 harnesses ───┘
 ///
 /// (assemble: 1 frame + 1 harness → 2 rocket parts.)
 ///
-/// Tubes and electronics arrive as the colony's own crates (ten units each,
-/// `FactoryItems.crateTubes` / `crateElectronics`) and rocket parts leave
-/// loose, one heavy section at a time (`FactoryItems.rocketParts`), so the
-/// docks book exactly the spec's commodities. The two intermediates — a
-/// welded frame and an avionics harness — never leave: the plant ships
-/// rocket parts and nothing else, and takes tubes and electronics and
-/// nothing else.
+/// Tubes and electronics arrive loose, one unit per item, and rocket parts
+/// leave loose, one heavy section at a time, so the docks book exactly the
+/// spec's commodities, and a 300 s window counts them to within one unit
+/// (under 1%). (Crates would book ten units at a time: one crate either
+/// side of a 300 s window is ±7% on tubes and ±11% on electronics.) The
+/// two intermediates, a welded frame and an avionics harness, never leave.
+/// The plant ships rocket parts and nothing else, and takes tubes and
+/// electronics and nothing else.
 ///
-/// ## The floor (46 × 23 tiles = 92 × 46 m)
+/// ## Why the slow stations come first
 ///
-/// Two identical lines, the second mirrored so both lines' benches face a
-/// central muster corridor where the walkers wait. Truck doors on the west
-/// wall, shipping doors on the east. The realistic mix the user asked for
-/// (§3 "Template plants"): conveyors where flow is steady, people and
-/// forklifts at the docks, people for the hand loads, and a crane over the
-/// heavy work.
+/// What the floor holds in steady state, it must take in before it reads
+/// the spec rate: a 300 s window after a 60 s warm-up still counts whatever
+/// stock is building up. So the template is laid out to hold little and to
+/// fill it fast:
 ///
-/// * **Tube crates come in on a dock conveyor.** A roller run carries them
-///   across the forklift aisle (on crossings) to a de-crating station with
-///   one operator; loose tubes ride a conveyor the length of the hall and up
-///   a column past two welding cells, whose arms pick them off. Tubes are
-///   the steadiest flow in the plant, so this is where the belt pays.
-///   (`capexOf` charges the dock conveyor as the automated upgrade it is.)
-/// * **Board crates are a forklift job.** They are set down on a staging
-///   pad by the door; a forklift runs each one down the line's aisle to the
-///   unpacking bench. Two forklifts share the plant and charge at bays
-///   beside the aisle.
-/// * **Electronics and harnesses are hand work.** Walkers carry boards from
-///   the unpacking bench to two wiring benches, and harnesses from the
-///   benches to the final-assembly bays — the near bay by its open side, the
-///   far one across a walkway crossing on the tube column. Those walks are
-///   the plant's real limit: sixteen walkers hold the spec rate, fifteen
-///   fall ~5% short, so the template staffs seventeen.
-/// * **Frames go by transfer arm.** Each welding cell stands beside its own
-///   assembly bay, and a jib arm swings each frame straight in.
-/// * **Rocket parts are heavy, so a crane ships them.** Each line's two
-///   assembly bays and its shipping door sit under one crane bay; the hook
-///   stands where the door meets both bays, so it lifts every finished
-///   section from bay to door without travelling.
+/// * **The pace is set at the start of the chain.** The welding cells and
+///   wiring benches run at exactly the spec rate (one 60 s cycle each, see
+///   [RocketPartsRecipes]), and everything after them is faster. Stock
+///   never piles up behind a slow assembly bay; the bays wait for parts.
+/// * **Every slow station is fed straight from its own door**, so its
+///   buffer is full within seconds. Each welding cell has a tube door and a
+///   one-tile roller run; each wiring bench has an electronics door whose
+///   crew hands boxes straight onto the bench. No long belt or staging pad
+///   fills up for minutes. Measured, the floor settles at about 120 tubes
+///   and 54 electronics, all on the doors' rollers and in the stations'
+///   buffers, and holds that from the first minute on.
+/// * **A 60 s cycle divides the 300 s window exactly**, so a window counts
+///   five whole cycles of every station, not four or five by luck.
 ///
-/// Every station is crewed: the de-craters are assisted (one operator
-/// minding the roller table); unpacking, welding, wiring and assembly are
-/// manual. Jobs: 2 × 1 + 14 × 2 = 30 at stations, + 17 walkers + 2
-/// forklift drivers + 2 crane drivers = 51, against the spec's 50.
+/// ## The floor (26 × 20 tiles = 52 × 40 m)
+///
+/// Two identical lines, the second mirrored across a 4-row middle floor.
+/// Line one (the long wall is row 0):
+///
+///          x 0    5    10   15   20   25
+///     row 0  ..T..T..T........E..E..E..    T tube door, E electronics door
+///     row 1  ..T..T..T........E..E..E..
+///     row 2  ..b..b..b...SS..HHHHHHHHH.    b roller run, SS shipping door
+///     row 3  .WWWWWWWWWAAAAAAHHHHHHHHH.    W welding cell, A assembly bay,
+///     row 4  .WWWWWWWWWAAAAAAHHHHHHHHH.    H wiring bench
+///     row 5  .WWWWWWWWWAAAAAA..........
+///     row 6  .========================.    forklift aisle
+///     row 7  .========================.
+///
+/// The crane runway covers x 10-15, rows 2-5: both bays and the door. The
+/// middle floor holds the walkers' muster pad (by the benches), the
+/// forklifts' charging bay and a link aisle between the two lines. This is
+/// the realistic mix the user asked for (§3 "Template plants"): roller
+/// conveyors where the flow is steady, people and forklifts for the hand
+/// and pallet loads, and a crane over the heavy work.
+///
+/// * **Frames are pallet loads, so forklifts carry them** along the aisle
+///   from the cells to the bays. Measured: two forklifts fall about 12%
+///   short once their batteries start to cycle, and three hold the rate.
+///   The template keeps a fourth as a spare. It is slack, and a lever.
+/// * **Harnesses are hand work.** Walkers carry them from the benches to
+///   the bays. Measured: six walkers hold the long-run rate, and eight also
+///   hold it through the start-up a re-measure sees. The template staffs
+///   twelve, so the crew is slack too (another lever).
+/// * **Rocket parts are heavy, so a crane ships them.** The shipping door
+///   sits where the two bays meet, so the hook lifts every finished section
+///   from bay to door without travelling.
+///
+/// Every station is crewed and manual (two people, speed 0.6): none is
+/// lights-out. Jobs: 16 stations × 2 = 32, + 12 walkers + 4 forklift
+/// drivers + 2 crane drivers = 50, the spec's count.
 ///
 /// ## Where it leaves room (the Reward levers, §3)
 ///
-/// The assembly bays could make ~4% more than the spec if the walkers kept
-/// up; they don't quite, which is what sets the rate. A designer who moves
-/// the wiring benches beside the bays, belts the harnesses, or re-crews the
-/// manual stations with an operator each gets the same parts for far fewer
-/// jobs, or more parts if the bays are sped up too.
+/// The bays run about 20% busy and the cells and benches are fully manual.
+/// A designer who gives every station one operator and its controls
+/// (assisted) gets the same parts for 16 fewer jobs, or more parts from the
+/// same doors. Trimming the walkers to eight and the forklifts to three
+/// costs nothing either.
 library;
 
 import '../factory_catalog.dart';
@@ -94,7 +120,7 @@ class RocketPartsItems {
   RocketPartsItems._();
 
   /// A welded tube frame for one pair of stage sections: a pallet load, too
-  /// big to carry by hand but light work for a jack or a jib arm.
+  /// big to carry by hand, so forklift work.
   static const frame = FactoryItem(
       id: 'rocketfactory:frame', label: 'Welded Frame',
       loadClass: LoadClass.pallet, kgPerUnit: 200);
@@ -115,43 +141,17 @@ class RocketPartsItems {
 class RocketPartsRecipes {
   RocketPartsRecipes._();
 
-  static const unpackTubes = FactoryRecipe(
-    id: 'rocketfactory:unpackTubes',
-    label: 'De-crate Tubes',
-    station: StationKind.unpacker,
-    inputs: [ItemQty('crate:tubes', 1)],
-    outputs: [ItemQty('tubes', 10)],
-    // 6 s: an assisted de-crater empties a crate in 6 s, 1.7 tubes/s against
-    // a line's 0.25. It idles most of the time, but a fast one fills the
-    // long tube conveyor inside the first few minutes, so the plant reaches
-    // its steady state quickly.
-    seconds: 6,
-    // A band cutter and a powered roller table.
-    powerKw: 5,
-  );
-
-  static const unpackElectronics = FactoryRecipe(
-    id: 'rocketfactory:unpackElectronics',
-    label: 'Unpack Boards',
-    station: StationKind.unpacker,
-    inputs: [ItemQty('crate:electronics', 1)],
-    outputs: [ItemQty('electronics', 10)],
-    // 6 s: a manual bench (10 s) unpacks 1 board/s against a line's 0.15 —
-    // never the limit; the walkers fetching from it are.
-    seconds: 6,
-    // Lighting and an ESD-safe bench.
-    powerKw: 5,
-  );
-
   static const weldFrame = FactoryRecipe(
     id: 'rocketfactory:weldFrame',
     label: 'Weld Frame',
     station: StationKind.assembler,
     inputs: [ItemQty('tubes', 5)],
     outputs: [ItemQty('rocketfactory:frame', 2)],
-    // 18 s: a manual cell (30 s) makes 0.067 frames/s, so a line's two make
-    // 0.13 against the 0.1 its bays use — 75% busy, the Steel Mill's slack.
-    seconds: 18,
+    // 36 s: a manual cell (60 s) uses 5 tubes a minute. Six cells use 0.5
+    // tubes/s, exactly the spec, so the cells set the plant's pace (see
+    // "Why the slow stations come first"). A 60 s cycle also divides the
+    // re-measure's 300 s window exactly.
+    seconds: 36,
     // Two arc-welding sets and fume extraction.
     powerKw: 60,
   );
@@ -162,8 +162,10 @@ class RocketPartsRecipes {
     station: StationKind.assembler,
     inputs: [ItemQty('electronics', 3)],
     outputs: [ItemQty('rocketfactory:avionics', 2)],
-    // 18 s: as the welders, two manual benches a line run 75% busy.
-    seconds: 18,
+    // 36 s: as the welders, a manual bench (60 s) uses 3 boards a minute,
+    // and six use the spec's 0.3/s. It also makes harnesses as fast as the
+    // cells make frames, so neither intermediate piles up.
+    seconds: 36,
     // Soldering stations and a harness test rig.
     powerKw: 10,
   );
@@ -177,17 +179,17 @@ class RocketPartsRecipes {
       ItemQty('rocketfactory:avionics', 1),
     ],
     outputs: [ItemQty('rocketParts', 2)],
-    // 11.5 s: four manual bays (19.2 s each) can make 0.417 parts/s, 4%
-    // over the spec — so the bays never cap the plant below its rate, and
-    // the harness walkers, not the bays, decide it.
-    seconds: 11.5,
+    // 2.4 s: bolting a finished frame and harness together is a quick
+    // fit-up next to welding and wiring. A manual bay (4 s) can make 0.5
+    // parts/s, and the four make 2.0 against the spec's 0.4. The bays must
+    // never set the pace: the cells' frames land six at a time each
+    // minute, and fast bays clear that lump in seconds, not minutes.
+    seconds: 2.4,
     // Torque tools, a fit-up hoist and a leak-test cart.
     powerKw: 40,
   );
 
-  static const all = [
-    unpackTubes, unpackElectronics, weldFrame, wireAvionics, assemble,
-  ];
+  static const all = [weldFrame, wireAvionics, assemble];
 }
 
 /// Registers the chain's items and recipes. Idempotent: the registries take
@@ -201,68 +203,58 @@ void registerRocketPartsChain() {
   }
 }
 
-/// x of each line's tube column (the belt turning up past the welders):
-/// 34 tiles of conveyor from the west docks, with the unpacking and wiring
-/// benches in the stretch before it.
-const int _colX = 34;
+/// Hall: 26 × 20 tiles = 52 × 40 m. Each line is 8 rows (doors, rollers,
+/// stations, aisle), with a 4-row middle floor between them. It is a
+/// compact assembly shop well inside the 700 × 500 m site, sized so that
+/// `capexOf` lands near the spec's 40 ore.
+const HallSize kRocketPartsHall = HallSize(26, 20);
 
-/// Hall: 46 × 23 tiles = 92 × 46 m. Each line is 9 rows; a row of floor
-/// along each outer wall and a 3-row muster corridor between them. A long
-/// shed, as stage-sized parts want, and well inside the 700 × 500 m site.
-const HallSize kRocketPartsHall = HallSize(_colX + 12, 2 * (1 + 9) + 3);
+/// Walkers carrying harnesses from the benches to the bays. Measured: six
+/// hold the long-run rate, and eight also hold it through the first
+/// minutes. Twelve is slack, a lever for a designer.
+const int kRocketPartsWalkers = 12;
 
-/// Walkers carrying boards and harnesses. Measured: sixteen hold the spec
-/// rate, fifteen fall ~5% short; seventeen keeps one spare.
-const int kRocketPartsWalkers = 17;
+/// Forklifts running frames from the welding cells to the bays. Measured:
+/// two fall about 12% short once the batteries cycle, and three hold the
+/// rate. The fourth is a spare: slack, and a lever.
+const int kRocketPartsForklifts = 4;
 
-/// Forklifts running board crates from the doors: light work for one, but
-/// one is often away charging, so the template keeps two.
-const int kRocketPartsForklifts = 2;
-
-/// One crane per line's assembly bay.
+/// One crane per line's pair of bays.
 const int kRocketPartsCranes = 2;
 
-/// One line. [y0] is its row along the outer wall; [flip] mirrors it about
-/// the hall's middle so the second line's benches face the first's across
-/// the muster corridor.
+/// x of a line's first assembly bay and of its first wiring bench.
+const int _bayX = 10, _wireX = 16;
+
+/// One line. [y0] is its first row inside the long wall (the doors take
+/// that row and the wall row behind it); [flip] mirrors it about the
+/// hall's middle, so the second line's doors are on the opposite wall.
 void _line(TemplateLayout l, int y0, {required bool flip}) {
   // The row of a thing [h] tiles tall whose near edge is [dy] rows in.
   int y(int dy, [int h = 1]) => flip ? y0 - dy - (h - 1) : y0 + dy;
   final inward = flip ? Dir4.south : Dir4.north;
-  const weldX = _colX + 2, asmX = _colX + 6;
-  // Tube crates in on a dock conveyor across the forklift aisle, de-crated
-  // and sent down the hall on the tube conveyor.
-  l.add(EntityKind.receivingDock, 0, y(0), item: 'crate:tubes');
-  l.beltEast(2, 6, y(0), crossings: {4, 5});
-  l.arm(7, y(0), Dir4.east);
-  l.machine(8, y(0, 2), RocketPartsRecipes.unpackTubes,
-      mode: MachineMode.assisted);
-  l.arm(11, y(0), Dir4.east);
-  l.beltEast(12, _colX - 1, y(0));
-  // The column past both welding cells; its crossing is the walkers' way
-  // to the far assembly bay.
-  l.beltRun(y(0), y(6), _colX, inward, crossings: {y(1)});
-  l.arm(_colX + 1, y(3), Dir4.east);
-  l.machine(weldX, y(2, 3), RocketPartsRecipes.weldFrame);
-  l.arm(_colX + 1, y(6), Dir4.east);
-  l.machine(weldX, y(5, 3), RocketPartsRecipes.weldFrame);
-  // Frames by jib arm straight into the assembly bays.
-  l.arm(weldX + 3, y(3), Dir4.east);
-  l.arm(weldX + 3, y(6), Dir4.east);
-  l.machine(asmX, y(2, 3), RocketPartsRecipes.assemble);
-  l.machine(asmX, y(5, 3), RocketPartsRecipes.assemble);
-  // The shipping door between the bays' ends, all under one crane.
-  l.add(EntityKind.shippingDock, asmX + 3, y(4), item: 'rocketParts');
-  l.add(EntityKind.craneBay, asmX, y(2, 6), span: (5, 6));
-  // Board crates: staging by the door, a forklift lane to the unpacking
-  // bench, and the wiring benches a short walk on.
-  l.add(EntityKind.receivingDock, 0, y(2), item: 'crate:electronics');
-  l.add(EntityKind.staging, 2, y(2, 2), span: (2, 2));
-  l.add(EntityKind.aisle, 6, y(2, 2), span: (_colX - 14, 2));
-  l.machine(_colX - 8, y(2, 2), RocketPartsRecipes.unpackElectronics);
-  l.machine(_colX - 7, y(5, 3), RocketPartsRecipes.wireAvionics);
-  l.machine(_colX - 4, y(5, 3), RocketPartsRecipes.wireAvionics);
-  l.add(EntityKind.chargingBay, 2, y(4, 2));
+  // Three welding cells, each fed by its own tube door and roller run.
+  for (var i = 0; i < 3; i++) {
+    final x = 1 + 3 * i;
+    l.add(EntityKind.receivingDock, x + 1, y(-1, 2),
+        dir: inward, item: 'tubes');
+    l.beltRun(y(1), y(1), x + 1, inward);
+    l.machine(x, y(2, 3), RocketPartsRecipes.weldFrame);
+  }
+  // Two bays side by side, the shipping door over their seam, all under
+  // one crane.
+  l.machine(_bayX, y(2, 3), RocketPartsRecipes.assemble);
+  l.machine(_bayX + 3, y(2, 3), RocketPartsRecipes.assemble);
+  l.add(EntityKind.shippingDock, _bayX + 2, y(1), item: 'rocketParts');
+  l.add(EntityKind.craneBay, _bayX, y(1, 4), span: (6, 4));
+  // Three wiring benches, each loaded straight from its own door.
+  for (var i = 0; i < 3; i++) {
+    final x = _wireX + 3 * i;
+    l.add(EntityKind.receivingDock, x + 1, y(-1, 2),
+        dir: inward, item: 'electronics');
+    l.machine(x, y(1, 3), RocketPartsRecipes.wireAvionics);
+  }
+  // The forklift aisle along the line, under the cells and the bays.
+  l.add(EntityKind.aisle, 1, y(5, 2), span: (_wireX + 8, 2));
 }
 
 /// A fresh Rocket Parts Factory template blueprint (each call a new one the
@@ -271,13 +263,17 @@ FloorBlueprint rocketfactoryTemplate() {
   ensureFactoryCatalog();
   registerRocketPartsChain();
   final l = TemplateLayout();
-  // The muster corridor's staging area comes first: idle walkers gather at
-  // the first staging area, and here that is the middle of their work.
-  l.add(EntityKind.staging, _colX - 1, 10, span: (3, 3));
+  final h = kRocketPartsHall.h;
+  // The walkers' muster pad comes first: idle walkers gather at the first
+  // staging area. It sits in the middle floor below the benches, where
+  // their work starts.
+  l.add(EntityKind.staging, 20, h ~/ 2 - 1, span: (3, 2));
   _line(l, 1, flip: false);
-  _line(l, kRocketPartsHall.h - 2, flip: true);
-  // The forklift aisle down the dock wall.
-  l.add(EntityKind.aisle, 4, 0, span: (2, kRocketPartsHall.h));
+  _line(l, h - 2, flip: true);
+  // A link aisle joins the two lines' aisles, so every forklift can reach
+  // both lines and the one charging bay beside it.
+  l.add(EntityKind.aisle, 3, 6, span: (2, h - 12));
+  l.add(EntityKind.chargingBay, 1, h ~/ 2 - 1);
   return FloorBlueprint(
     name: 'Rocket Parts Factory',
     plantType: kRocketPartsType,

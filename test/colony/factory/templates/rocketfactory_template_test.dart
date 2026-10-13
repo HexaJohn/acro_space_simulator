@@ -12,8 +12,11 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_item.dart';
+import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_ledger.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_measure.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_recipe.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/floor_blueprint.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/templates/rocketfactory_template.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,16 +31,17 @@ import '../factory_test_support.dart';
 void main() {
   final spec = kUtilCatalog.firstWhere((s) => s.type == kRocketPartsType);
 
-  /// The steady state the spec is checked against: five minutes of warm-up
-  /// (belts filling, crates staged, walkers out to their first pickups),
-  /// then 40 minutes measured — crates land ten units at a time, so a long
-  /// window keeps one crate's lump under 1% of a rate.
+  /// The long-run steady state: five minutes of warm-up, then 40 minutes
+  /// measured. Tubes and electronics arrive loose, so one unit either side
+  /// of the window is under 0.1% of a rate here. Back-to-back 1200 s windows
+  /// read the spec too (see the windows test below); the long window is
+  /// not what makes this pass.
   MeasuredRates steady(FactoryFloor f) =>
       measure(f, InfiniteColonyPort(), warmupS: 300, windowS: 2400);
 
-  /// Every dock rate within 5% of the spec, counted in commodity units (a
-  /// crate counts its ten), and nothing else in or out: the frames and
-  /// harnesses are used up inside, so the colony sees only the spec's goods.
+  /// Every dock rate within 5% of the spec, counted in commodity units,
+  /// and nothing else in or out: the frames and harnesses are used up
+  /// inside, so the colony sees only the spec's goods.
   test('steady state is the spec rate within 5%, and nothing else', () {
     final r = steady(FactoryFloor.fromBlueprint(rocketfactoryTemplate()));
     expect(r.inPerS.keys.toSet(), spec.inputs.keys.toSet(),
@@ -53,6 +57,84 @@ void main() {
     expect(r.jobs, closeTo(spec.jobs, spec.jobs * 0.10));
   });
 
+  /// What the game really reads. `FloorMeasureRunner` re-measures a floor
+  /// with `MeasureSettings.standard` (60 s warm-up, at most 300 s), for
+  /// example when the editor closes. An untouched template must read the
+  /// spec there too, or opening and closing the floor would change what the
+  /// colony gets. Start-up stock (belts and pads still filling, buffers
+  /// still priming) counts as intake in so short a window, so this is the
+  /// test that keeps the floor's stock small and quick to fill.
+  test('the game\'s standard re-measure reads the spec within 5%', () {
+    final r = measureBlueprint(rocketfactoryTemplate(), FactoryFloor.fromBlueprint,
+        settings: MeasureSettings.standard);
+    expect(r.inPerS.keys.toSet(), spec.inputs.keys.toSet());
+    expect(r.outPerS.keys.toSet(), spec.outputs.keys.toSet());
+    spec.inputs.forEach((c, rate) {
+      expect(r.inPerS[c]!, closeTo(rate, rate * 0.05),
+          reason: 'in $c: ${r.inPerS}');
+    });
+    spec.outputs.forEach((c, rate) {
+      expect(r.outPerS[c]!, closeTo(rate, rate * 0.05),
+          reason: 'out $c: ${r.outPerS}');
+    });
+  });
+
+  /// The steady state really is steady: four back-to-back 1200 s windows
+  /// each read the spec within 1%, and the floor's stock is the same at the
+  /// end of each. So a pass is not bought with a long window's averaging
+  /// (with crates, 1200 s windows swung about ±6% on electronics).
+  test('back-to-back 1200 s windows each read the spec, stock flat', () {
+    final f = FactoryFloor.fromBlueprint(rocketfactoryTemplate());
+    final port = InfiniteColonyPort();
+    f.step(300, port);
+    f.takeLedger();
+    Map<String, int>? stock;
+    for (var i = 0; i < 4; i++) {
+      f.step(1200, port);
+      final l = f.takeLedger();
+      final r = ratesOf(l, jobs: f.jobDemand);
+      spec.inputs.forEach((c, rate) {
+        expect(r.inPerS[c]!, closeTo(rate, rate * 0.01),
+            reason: 'window $i in $c: ${r.inPerS}');
+      });
+      spec.outputs.forEach((c, rate) {
+        expect(r.outPerS[c]!, closeTo(rate, rate * 0.01),
+            reason: 'window $i out $c: ${r.outPerS}');
+      });
+      // Raw materials on the floor (rollers and buffers) hold level; the
+      // few frames, harnesses and parts in flight vary by a lump or two.
+      final s = {
+        for (final k in ['tubes', 'electronics']) k: f.itemsOnFloor[k] ?? 0,
+      };
+      if (stock != null) expect(s, stock, reason: 'window $i stock');
+      stock = s;
+    }
+  });
+
+  /// The fleet's slack is what the library doc says it is: three forklifts
+  /// hold the long-run rate and two do not, and eight walkers hold even
+  /// the game's short re-measure. The template keeps four forklifts and
+  /// twelve walkers, so both are levers, not needs.
+  test('three forklifts and eight walkers hold the rate; two forklifts do not',
+      () {
+    FloorBlueprint crewed(HandlerKind k, int n) =>
+        rocketfactoryTemplate()..roster[k] = n;
+    final parts = spec.outputs[Commodity.rocketParts]!;
+    final three = steady(FactoryFloor.fromBlueprint(
+        crewed(HandlerKind.forklift, 3)));
+    expect(three.outPerS['rocketParts']!, closeTo(parts, parts * 0.05));
+    final two = steady(FactoryFloor.fromBlueprint(
+        crewed(HandlerKind.forklift, 2)));
+    expect(two.outPerS['rocketParts']!, lessThan(parts * 0.95),
+        reason: 'two forklifts should fall short: ${two.outPerS}');
+    final eight = measureBlueprint(
+        crewed(HandlerKind.onFoot, 8), FactoryFloor.fromBlueprint);
+    expect(eight.outPerS['rocketParts']!, closeTo(parts, parts * 0.05));
+    expect(kRocketPartsForklifts, greaterThan(3));
+    expect(kRocketPartsWalkers, greaterThan(8));
+  });
+
+
   /// Placing the plant with its template costs what the plant always cost,
   /// and the hall is a believable shed that fits the site.
   test('builds for the spec cost, in a hall that fits the site', () {
@@ -63,8 +145,9 @@ void main() {
         reason: '$c against ${spec.buildCost} ore');
     expect(bp.hall.widthM, lessThanOrEqualTo(spec.siteWidthM));
     expect(bp.hall.depthM, lessThanOrEqualTo(spec.siteDepthM));
-    // Stage-sized parts want a long shed, but not a site-sized one.
-    expect(bp.hall.widthM, inInclusiveRange(60, 250));
+    // A real assembly shop: big enough for two lines of 6 m cells and bays
+    // with a forklift aisle, nowhere near the size of the site.
+    expect(bp.hall.widthM, inInclusiveRange(40, 250));
     expect(bp.hall.depthM, inInclusiveRange(30, 200));
     expect(bp.plantType, kRocketPartsType);
     expect(identical(rocketfactoryTemplate(), rocketfactoryTemplate()),
