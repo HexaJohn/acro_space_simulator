@@ -17,6 +17,11 @@
 /// crossing is a belt tile with a walkway over it). Aisles, staging areas
 /// and crane bays are floor markings and stay walkable. Path cost is tiles.
 ///
+/// **Layers** (phase 4). Walkers path on the walkable mask, layer 0. Other
+/// handler kinds path on their own masks ([setLayer]: a forklift's
+/// drivable aisles, a crane's bay), and the one cache holds fields for all
+/// of them keyed by (layer, target), so the bound below covers every kind.
+///
 /// Deterministic: neighbours are always tried in [Dir4] order (east, north,
 /// west, south), goals are seeded row-major, and the BFS queue is a plain
 /// array — nothing depends on hash order.
@@ -63,45 +68,70 @@ class FloorPathing {
   final int maxFields;
 
   /// Insertion order = recency: a hit is moved to the end, eviction takes
-  /// the first key.
-  final LinkedHashMap<int, Uint16List> _fields = LinkedHashMap();
+  /// the first key. Keyed by (layer, target).
+  final LinkedHashMap<(int, int), Uint16List> _fields = LinkedHashMap();
+
+  /// Passability masks other than layer 0 ([walkable]), by layer id.
+  final Map<int, Uint8List> _layers = {};
 
   int _index(TilePos t) => t.y * hall.w + t.x;
 
   bool isWalkable(TilePos t) =>
       hall.contains(t) && walkable[_index(t)] == 1;
 
+  /// Sets layer [layer]'s mask (same shape as [walkable]; 1 = passable).
+  /// Layer 0 is always [walkable]. Call before asking for its fields.
+  void setLayer(int layer, Uint8List mask) {
+    assert(layer != 0 && mask.length == walkable.length);
+    _layers[layer] = mask;
+  }
+
+  /// [layer]'s mask, or null for a layer never set (nothing passable).
+  Uint8List? maskOf(int layer) => layer == 0 ? walkable : _layers[layer];
+
+  /// Whether [t] is passable on [layer].
+  bool isPassable(int layer, TilePos t) {
+    if (!hall.contains(t)) return false;
+    final m = maskOf(layer);
+    return m != null && m[_index(t)] == 1;
+  }
+
   /// Number of flow fields built so far (the cache's size), for tests.
   int get cachedFields => _fields.length;
 
-  /// Whether [targetId]'s field is cached now (tests).
-  bool isCached(int targetId) => _fields.containsKey(targetId);
+  /// Whether [targetId]'s field on [layer] is cached now (tests).
+  bool isCached(int targetId, {int layer = 0}) =>
+      _fields.containsKey((layer, targetId));
 
-  /// The flow field to [targetId]'s [goals] (walkable tiles, row-major).
-  /// Cached by [targetId] (any int: the floor reserves negative keys for
-  /// floor piles and the idle spot); the caller makes a fresh [FloorPathing]
-  /// whenever the layout changes, which is the whole invalidation story, and
-  /// must always pass the same goals for one key within one layout.
-  Uint16List fieldTo(int targetId, List<TilePos> goals) {
-    final hit = _fields.remove(targetId);
+  /// The flow field to [targetId]'s [goals] (passable tiles, row-major) on
+  /// [layer]. Cached by (layer, target) (any ints: the floor reserves
+  /// negative target keys for floor piles and the idle spot); the caller
+  /// makes a fresh [FloorPathing] whenever the layout changes, which is the
+  /// whole invalidation story, and must always pass the same goals for one
+  /// key within one layout.
+  Uint16List fieldTo(int targetId, List<TilePos> goals, {int layer = 0}) {
+    final key = (layer, targetId);
+    final hit = _fields.remove(key);
     if (hit != null) {
-      _fields[targetId] = hit;
+      _fields[key] = hit;
       return hit;
     }
     while (_fields.length >= maxFields) {
       _fields.remove(_fields.keys.first);
     }
-    return _fields[targetId] = _bfs(goals);
+    final mask = maskOf(layer) ?? Uint8List(walkable.length);
+    return _fields[key] = _bfs(goals, mask);
   }
 
-  Uint16List _bfs(List<TilePos> goals) {
+  Uint16List _bfs(List<TilePos> goals, Uint8List walkable) {
     final w = hall.w, h = hall.h;
     final dist = Uint16List(w * h)..fillRange(0, w * h, _kFar);
     final queue = Int32List(w * h);
     var head = 0, tail = 0;
     for (final g in goals) {
-      if (!isWalkable(g)) continue;
+      if (!hall.contains(g)) continue;
       final i = _index(g);
+      if (walkable[i] != 1) continue;
       if (dist[i] != _kFar) continue;
       dist[i] = 0;
       queue[tail++] = i;
@@ -150,10 +180,13 @@ class FloorPathing {
     return null;
   }
 
-  /// The row-major first tile of the LARGEST connected walkable region (ties
-  /// to the earlier region), or null for a full hall. Belts walling off a
-  /// strip by the hall's origin must not strand a new hire there.
-  TilePos? mainRegionStart() {
+  /// The row-major first tile of the LARGEST connected passable region on
+  /// [layer] (ties to the earlier region), or null when nothing is
+  /// passable. Belts walling off a strip by the hall's origin must not
+  /// strand a new hire there.
+  TilePos? mainRegionStart({int layer = 0}) {
+    final walkable = maskOf(layer);
+    if (walkable == null) return null;
     final n = walkable.length;
     final seen = Uint8List(n);
     final queue = Int32List(n);

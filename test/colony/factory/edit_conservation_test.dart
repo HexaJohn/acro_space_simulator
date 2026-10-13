@@ -184,7 +184,7 @@ void main() {
     final (f, port, _, _) = carryingMill();
     final before = f.itemsOnFloor;
     expect(f.hire(HandlerKind.onFoot, -kSteelMillWalkers).ok, isTrue);
-    expect(f.handlers, isEmpty);
+    expect(f.handlers.where((h) => h.kind == HandlerKind.onFoot), isEmpty);
     expect(f.itemsOnFloor, before);
     expect(f.floorPiles.values.expand((m) => m.keys), contains('tubes'));
     f.step(30, port);

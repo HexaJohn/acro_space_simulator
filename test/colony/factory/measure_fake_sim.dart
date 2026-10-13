@@ -123,6 +123,9 @@ class FakeSim implements FactorySim {
   double get powerDemandKw => kFakeKw * scale;
 
   @override
+  EditResult check(Placement p) => EditResult.ok(_bp.nextId);
+
+  @override
   EditResult place(Placement p) {
     final id = _bp.nextId;
     _bp.placements.add(p.copyWith(id: id));

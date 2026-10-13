@@ -137,6 +137,10 @@ loading. A fully lights-out plant is possible but rare and expensive.
 - **Template plants** use workers and forklifts at the docks, belts through the core, and a
   crane over the heavy line. They're a realistic mix, and the design levers in Reward
   apply to handling too (fewer trips, shorter aisles, a crane instead of two forklifts).
+  *(Built, phase 4: the Steel Mill's ore arrives on a dock conveyor — two pallets a second
+  by hand and forklift would cost ~16 more jobs — and is charged as that upgrade in
+  `factory_capex.dart`; forklifts clear the steel crates and a crane per line lifts the
+  billets. Rules: `factory_vehicles.dart`.)*
 
 **Tick.** Fixed sub-step (0.25 s sim time *(default)*). Order: receiving emits → requests
 posted → dispatcher assigns → handlers move/pick/drop → arms pick/drop → belts advance →

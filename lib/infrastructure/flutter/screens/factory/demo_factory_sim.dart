@@ -358,6 +358,14 @@ class DemoFactorySim implements FactorySim {
   // ---- Editor --------------------------------------------------------
 
   @override
+  EditResult check(Placement p) {
+    final verdict = _ix.check(p);
+    return verdict.ok
+        ? EditResult.ok(_bp.nextId)
+        : EditResult.refused(verdict.refusal, verdict.otherId);
+  }
+
+  @override
   EditResult place(Placement p) {
     final verdict = _ix.check(p);
     if (!verdict.ok) {

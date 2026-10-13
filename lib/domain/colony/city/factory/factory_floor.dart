@@ -48,8 +48,20 @@
 ///
 /// **People.** Stations need their crew and handlers are workers. The
 /// colony's staffing share decides how many of the layout's jobs are filled
-/// this sub-step; they are handed out by placement id, station crews first,
-/// and a station short of its full crew does not run.
+/// this sub-step; they are handed out by placement id — station crews
+/// first, then technicians, then handler operators — and a station short of
+/// its full crew does not run.
+///
+/// **Vehicles and automation** (phase 4, `factory_vehicles.dart`). Every
+/// handler kind runs: walkers and jacks walk, forklifts and AGVs drive only
+/// on wide-enough marked floor, cranes ride their bay, and battery vehicles
+/// charge. A request is posted to a source / target some handler on the
+/// floor can really serve (lift AND reach on its own layer) when one
+/// exists; otherwise it is still posted, as the waiting "hire / lay an
+/// aisle" signal, but reserves nothing and is re-posted every sub-step, so
+/// an unservable request can never starve a servable one. An automated
+/// station needs its technician share or it wears out and breaks down.
+/// What a colony may buy is its [FactoryUnlocks].
 library;
 
 import 'dart:collection';
@@ -67,6 +79,8 @@ import 'factory_ledger.dart';
 import 'factory_pathing.dart';
 import 'factory_recipe.dart';
 import 'factory_sim_api.dart';
+import 'factory_unlocks.dart';
+import 'factory_vehicles.dart';
 import 'floor_blueprint.dart';
 
 /// Belt speed in tiles per second: 3 m/s, a brisk industrial conveyor.
@@ -100,7 +114,9 @@ const int kStagingItemsPerTile = 2;
 /// A machine buffers this many crafts' worth of each input and output.
 const int kMachineBufferCrafts = 2;
 
-/// Seconds a worker takes to pick up or set down a load at a stop.
+/// Seconds a handler takes to pick up or set down a load at a stop. One
+/// figure for every kind: a forklift's tines are quicker than hands but it
+/// must line up, a crane's hook must settle — call it even.
 const double kHandPickS = 1.0;
 const double kHandDropS = 1.0;
 
@@ -108,10 +124,15 @@ const double kHandDropS = 1.0;
 const double kArmKw = 0.4;
 const double kBeltKw = 0.1;
 
-/// Handler kinds this phase moves. Phase 4 adds vehicles; until then the
-/// editor refuses to hire them and a blueprint's roster of them is kept but
-/// not spawned.
-const Set<HandlerKind> kSimulatedHandlerKinds = {HandlerKind.onFoot};
+/// Handler kinds the floor moves: all of them since phase 4. (Which ones a
+/// colony may HIRE is its [FactoryUnlocks].)
+const Set<HandlerKind> kSimulatedHandlerKinds = {
+  HandlerKind.onFoot,
+  HandlerKind.palletJack,
+  HandlerKind.forklift,
+  HandlerKind.crane,
+  HandlerKind.agv,
+};
 
 /// Slop for comparing accumulated sub-step sums (0.25 s steps are exact in
 /// binary; machine speeds like 0.6 are not).
@@ -136,14 +157,24 @@ bool _isBelt(EntityKind k) => k == EntityKind.belt || k == EntityKind.crossing;
 bool _walkableSolid(EntityKind k) =>
     k == EntityKind.crossing || k == EntityKind.chargingBay;
 
+/// Floor markings a forklift or AGV may drive on (when wide enough).
+bool _driveMarking(EntityKind k) =>
+    k == EntityKind.aisle ||
+    k == EntityKind.staging ||
+    k == EntityKind.chargingBay;
+
 class FactoryFloor implements FactorySim {
-  FactoryFloor._(this._bp);
+  FactoryFloor._(this._bp, this.unlocks);
 
   /// A fresh floor running [bp] (copied; the blueprint stays untouched).
-  /// Handlers of every simulated kind in the roster start at the idle spot.
-  factory FactoryFloor.fromBlueprint(FloorBlueprint bp) {
+  /// Every handler in the roster starts at its kind's idle spot (a vehicle
+  /// on its aisles, a crane in its bay). [unlocks] gate what the editor
+  /// may add later; the roster itself is never refused (templates use any
+  /// kind).
+  factory FactoryFloor.fromBlueprint(FloorBlueprint bp,
+      {FactoryUnlocks unlocks = FactoryUnlocks.all}) {
     ensureFactoryCatalog();
-    final f = FactoryFloor._(bp.copy());
+    final f = FactoryFloor._(bp.copy(), unlocks);
     f._rebuild();
     for (final p in f._bp.placements) {
       f._initState(p);
@@ -156,15 +187,20 @@ class FactoryFloor implements FactorySim {
         f._handlers.add(FloorHandler(id: f._nextHandlerId++, kind: kind, at: spot));
       }
     }
+    // Vehicles and cranes start on their own layers.
+    f._rebuild();
+    f._handlers.forEach(f._sendHome);
     return f;
   }
 
-  /// A floor exactly as [toJson] left it.
-  factory FactoryFloor.fromJson(Map<String, Object?> j) {
+  /// A floor exactly as [toJson] left it. [unlocks] are the colony's, not
+  /// the save's (see [FactoryUnlocks]).
+  factory FactoryFloor.fromJson(Map<String, Object?> j,
+      {FactoryUnlocks unlocks = FactoryUnlocks.all}) {
     ensureFactoryCatalog();
     Map<String, Object?> m(Object? o) =>
         ((o as Map?) ?? const {}).cast<String, Object?>();
-    final f = FactoryFloor._(FloorBlueprint.fromJson(m(j['bp'])))
+    final f = FactoryFloor._(FloorBlueprint.fromJson(m(j['bp'])), unlocks)
       .._layoutRev = (j['rev'] as num?)?.toInt() ?? 0
       .._simSeconds = (j['t'] as num?)?.toDouble() ?? 0
       .._carry = (j['cr'] as num?)?.toDouble() ?? 0
@@ -202,6 +238,9 @@ class FactoryFloor implements FactorySim {
   // ---- state ---------------------------------------------------------------
 
   final FloorBlueprint _bp;
+  /// What this colony may buy (see [FactoryUnlocks]); not saved. The
+  /// colony sets it again whenever its milestones or research change.
+  FactoryUnlocks unlocks;
   int _layoutRev = 0;
   double _simSeconds = 0;
 
@@ -253,7 +292,28 @@ class FactoryFloor implements FactorySim {
   /// Tile key → the staging area marking it.
   final Map<int, int> _stagingAt = {};
   FloorPathing _paths = FloorPathing(const HallSize(0, 0), Uint8List(0));
-  final Map<int, List<TilePos>> _goals = {};
+
+  /// Goal tiles by (layer, target).
+  final Map<(int, int), List<TilePos>> _goals = {};
+
+  /// Crane bays and charging bays, by id.
+  List<Placement> _craneBayList = const [];
+  List<Placement> _chargeList = const [];
+
+  /// Crane handler id → the bay it runs in (crane i → i-th bay by id).
+  final Map<int, int> _craneBayOf = {};
+
+  /// Where each layer's handlers start and are moved to when the floor
+  /// under them goes (null: that layer has no floor at all).
+  final Map<int, TilePos?> _layerHome = {};
+
+  /// (layer, heaviest load index) of the handlers on the floor, this
+  /// sub-step: who could serve a request at all.
+  List<(int, int)> _fleet = const [];
+
+  /// (layer, from, to) → can a handler on that layer carry from → to.
+  /// Cleared every sub-step and on every edit.
+  final Map<(int, int, int), bool> _routeMemo = {};
 
   List<Placement> _machineList = const [];
   List<Placement> _armList = const [];
@@ -285,6 +345,11 @@ class FactoryFloor implements FactorySim {
 
   /// Staffed this sub-step, by machine id (transient).
   final Map<int, bool> _staffed = {};
+
+  /// Has its technician share this sub-step, by machine id (transient; a
+  /// station whose mode needs none counts as maintained when staffed).
+  final Map<int, bool> _maintained = {};
+
 
   // ---- FactoryFloorView ----------------------------------------------------
 
@@ -476,8 +541,14 @@ class FactoryFloor implements FactorySim {
       if (r != null) kw += r.powerKw * p.crew.powerMult;
     }
     kw += _armList.length * kArmKw + _beltOrder.length * kBeltKw;
+    // Battery vehicles draw only while charging; a jack or crane while on a
+    // job.
     for (final h in _handlers) {
-      if (h.active) kw += h.spec.powerKw;
+      if (!h.active) continue;
+      final on = h.isBattery
+          ? h.state == HandlerState.charging
+          : h.job != null;
+      if (on) kw += h.spec.powerKw;
     }
     return kw;
   }
@@ -539,12 +610,15 @@ class FactoryFloor implements FactorySim {
   void _subStep(FactoryColonyPort port) {
     const dt = kFactoryStepS;
     final power = _unit(port.powerShare);
+    _routeMemo.clear();
+    _fleet = _fleetLayers();
     _allocateStaff(_unit(port.staffingShare), dt);
     _receive(port, dt);
     _postRequests();
+    _seekCharge();
     Dispatcher.assign(_queue, _handlers,
-        distTo: _distTo, routable: _routable);
-    _moveHandlers(dt);
+        distTo: _distTo, routable: _routableBy);
+    _moveHandlers(power, dt);
     _swingArms(dt);
     _advanceBelts(dt);
     _craft(power, dt);
@@ -556,22 +630,36 @@ class FactoryFloor implements FactorySim {
 
   static double _unit(double v) => v.isNaN ? 0 : (v < 0 ? 0 : (v > 1 ? 1 : v));
 
+  /// Hands the staffed share of the layout's jobs out by placement id:
+  /// whole station crews first, then technician shares (fractional jobs),
+  /// then handler operators by handler id. People are counted as a real
+  /// number so a lone automated station's quarter technician is a job too;
+  /// whole crews still need whole people.
   void _allocateStaff(double share, double dt) {
-    var avail = (_bp.jobDemand * share + _eps).floor();
+    var avail = _bp.jobDemand * share;
     for (final p in _machineList) {
       final need = p.crew.workers;
-      final ok = avail >= need;
+      final ok = avail + _eps >= need;
       _staffed[p.id] = ok;
       if (!ok) continue;
       avail -= need;
       if (need > 0) _ledger.addWork(WorkRole.station, need * dt);
-      if (p.crew.maintenance > 0) {
-        _ledger.addWork(WorkRole.maintenance, p.crew.maintenance * dt);
+    }
+    for (final p in _machineList) {
+      final need = p.crew.maintenance;
+      if (need <= 0) {
+        _maintained[p.id] = _staffed[p.id] == true;
+        continue;
       }
+      final ok = avail + _eps >= need;
+      _maintained[p.id] = ok;
+      if (!ok) continue;
+      avail -= need;
+      _ledger.addWork(WorkRole.maintenance, need * dt);
     }
     for (final h in _handlers) {
       final ops = h.spec.operators;
-      h.active = avail >= ops;
+      h.active = avail + _eps >= ops;
       if (!h.active) continue;
       avail -= ops;
       if (ops > 0) _ledger.addWork(WorkRole.handler, ops * dt);
@@ -888,51 +976,90 @@ class FactoryFloor implements FactorySim {
         m.status = MachineStatus.idle;
         continue;
       }
-      if (_staffed[p.id] != true) {
-        m.status = MachineStatus.unstaffed;
-        continue;
-      }
-      final needsPower = r.powerKw > 0;
-      if (needsPower && powerShare <= 0) {
-        m.status = MachineStatus.unpowered;
-        continue;
-      }
-      // A brownout slows a powered station in proportion (§3 Coupling).
-      final speed = p.crew.speedMult * (needsPower ? powerShare : 1.0);
-      if (m.crafting) {
-        m.progress += dt * speed;
-        if (m.progress + _eps < r.seconds) {
-          m.status = MachineStatus.working;
+      final maintained = _maintained[p.id] == true;
+      if (m.broken) {
+        // Repaired by its technician — or, for a mode that needs none (the
+        // player switched a broken station back to manual), by its crew.
+        if (maintained) {
+          m.repair += dt;
+          if (m.repair + _eps >= kRepairS) {
+            m
+              ..broken = false
+              ..wear = 0
+              ..repair = 0;
+          }
+        }
+        if (m.broken) {
+          m.status = MachineStatus.broken;
           continue;
         }
-        if (!_outputsFit(r, m)) {
-          m.progress = r.seconds;
-          m.status = MachineStatus.blocked;
-          continue;
-        }
-        for (final q in r.outputs) {
-          m.outBuf.add(q.item, q.count);
-          _craftNet[q.item] = (_craftNet[q.item] ?? 0) + q.count;
-        }
-        for (final q in r.inputs) {
-          _craftNet[q.item] = (_craftNet[q.item] ?? 0) - q.count;
-        }
-        m.crafting = false;
-        // Carry the overshoot into the next craft, so a busy machine's rate
-        // is exactly 1/seconds rather than rounded up to whole sub-steps.
-        m.progress -= r.seconds;
-        if (m.progress < 0) m.progress = 0;
       }
-      if (_inputsReady(r, m)) {
-        for (final q in r.inputs) {
-          m.inBuf.add(q.item, -q.count);
+      _craftOne(p, m, r, powerShare, dt);
+      // Wear: a station that needs a technician and runs without one wears
+      // out; with one it recovers at the same rate (no RNG, §3).
+      if (p.crew.maintenance <= 0) continue;
+      if (m.status == MachineStatus.working && !maintained) {
+        m.wear += dt;
+        if (m.wear + _eps >= kWearToBreakS) {
+          m
+            ..broken = true
+            ..repair = 0
+            ..status = MachineStatus.broken;
         }
-        m.crafting = true;
+      } else if (maintained && m.wear > 0) {
+        m.wear -= dt;
+        if (m.wear < 0) m.wear = 0;
+      }
+    }
+  }
+
+  /// One sub-step of a staffed-or-not, unbroken station [p].
+  void _craftOne(Placement p, MachineState m, FactoryRecipe r,
+      double powerShare, double dt) {
+    if (_staffed[p.id] != true) {
+      m.status = MachineStatus.unstaffed;
+      return;
+    }
+    final needsPower = r.powerKw > 0;
+    if (needsPower && powerShare <= 0) {
+      m.status = MachineStatus.unpowered;
+      return;
+    }
+    // A brownout slows a powered station in proportion (§3 Coupling).
+    final speed = p.crew.speedMult * (needsPower ? powerShare : 1.0);
+    if (m.crafting) {
+      m.progress += dt * speed;
+      if (m.progress + _eps < r.seconds) {
         m.status = MachineStatus.working;
-      } else {
-        m.progress = 0;
-        m.status = MachineStatus.starved;
+        return;
       }
+      if (!_outputsFit(r, m)) {
+        m.progress = r.seconds;
+        m.status = MachineStatus.blocked;
+        return;
+      }
+      for (final q in r.outputs) {
+        m.outBuf.add(q.item, q.count);
+        _craftNet[q.item] = (_craftNet[q.item] ?? 0) + q.count;
+      }
+      for (final q in r.inputs) {
+        _craftNet[q.item] = (_craftNet[q.item] ?? 0) - q.count;
+      }
+      m.crafting = false;
+      // Carry the overshoot into the next craft, so a busy machine's rate
+      // is exactly 1/seconds rather than rounded up to whole sub-steps.
+      m.progress -= r.seconds;
+      if (m.progress < 0) m.progress = 0;
+    }
+    if (_inputsReady(r, m)) {
+      for (final q in r.inputs) {
+        m.inBuf.add(q.item, -q.count);
+      }
+      m.crafting = true;
+      m.status = MachineStatus.working;
+    } else {
+      m.progress = 0;
+      m.status = MachineStatus.starved;
     }
   }
 
@@ -1042,6 +1169,10 @@ class FactoryFloor implements FactorySim {
   /// re-derived from the queue and the handlers' jobs every time, so
   /// nothing is posted twice.
   void _postRequests() {
+    // A request nobody on the floor could serve any more (the forklift was
+    // sold, the aisle lifted, the crane bay moved) is dropped and derived
+    // afresh below, so it never holds goods another handler could move.
+    _queue.removeWhere((r) => !_servable(r.item, r.from, r.to));
     final inbound = <int, ItemBag>{};
     final outbound = <int, ItemBag>{};
     final inboundTotal = <int, int>{};
@@ -1070,15 +1201,21 @@ class FactoryFloor implements FactorySim {
     int avail(int id, String item) =>
         _storedAt(id, item) - (outbound[id]?[item] ?? 0);
 
-    void post(String item, int n, int from, int to) {
+    /// Queues a trip. A trip nobody could serve is still queued — it is the
+    /// waiting "hire a jack / lay an aisle" signal — but books only the
+    /// asking side ([pull]: the machine's want; else the source's stock),
+    /// never the other end, so it can't starve a trip someone CAN make.
+    void post(String item, int n, int from, int to, {required bool pull}) {
       _queue.add(MoveRequest(item: item, count: n, from: from, to: to));
-      addIn(to, item, n);
-      addOut(from, item, n);
+      final ok = _servable(item, from, to);
+      if (ok || pull) addIn(to, item, n);
+      if (ok || !pull) addOut(from, item, n);
     }
 
     final providers = [for (final p in _providers) p.id, ..._piles.keys];
 
-    // Pull: hand-fed inputs fetch from the nearest provider.
+    // Pull: hand-fed inputs fetch from the nearest provider someone can
+    // serve (else the nearest at all, as a waiting signal).
     for (final m in _machineList) {
       final r = _recipeOf(m);
       if (r == null) continue;
@@ -1090,6 +1227,7 @@ class FactoryFloor implements FactorySim {
             (inbound[m.id]?[q.item] ?? 0);
         while (want > 0) {
           var best = 0, bestD = 0, bestA = 0;
+          var sBest = 0, sD = 0, sA = 0;
           for (final id in providers) {
             if (id == m.id || _armCleared.contains((id, q.item))) continue;
             final a = avail(id, q.item);
@@ -1100,10 +1238,20 @@ class FactoryFloor implements FactorySim {
               bestD = d;
               bestA = a;
             }
+            if ((sA == 0 || d < sD) && _servable(q.item, id, m.id)) {
+              sBest = id;
+              sD = d;
+              sA = a;
+            }
           }
           if (bestA == 0) break;
-          final n = want < bestA ? want : bestA;
-          post(q.item, n, best, m.id);
+          if (sA == 0) {
+            // Nobody can make this trip: one signal, then wait.
+            post(q.item, want < bestA ? want : bestA, best, m.id, pull: true);
+            break;
+          }
+          final n = want < sA ? want : sA;
+          post(q.item, n, sBest, m.id, pull: true);
           want -= n;
         }
       }
@@ -1113,37 +1261,45 @@ class FactoryFloor implements FactorySim {
     // the nearest shipping dock, else chest (piles: else staging) with room.
     void push(int src, String item, {required bool toStaging}) {
       var a = avail(src, item);
-      while (a > 0) {
+      final tiers = [_shipList, _chestList, if (toStaging) _stagingList];
+
+      /// The nearest store in [tier] with room ([servable]: that someone
+      /// can also carry to), with its room.
+      (Placement, int)? pick(List<Placement> tier, bool servable) {
         Placement? best;
         var bestD = 0, bestRoom = 0;
-        void consider(Placement p) {
+        for (final p in tier) {
           final room = _roomFor(p, item, inboundTotal);
-          if (room <= 0) return;
+          if (room <= 0) continue;
           final d = _centreDist(p.id, src);
-          if (best == null || d < bestD) {
-            best = p;
-            bestD = d;
-            bestRoom = room;
-          }
+          if (best != null && d >= bestD) continue;
+          if (servable && !_servable(item, src, p.id)) continue;
+          best = p;
+          bestD = d;
+          bestRoom = room;
         }
+        return best == null ? null : (best, bestRoom);
+      }
 
-        for (final p in _shipList) {
-          consider(p);
+      while (a > 0) {
+        (Placement, int)? hit;
+        for (final t in tiers) {
+          hit = pick(t, true);
+          if (hit != null) break;
         }
-        if (best == null) {
-          for (final p in _chestList) {
-            consider(p);
+        if (hit == null) {
+          // Nobody can carry it anywhere: one signal, then wait.
+          for (final t in tiers) {
+            hit = pick(t, false);
+            if (hit != null) break;
           }
-        }
-        if (best == null && toStaging) {
-          for (final p in _stagingList) {
-            consider(p);
+          if (hit != null) {
+            post(item, a < hit.$2 ? a : hit.$2, src, hit.$1.id, pull: false);
           }
+          break;
         }
-        final to = best;
-        if (to == null) break;
-        final n = a < bestRoom ? a : bestRoom;
-        post(item, n, src, to.id);
+        final n = a < hit.$2 ? a : hit.$2;
+        post(item, n, src, hit.$1.id, pull: false);
         a -= n;
       }
     }
@@ -1169,9 +1325,9 @@ class FactoryFloor implements FactorySim {
 
   // ---- handlers ------------------------------------------------------------
 
-  /// Walkable tiles a handler stands on to work at [p]: beside its
+  /// Walkable tiles a walker stands on to work at [p]: beside its
   /// footprint, or anywhere on a staging area.
-  List<TilePos> _goalsOf(Placement p) => _goals[p.id] ??= () {
+  List<TilePos> _goalsOf(Placement p) => () {
         final f = p.footprint;
         final out = <TilePos>[];
         if (p.kind == EntityKind.staging) {
@@ -1192,50 +1348,212 @@ class FactoryFloor implements FactorySim {
         return out;
       }();
 
-  /// Where a handler stands to work at [id]: a placement's [_goalsOf], a
-  /// pile's own tile, or the idle spot for [_kIdleKey].
-  List<TilePos> _goalsFor(int id) {
-    if (id == _kIdleKey) return [_idleTile];
+  /// Whether [t] is beside [f] (edge-adjacent, corners excluded).
+  static bool _beside(TileRect f, TilePos t) =>
+      ((t.y == f.y0 - 1 || t.y == f.y1) && t.x >= f.x0 && t.x < f.x1) ||
+      ((t.x == f.x0 - 1 || t.x == f.x1) && t.y >= f.y0 && t.y < f.y1);
+
+  /// Where a handler on [layer] stands to work at [id], cached per layout:
+  ///
+  /// * walkers and jacks: a placement's [_goalsOf], a pile's own tile;
+  /// * vehicles: drivable tiles beside the footprint, plus drivable tiles
+  ///   ON a pile, staging area or charging bay (a charging bay: on it
+  ///   only) — so a dock with staging laid in front is worked from there;
+  /// * a crane: its bay's tiles over or beside a footprint that lies at
+  ///   least partly inside the bay (none otherwise);
+  /// * [_kIdleKey]: the layer's home tile.
+  List<TilePos> _goalsFor(int layer, int id) => id < _kIdleKey
+      // A pile comes and goes: never cache "no pile here".
+      ? _computeGoals(layer, id)
+      : _goals[(layer, id)] ??= _computeGoals(layer, id);
+
+  List<TilePos> _computeGoals(int layer, int id) {
+    if (id == _kIdleKey) {
+      final home = _layerHome[layer];
+      return home == null ? const [] : [home];
+    }
+    final TileRect f;
+    var inside = true, ring = true;
     if (id < 0) {
       final pile = _piles[id];
-      return pile == null ? const [] : [pile.at];
+      if (pile == null) return const [];
+      if (layer == kWalkLayer) return [pile.at];
+      f = TileRect(pile.at.x, pile.at.y, 1, 1);
+    } else {
+      final p = _byId[id];
+      if (p == null) return const [];
+      if (layer == kWalkLayer) return _goalsOf(p);
+      f = p.footprint;
+      inside = p.kind == EntityKind.staging || p.kind == EntityKind.chargingBay;
+      ring = p.kind != EntityKind.chargingBay;
     }
-    final p = _byId[id];
-    return p == null ? const [] : _goalsOf(p);
+    if (layer < 0) {
+      final bay = _byId[-layer];
+      if (bay == null) return const [];
+      final b = bay.footprint;
+      if (!b.overlaps(f)) return const [];
+      return [
+        for (final t in b.tiles)
+          if (_bp.hall.contains(t) && (f.contains(t) || _beside(f, t))) t,
+      ];
+    }
+    final out = <TilePos>[];
+    for (var y = f.y0 - 1; y <= f.y1; y++) {
+      for (var x = f.x0 - 1; x <= f.x1; x++) {
+        final t = TilePos(x, y);
+        final ok = f.contains(t) ? inside : (ring && _beside(f, t));
+        if (ok && _paths.isPassable(layer, t)) out.add(t);
+      }
+    }
+    return out;
   }
 
-  Uint16List? _fieldTo(int id) {
+  /// The layer [h] paths on, or null for a crane with no bay.
+  int? _layerOf(FloorHandler h) {
+    if (h.kind == HandlerKind.crane) {
+      final bay = _craneBayOf[h.id];
+      return bay == null ? null : craneLayer(bay);
+    }
+    return driveLayer(h.spec.aisleTiles);
+  }
+
+  /// The flow field to [id] on [layer] (null: [id] is gone).
+  Uint16List? _fieldOn(int layer, int id) {
     if (id != _kIdleKey && !_exists(id)) return null;
-    return _paths.fieldTo(id, _goalsFor(id));
+    return _paths.fieldTo(id, _goalsFor(layer, id), layer: layer);
   }
 
   int _distTo(FloorHandler h, int id) {
-    final f = _fieldTo(id);
+    final layer = _layerOf(h);
+    final f = layer == null ? null : _fieldOn(layer, id);
     return f == null ? kUnreachable : _paths.distance(f, h.at);
   }
 
-  bool _routable(int from, int to) {
-    final f = _fieldTo(to);
-    if (f == null || !_exists(from)) return false;
-    for (final g in _goalsFor(from)) {
-      if (_paths.distance(f, g) >= 0) return true;
+  /// Whether a handler on [layer] could carry goods from [from] to [to]
+  /// (memoised per sub-step).
+  bool _routableOn(int layer, int from, int to) =>
+      _routeMemo[(layer, from, to)] ??= () {
+        final f = _fieldOn(layer, to);
+        if (f == null || !_exists(from)) return false;
+        for (final g in _goalsFor(layer, from)) {
+          if (_paths.distance(f, g) >= 0) return true;
+        }
+        return false;
+      }();
+
+  bool _routableBy(FloorHandler h, int from, int to) {
+    final layer = _layerOf(h);
+    return layer != null && _routableOn(layer, from, to);
+  }
+
+  /// (layer, heaviest load) of every handler on the floor, deduplicated.
+  List<(int, int)> _fleetLayers() {
+    final out = <(int, int)>[];
+    for (final h in _handlers) {
+      final layer = _layerOf(h);
+      if (layer == null) continue;
+      final e = (layer, h.spec.maxLoad.index);
+      if (!out.contains(e)) out.add(e);
+    }
+    return out;
+  }
+
+  /// Whether some handler on the floor (busy or not) could lift [item]
+  /// and carry it from [from] to [to].
+  bool _servable(String item, int from, int to) {
+    final def = FactoryItems.byId(item);
+    if (def == null) return false;
+    for (final (layer, load) in _fleet) {
+      if (def.loadClass.index > load) continue;
+      if (_routableOn(layer, from, to)) return true;
     }
     return false;
   }
 
-  void _moveHandlers(double dt) {
+  /// The charging bay nearest [h] by path (ties by id), or null.
+  int? _nearestCharger(FloorHandler h) {
+    int? best;
+    var bestD = 0;
+    for (final p in _chargeList) {
+      final d = _distTo(h, p.id);
+      if (d < 0) continue;
+      if (best == null || d < bestD) {
+        best = p.id;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  /// Battery vehicles that are idle (their last drop done) and low head for
+  /// the nearest reachable charging bay. With none they work on until flat.
+  void _seekCharge() {
+    for (final h in _handlers) {
+      if (!h.isBattery || !h.active) continue;
+      if (h.state != HandlerState.idle || h.job != null) continue;
+      final full = kBatteryRuntimeS[h.kind]!;
+      if (h.battery > kBatteryLowFrac * full + _eps) continue;
+      if (_nearestCharger(h) == null) continue;
+      h
+        ..settle()
+        ..state = HandlerState.charging
+        ..timer = 0;
+    }
+  }
+
+  /// Drives a charging vehicle to its bay and fills it; full, it is free
+  /// again. A brownout charges slower in proportion.
+  void _charge(FloorHandler h, double power, double dt) {
+    final bay = _nearestCharger(h);
+    if (bay == null) {
+      h.goIdle(); // the bay went: back to work until flat
+      return;
+    }
+    final w = _walk(h, bay, dt);
+    if (w < 0) {
+      h.goIdle();
+      return;
+    }
+    if (w == 0) return;
+    final full = kBatteryRuntimeS[h.kind]!;
+    h.battery += full / kBatteryChargeS[h.kind]! * power * dt;
+    if (h.battery + _eps >= full) {
+      h
+        ..battery = full
+        ..goIdle();
+    }
+  }
+
+  void _moveHandlers(double power, double dt) {
     for (final h in _handlers) {
       if (!h.active) {
         // An unstaffed hand stops where it is — on a tile, not between two.
         if (h.state == HandlerState.idle) h.settle();
         continue;
       }
+      if (h.state == HandlerState.charging) {
+        _charge(h, power, dt);
+        continue;
+      }
       final job = h.job;
       if (job == null) {
         if (h.state != HandlerState.idle) h.goIdle();
-        // Home to the idle spot (a half-taken step is finished on the way).
-        _walk(h, _kIdleKey, dt);
+        if (_layerOf(h) == kWalkLayer) {
+          // Home to the idle spot (a half-taken step is finished on the way).
+          _walk(h, _kIdleKey, dt);
+        } else {
+          // Vehicles and cranes park where they finished.
+          h.settle();
+        }
         continue;
+      }
+      // Equipment hours: a vehicle or crane on a job is working, moving or
+      // not (a crane over its work may never travel).
+      if (h.kind != HandlerKind.onFoot) _ledger.addEquipment(h.kind, dt);
+      if (h.isBattery) {
+        // Work runs the battery down; the trip in hand is always finished.
+        h.battery -= dt;
+        if (h.battery < 0) h.battery = 0;
       }
       if (h.state == HandlerState.toPickup) {
         if (!_exists(job.from)) {
@@ -1324,8 +1642,42 @@ class FactoryFloor implements FactorySim {
       return;
     }
     h.settle();
-    _addPile(h.at, item, n);
+    _setDown(h.at, item, n);
     h.goIdle();
+  }
+
+  /// Sets [n] of [item] down at [near] if a person could stand there, else
+  /// on the nearest such tile (a crane over a machine, a forklift whose
+  /// aisle was lifted).
+  void _setDown(TilePos near, String item, int n) {
+    final t = _paths.isWalkable(near) ? near : (_nearestWalkable(near) ?? near);
+    _addPile(t, item, n);
+  }
+
+  /// Puts a new hire on its layer's home tile (a forklift at the charging
+  /// bay, a crane at its bay's corner), where the walkers' muster spot may
+  /// not even be connected to its aisles.
+  void _sendHome(FloorHandler h) {
+    final layer = _layerOf(h);
+    final home = layer == null ? null : _layerHome[layer];
+    if (home == null) return;
+    h
+      ..at = home
+      ..next = null
+      ..prog = 0;
+  }
+
+  /// A handler with no floor of its kind left (its aisles lifted, its crane
+  /// bay gone): it sets any load down beside it and stands idle where it
+  /// is, taking no work until its floor is back.
+  void _strand(FloorHandler h) {
+    final c = h.carrying;
+    if (c != null && h.carryingCount > 0) _setDown(h.at, c, h.carryingCount);
+    if (h.state != HandlerState.idle || h.job != null || c != null) {
+      h.goIdle();
+    } else {
+      h.settle();
+    }
   }
 
   /// Sets [n] of [item] down on tile [t] (merging with a pile there).
@@ -1363,7 +1715,8 @@ class FactoryFloor implements FactorySim {
   /// Moves [h] toward [target] for [dt]: 1 = standing at it, 0 = on the
   /// way, -1 = no way there.
   int _walk(FloorHandler h, int target, double dt) {
-    final field = _fieldTo(target);
+    final layer = _layerOf(h);
+    final field = layer == null ? null : _fieldOn(layer, target);
     if (field == null) {
       h.settle();
       return -1;
@@ -1404,9 +1757,6 @@ class FactoryFloor implements FactorySim {
     }
     if (moved > 0 && h.carryingCount > 0) {
       _ledger.itemMetres += moved * kFactoryTileM * h.carryingCount;
-    }
-    if (moved > 0 && h.kind != HandlerKind.onFoot) {
-      _ledger.addEquipment(h.kind, dt);
     }
     return result;
   }
@@ -1597,7 +1947,9 @@ class FactoryFloor implements FactorySim {
       }
     }
     _paths = FloorPathing(hall, walk);
+    _routeMemo.clear();
     _idleTile = _idleSpot();
+    _buildLayers(sorted, walk);
 
     List<Placement> ofKind(bool Function(EntityKind) k) =>
         [for (final p in sorted) if (k(p.kind)) p];
@@ -1694,21 +2046,40 @@ class FactoryFloor implements FactorySim {
         return c != 0 ? c : a.id.compareTo(b.id);
       });
 
-    // Handlers left standing where something now stands step off.
+    // Cranes bind to bays: crane i (by id) runs in the i-th bay (by id).
+    // Extra cranes stand idle; a bay with no crane is inert.
+    _craneBayOf.clear();
+    var bay = 0;
     for (final h in _handlers) {
-      final nx = h.next;
-      if (nx != null && !_paths.isWalkable(nx)) {
-        h
-          ..next = null
-          ..prog = 0;
-      }
-      if (!_paths.isWalkable(h.at)) {
-        h
-          ..at = _idleTile
-          ..next = null
-          ..prog = 0;
+      if (h.kind != HandlerKind.crane) continue;
+      if (bay < _craneBayList.length) {
+        _craneBayOf[h.id] = _craneBayList[bay++].id;
       }
     }
+
+    // Handlers left standing where their kind can't be step off: to their
+    // layer's home tile, or — with no floor of their kind left at all —
+    // they set their load down and stand idle where they are.
+    for (final h in _handlers) {
+      final layer = _layerOf(h);
+      final nx = h.next;
+      if (nx != null && (layer == null || !_paths.isPassable(layer, nx))) {
+        h
+          ..next = null
+          ..prog = 0;
+      }
+      if (layer != null && _paths.isPassable(layer, h.at)) continue;
+      final home = layer == null ? null : _layerHome[layer];
+      if (home != null) {
+        h
+          ..at = home
+          ..next = null
+          ..prog = 0;
+        continue;
+      }
+      _strand(h);
+    }
+    _fleet = _fleetLayers();
 
     // A pile something now stands on slides to the nearest open tile.
     for (final id in [..._piles.keys]) {
@@ -1721,6 +2092,73 @@ class FactoryFloor implements FactorySim {
       _cancelJobsFor(id);
     }
   }
+
+  /// Every non-walking layer: one drive layer per vehicle aisle width
+  /// (marked floor opened by the vehicle's square, see [driveMask]) and one
+  /// per crane bay (every bay tile, machines and all), with each layer's
+  /// home tile.
+  void _buildLayers(List<Placement> sorted, Uint8List walk) {
+    final hall = _bp.hall;
+    _craneBayList = [
+      for (final p in sorted)
+        if (p.kind == EntityKind.craneBay) p,
+    ];
+    _chargeList = [
+      for (final p in sorted)
+        if (p.kind == EntityKind.chargingBay) p,
+    ];
+    _layerHome
+      ..clear()
+      ..[kWalkLayer] = _idleTile;
+    final marked = Uint8List(hall.w * hall.h);
+    for (final p in sorted) {
+      if (!_driveMarking(p.kind)) continue;
+      for (final t in p.footprint.tiles) {
+        if (!hall.contains(t)) continue;
+        final i = t.y * hall.w + t.x;
+        if (walk[i] == 1) marked[i] = 1;
+      }
+    }
+    final widths = <int>{
+      for (final k in HandlerKind.values)
+        if (!kHandlerSpecs[k]!.needsCraneBay &&
+            driveLayer(kHandlerSpecs[k]!.aisleTiles) != kWalkLayer)
+          kHandlerSpecs[k]!.aisleTiles,
+    }.toList()
+      ..sort();
+    for (final w in widths) {
+      final layer = driveLayer(w);
+      _paths.setLayer(layer, driveMask(hall, marked, w));
+      TilePos? home;
+      for (final p in [..._chargeList, ..._stagingList0(sorted)]) {
+        for (final t in p.footprint.tiles) {
+          if (_paths.isPassable(layer, t)) {
+            home = t;
+            break;
+          }
+        }
+        if (home != null) break;
+      }
+      _layerHome[layer] = home ?? _paths.mainRegionStart(layer: layer);
+    }
+    for (final b in _craneBayList) {
+      final layer = craneLayer(b.id);
+      final mask = Uint8List(hall.w * hall.h);
+      TilePos? home;
+      for (final t in b.footprint.tiles) {
+        if (!hall.contains(t)) continue;
+        mask[t.y * hall.w + t.x] = 1;
+        home ??= t;
+      }
+      _paths.setLayer(layer, mask);
+      _layerHome[layer] = home;
+    }
+  }
+
+  static List<Placement> _stagingList0(List<Placement> sorted) => [
+        for (final p in sorted)
+          if (p.kind == EntityKind.staging) p,
+      ];
 
   void _layoutChanged() {
     _layoutRev++;
@@ -1778,10 +2216,24 @@ class FactoryFloor implements FactorySim {
     _bp.placements[i] = p;
   }
 
+  /// Why [q] can't be placed: locked by [unlocks], or [_check]'s reasons.
+  EditResult? _placeRefusal(Placement q) {
+    if (!unlocks.allowsPlacement(q)) {
+      return const EditResult.refused(EditRefusal.notAllowed);
+    }
+    return _check(q);
+  }
+
+  @override
+  EditResult check(Placement p) {
+    final q = p.copyWith(id: _bp.nextId);
+    return _placeRefusal(q) ?? EditResult.ok(q.id);
+  }
+
   @override
   EditResult place(Placement p) {
     final q = p.copyWith(id: _bp.nextId);
-    final bad = _check(q);
+    final bad = _placeRefusal(q);
     if (bad != null) return bad;
     _bp.placements.add(q);
     _initState(q);
@@ -1849,6 +2301,9 @@ class FactoryFloor implements FactorySim {
     if (p.kind != EntityKind.machine) {
       return const EditResult.refused(EditRefusal.wrongKind);
     }
+    if (!unlocks.allowsMode(mode)) {
+      return const EditResult.refused(EditRefusal.notAllowed);
+    }
     _replace(p.copyWith(mode: mode));
     _layoutChanged();
     return EditResult.ok(p.id);
@@ -1859,15 +2314,21 @@ class FactoryFloor implements FactorySim {
     if (!kSimulatedHandlerKinds.contains(kind)) {
       return const EditResult.refused(EditRefusal.notAllowed);
     }
+    // Buying needs the unlock; letting go never does.
+    if (delta > 0 && !unlocks.allowsHandler(kind)) {
+      return const EditResult.refused(EditRefusal.notAllowed);
+    }
     final have = _bp.roster[kind] ?? 0;
     if (have + delta < 0) {
       return const EditResult.refused(EditRefusal.notAllowed);
     }
     if (delta == 0) return const EditResult.ok(null);
+    final hired = <FloorHandler>[];
     if (delta > 0) {
       for (var i = 0; i < delta; i++) {
-        _handlers.add(
-            FloorHandler(id: _nextHandlerId++, kind: kind, at: _idleTile));
+        final h = FloorHandler(id: _nextHandlerId++, kind: kind, at: _idleTile);
+        _handlers.add(h);
+        hired.add(h);
       }
     } else {
       // Let go of the newest empty-handed first; a loaded one, only when
@@ -1881,7 +2342,7 @@ class FactoryFloor implements FactorySim {
           if (emptyOnly && c != null && h.carryingCount > 0) continue;
           if (c != null && h.carryingCount > 0) {
             h.settle();
-            _addPile(h.at, c, h.carryingCount);
+            _setDown(h.at, c, h.carryingCount);
           }
           _handlers.removeAt(i);
           drop--;
@@ -1894,6 +2355,7 @@ class FactoryFloor implements FactorySim {
       _bp.roster[kind] = have + delta;
     }
     _layoutChanged();
+    hired.forEach(_sendHome);
     return const EditResult.ok(null);
   }
 }

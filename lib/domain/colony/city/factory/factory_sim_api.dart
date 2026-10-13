@@ -42,6 +42,10 @@ enum MachineStatus {
 
   /// No recipe, or switched off.
   idle,
+
+  /// Broken down: an automated station run too long without its
+  /// technician share. Repaired once a technician is on hand (phase 4).
+  broken,
 }
 
 /// One item on a belt tile, for drawing. [progress] 0..1 along the belt.
@@ -180,6 +184,11 @@ abstract interface class FactoryFloorView {
 abstract interface class FactoryFloorEditor {
   /// Adds [p] (its id is ignored; the floor assigns one).
   EditResult place(Placement p);
+
+  /// What [place] would answer for [p] — the same rules, the id it would
+  /// get — without changing anything ([FactoryFloorView.layoutRev] stays
+  /// put). The editor's ghost preview.
+  EditResult check(Placement p);
   EditResult remove(int placementId);
   EditResult rotate(int placementId);
   EditResult setRecipe(int placementId, String recipeId);

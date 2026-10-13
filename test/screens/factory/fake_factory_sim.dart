@@ -62,6 +62,9 @@ class FakeFactorySim implements FactorySim {
   double get powerDemandKw => 0;
 
   @override
+  EditResult check(Placement p) => EditResult.ok(bp.nextId);
+
+  @override
   EditResult place(Placement p) {
     placed.add(p);
     final id = bp.nextId;

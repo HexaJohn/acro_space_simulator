@@ -11,21 +11,32 @@
 /// one to the nearest free handler that can LIFT it — a worker on foot never
 /// gets a pallet, however close. A request bigger than one trip is split:
 /// the handler takes what it can carry and the rest stays queued, so the
-/// queue's length is the honest "hire more / buy a forklift" signal.
+/// queue's length is the honest "hire more / buy a forklift" signal. Small
+/// requests for the same goods between the same two places are merged into
+/// one trip up to the handler's capacity.
 ///
 /// Reservations are not stored anywhere: the floor re-derives "already on
 /// its way" from the queue and the handlers' current jobs each sub-step, so
 /// a save holds no bookkeeping that could drift from what is really moving.
 ///
-/// [FloorHandler] is a handler's RUNTIME state. Phase 1 runs
-/// [HandlerKind.onFoot]; every other kind is shaped the same (a spec, a
-/// tile, a job), so phase 4 adds movement rules, not a new class.
+/// [FloorHandler] is a handler's RUNTIME state. Every kind is shaped the
+/// same (a spec, a tile, a job); phase 4 added the movement rules (see
+/// `factory_vehicles.dart`) and a battery, not a new class.
+///
+/// **Who gets a job** (phase 4): of the free handlers that can LIFT the
+/// load and can REACH both ends of the trip on their own layer, the one
+/// with the shortest path to the pickup; equally near, the CHEAPEST kind
+/// ([kHandlerCostRank]: walker < jack < forklift < AGV < crane), then the
+/// lowest id. So a walker carries a box a forklift could also take, and a
+/// crane is never spent on what a pair of hands can move from the same
+/// spot.
 library;
 
 import 'factory_grid.dart';
 import 'factory_handling.dart';
 import 'factory_item.dart';
 import 'factory_sim_api.dart';
+import 'factory_vehicles.dart';
 
 /// Move [count] of [item] from placement [from] to placement [to].
 class MoveRequest {
@@ -56,7 +67,8 @@ class MoveRequest {
 
 /// One handler on the floor.
 class FloorHandler {
-  FloorHandler({required this.id, required this.kind, required this.at});
+  FloorHandler({required this.id, required this.kind, required this.at})
+      : battery = kBatteryRuntimeS[kind] ?? 0;
 
   final int id;
   final HandlerKind kind;
@@ -80,13 +92,25 @@ class FloorHandler {
   /// Seconds spent picking up or setting down at the current stop.
   double timer = 0;
 
+  /// Seconds of work left in the battery ([isBatteryKind] only; full when
+  /// hired). A vehicle always finishes the trip it is on, so this never
+  /// strands a load mid-hall: it is floored at zero, and a flat vehicle
+  /// takes no new job until it has charged.
+  double battery;
+
   /// Staffed this sub-step (transient: re-derived from the colony's
   /// staffing share every sub-step, never saved).
   bool active = true;
 
   HandlerSpec get spec => kHandlerSpecs[kind]!;
 
-  bool get isFree => active && state == HandlerState.idle;
+  bool get isBattery => isBatteryKind(kind);
+
+  /// Idle, staffed and (for a battery vehicle) not flat.
+  bool get isFree =>
+      active &&
+      state == HandlerState.idle &&
+      (!isBattery || battery > 0);
 
   /// Drops the trip (and whatever it holds: the floor sets a load down
   /// before calling this) and settles onto a whole tile.
@@ -136,6 +160,7 @@ class FloorHandler {
         if (carrying != null) 'c': carrying,
         if (carryingCount != 0) 'cn': carryingCount,
         't': timer,
+        if (isBattery) 'bt': battery,
       };
 
   static FloorHandler fromJson(Map<String, Object?> j) {
@@ -151,6 +176,7 @@ class FloorHandler {
     h.carrying = j['c'] as String?;
     h.carryingCount = (j['cn'] as num?)?.toInt() ?? 0;
     h.timer = (j['t'] as num?)?.toDouble() ?? 0;
+    h.battery = (j['bt'] as num?)?.toDouble() ?? h.battery;
     return h;
   }
 }
@@ -161,9 +187,12 @@ class Dispatcher {
 
   /// Walks [queue] in posting order; each request goes to the free,
   /// capable handler with the shortest path to its source ([distTo] < 0 =
-  /// can't get there), ties by id ([handlers] must be in id order). A
-  /// request whose [routable] says the goods could not then reach the
-  /// target is left queued. Unknown items are never assigned.
+  /// can't get there); equally near, the cheapest kind ([kHandlerCostRank]),
+  /// then the lowest id ([handlers] must be in id order). A handler whose
+  /// [routable] says it could not then carry the goods to the target (a
+  /// forklift with no aisle there, a crane whose bay doesn't cover it) is
+  /// passed over; with nobody left the request stays queued. Unknown items
+  /// are never assigned.
   ///
   /// [routable] can cost a flow field, so it is asked only once some free
   /// handler could lift the load at all: a queue of pallets with only
@@ -172,14 +201,14 @@ class Dispatcher {
     List<MoveRequest> queue,
     List<FloorHandler> handlers, {
     required int Function(FloorHandler h, int placementId) distTo,
-    required bool Function(int from, int to) routable,
+    required bool Function(FloorHandler h, int from, int to) routable,
   }) {
     var i = 0;
     while (i < queue.length) {
       final req = queue[i];
       final def = FactoryItems.byId(req.item);
       FloorHandler? best;
-      var bestD = 0;
+      var bestD = 0, bestRank = 0;
       var canLift = false;
       if (def != null) {
         for (final h in handlers) {
@@ -189,27 +218,47 @@ class Dispatcher {
           }
         }
       }
-      if (def != null && canLift && routable(req.from, req.to)) {
+      if (def != null && canLift) {
         for (final h in handlers) {
           if (!h.isFree || !h.spec.canLift(def.loadClass)) continue;
           final d = distTo(h, req.from);
           if (d < 0) continue;
-          if (best == null || d < bestD) {
-            best = h;
-            bestD = d;
+          final rank = kHandlerCostRank[h.kind] ?? 0;
+          if (best != null && (d > bestD || (d == bestD && rank >= bestRank))) {
+            continue;
           }
+          if (!routable(h, req.from, req.to)) continue;
+          best = h;
+          bestD = d;
+          bestRank = rank;
         }
       }
       if (best == null) {
         i++;
         continue;
       }
-      final take = req.count < best.spec.capacity ? req.count : best.spec.capacity;
+      final cap = best.spec.capacity;
+      var take = req.count < cap ? req.count : cap;
+      req.count -= take;
+      // Fill the trip: later requests for the same item, source and target
+      // ride along (a forklift takes both pallets a packer has made).
+      for (var k = i + 1; k < queue.length && take < cap;) {
+        final o = queue[k];
+        if (o.item == req.item && o.from == req.from && o.to == req.to) {
+          final t = o.count < cap - take ? o.count : cap - take;
+          take += t;
+          o.count -= t;
+          if (o.count <= 0) {
+            queue.removeAt(k);
+            continue;
+          }
+        }
+        k++;
+      }
       best
         ..state = HandlerState.toPickup
         ..timer = 0
         ..job = MoveRequest(item: req.item, count: take, from: req.from, to: req.to);
-      req.count -= take;
       if (req.count <= 0) {
         queue.removeAt(i);
       }

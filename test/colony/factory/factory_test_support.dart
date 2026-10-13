@@ -63,11 +63,14 @@ class Lay {
   List<int> beltRow(int x0, int x1, int y, {Dir4 dir = Dir4.east}) =>
       [for (var x = x0; x <= x1; x++) add(EntityKind.belt, x, y, dir: dir)];
 
-  FloorBlueprint blueprint(int w, int h, {int walkers = 0}) => FloorBlueprint(
+  /// [crew] adds handlers of any kind to the [walkers].
+  FloorBlueprint blueprint(int w, int h,
+          {int walkers = 0, Map<HandlerKind, int> crew = const {}}) =>
+      FloorBlueprint(
         name: 'test',
         hall: HallSize(w, h),
         placements: out,
-        roster: {if (walkers > 0) HandlerKind.onFoot: walkers},
+        roster: {if (walkers > 0) HandlerKind.onFoot: walkers, ...crew},
       );
 }
 

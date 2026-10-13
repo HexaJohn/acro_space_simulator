@@ -5,6 +5,7 @@
 
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -45,7 +46,7 @@ void main() {
         reason: 'each call is a fresh blueprint the caller may edit');
   });
 
-  test('every station works and the walkers carry the tubes', () {
+  test('every station works and every kind of handler pulls its weight', () {
     final floor = FactoryFloor.fromBlueprint(factoryTemplateFor('steelmill')!);
     final port = InfiniteColonyPort();
     floor.step(300, port);
@@ -54,6 +55,12 @@ void main() {
     final l = floor.takeLedger();
     expect(l.itemMetres, greaterThan(0),
         reason: 'workers on foot really move freight in the template');
+    // The plan's realistic mix (§3 "Template plants"): forklifts clear the
+    // steel crates, a crane per line lifts the heavy billets.
+    expect(l.equipmentSeconds[HandlerKind.forklift], greaterThan(0));
+    expect(l.equipmentSeconds[HandlerKind.crane], greaterThan(0));
+    expect(floor.blueprint.roster.keys.toSet(),
+        {HandlerKind.onFoot, HandlerKind.forklift, HandlerKind.crane});
     for (final p in floor.blueprint.placements) {
       if (p.recipe == null) continue;
       expect(floor.statusOf(p.id), isNot(MachineStatus.unstaffed));

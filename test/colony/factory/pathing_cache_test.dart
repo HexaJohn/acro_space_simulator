@@ -61,7 +61,7 @@ void main() {
     ];
     var asked = 0;
     final q = [MoveRequest(item: 'ore', count: 1, from: 10, to: 20)];
-    Dispatcher.assign(q, hs, distTo: (_, _) => 1, routable: (_, _) {
+    Dispatcher.assign(q, hs, distTo: (_, _) => 1, routable: (_, _, _) {
       asked++;
       return true;
     });
@@ -70,14 +70,14 @@ void main() {
 
     hs.single.state = HandlerState.carrying;
     q.add(MoveRequest(item: 'tubes', count: 1, from: 10, to: 20));
-    Dispatcher.assign(q, hs, distTo: (_, _) => 1, routable: (_, _) {
+    Dispatcher.assign(q, hs, distTo: (_, _) => 1, routable: (_, _, _) {
       asked++;
       return true;
     });
     expect(asked, 0, reason: 'nobody is free at all');
 
     hs.single.state = HandlerState.idle;
-    Dispatcher.assign(q, hs, distTo: (_, _) => 1, routable: (_, _) {
+    Dispatcher.assign(q, hs, distTo: (_, _) => 1, routable: (_, _, _) {
       asked++;
       return true;
     });

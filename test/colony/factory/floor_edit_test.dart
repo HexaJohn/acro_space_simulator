@@ -10,6 +10,7 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.da
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_unlocks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'factory_test_support.dart';
@@ -78,8 +79,10 @@ void main() {
     expect(f.setMode(1, MachineMode.manual).ok, isTrue);
     expect(f.jobDemand, 2 + 1, reason: 'manual pair + assisted furnace');
 
+    f.unlocks = FactoryUnlocks.starter;
     expect(f.hire(HandlerKind.forklift, 1).refusal, EditRefusal.notAllowed,
-        reason: 'vehicles arrive in phase 4');
+        reason: 'a starter colony has no forklifts yet');
+    f.unlocks = FactoryUnlocks.all;
     expect(f.hire(HandlerKind.onFoot, 2).ok, isTrue);
     expect(f.handlers.length, 2);
     expect(f.hire(HandlerKind.onFoot, -3).refusal, EditRefusal.notAllowed);

@@ -64,12 +64,27 @@ class MachineState {
 
   MachineStatus status = MachineStatus.idle;
 
+  /// Seconds of unmaintained running (phase 4): grows while a station that
+  /// needs a technician works without one, drains while it has one; at
+  /// `kWearToBreakS` the station breaks down.
+  double wear = 0;
+
+  /// Broken down: crafts nothing (a running craft just pauses) until
+  /// [repair] reaches `kRepairS`.
+  bool broken = false;
+
+  /// Technician seconds spent on the current repair.
+  double repair = 0;
+
   Map<String, Object?> toJson() => {
         if (!inBuf.isEmpty) 'in': inBuf.toJson(),
         if (!outBuf.isEmpty) 'out': outBuf.toJson(),
         'p': progress,
         if (crafting) 'c': true,
         's': status.name,
+        if (wear != 0) 'w': wear,
+        if (broken) 'br': true,
+        if (repair != 0) 'rp': repair,
       };
 
   static MachineState fromJson(Map<String, Object?> j) => MachineState()
@@ -77,7 +92,10 @@ class MachineState {
     ..outBuf = ItemBag.fromJson(j['out'])
     ..progress = (j['p'] as num?)?.toDouble() ?? 0
     ..crafting = j['c'] == true
-    ..status = MachineStatus.values.byName(j['s'] as String? ?? 'idle');
+    ..status = MachineStatus.values.byName(j['s'] as String? ?? 'idle')
+    ..wear = (j['w'] as num?)?.toDouble() ?? 0
+    ..broken = j['br'] == true
+    ..repair = (j['rp'] as num?)?.toDouble() ?? 0;
 }
 
 /// One item on a belt tile, [p] 0..1 along it (1 = at the far edge).

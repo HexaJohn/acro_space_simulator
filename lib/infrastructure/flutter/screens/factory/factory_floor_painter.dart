@@ -92,6 +92,7 @@ const Map<MachineStatus, Color> kStatusColor = {
   MachineStatus.unstaffed: Color(0xFFFF8C66),
   MachineStatus.unpowered: Color(0xFFB388FF),
   MachineStatus.idle: Color(0xFF8499AE),
+  MachineStatus.broken: Color(0xFFE53935),
 };
 
 /// A stable color per item id (no platform hash: the same item is the same

@@ -58,7 +58,7 @@ void main() {
       MoveRequest(item: 'ore', count: 1, from: 10, to: 20),
     ];
     Dispatcher.assign(q, hs,
-        distTo: (h, _) => dist[h.id]!, routable: (_, _) => true);
+        distTo: (h, _) => dist[h.id]!, routable: (_, _, _) => true);
     expect(hs[1].job?.count, 1, reason: '#2 and #3 tie at 3 tiles: #2 wins');
     expect(hs[2].job?.count, 1, reason: 'the split remainder goes to #3');
     expect(hs[0].job, isNull,

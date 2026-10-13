@@ -3,6 +3,7 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
@@ -15,9 +16,10 @@ import 'factory_test_support.dart';
 /// Engagement is optional but REWARDED (§3 "Reward", user decision
 /// 2026-10-12): the template must leave room for a better design. Here a
 /// designer re-crews the template — one operator per station instead of a
-/// manual pair, and one walker fewer — and gets the same steel and tubes
-/// for far fewer jobs (the labour lever). The 1.5× cap is the colony's to
-/// enforce at integration, not the floor's.
+/// manual pair, lights-out smelters minded by a technician's share each,
+/// and one walker fewer — and gets the same steel and tubes for far fewer
+/// jobs (the labour lever). The 1.5× cap is the colony's to enforce at
+/// integration, not the floor's.
 void main() {
   test('a re-crewed template matches its output with fewer jobs', () {
     final base = FactoryFloor.fromBlueprint(factoryTemplateFor('steelmill')!);
@@ -27,7 +29,10 @@ void main() {
     for (var i = 0; i < bp.placements.length; i++) {
       final p = bp.placements[i];
       if (p.kind != EntityKind.machine) continue;
-      bp.placements[i] = p.copyWith(mode: MachineMode.assisted);
+      bp.placements[i] = p.copyWith(
+          mode: p.recipe == SteelRecipes.smelt.id
+              ? MachineMode.automated
+              : MachineMode.assisted);
     }
     bp.roster[HandlerKind.onFoot] = 8;
     final better = FactoryFloor.fromBlueprint(bp);
