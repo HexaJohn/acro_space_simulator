@@ -49,6 +49,9 @@ import 'screens/city_edit_overlay.dart';
 import 'screens/city_game_hud.dart';
 import 'screens/app_theme.dart';
 import 'screens/city_site_actions.dart';
+import 'screens/factory/colony_floor_ui.dart';
+import '../../domain/colony/city/city_factories.dart';
+import '../../application/factory/colony_floor_measurer.dart';
 import 'screens/city_control_ui.dart' show showIndependence;
 import 'screens/city_plat_view.dart';
 import 'screens/colony_markers_painter.dart';
@@ -361,6 +364,17 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
 
   /// The colony being edited in-world, and the tool held over it.
   CitySim? _editingCity;
+
+  /// The placed plant whose factory floor is open over the view, and its
+  /// colony (docs/plans/factory-floors.md §4). Shown INSIDE this view's
+  /// stack, never as a pushed route: an opaque route offstages the view,
+  /// its ticker stops, and the colony that steps the floor freezes.
+  String? _floorSite;
+  CitySim? _floorCity;
+
+  /// Re-measures every colony's edited floors off the frame, pumped once a
+  /// frame (cheap) and disposed with the view.
+  final ColonyFloorMeasurer _floorMeasurer = ColonyFloorMeasurer();
   final CityEditController _cityEdit = CityEditController();
 
   /// Where the placement heatmap was last surveyed, and for which building.
@@ -2142,6 +2156,8 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     for (final c in _cities.all()) {
       if (!paused) c.agents.endFrame();
       if (c.agents.enabled) agentColony = true;
+      // Edited floors queue for measurement; the work runs off the frame.
+      _floorMeasurer.pump(c);
     }
     SceneSync.tickCostMs =
         agentColony ? swSteps.elapsedMicroseconds / 1000.0 : 0;
@@ -2411,6 +2427,7 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
     SceneSync.tickCostMs = 0;
     SceneSync.simWarp = 1;
     _disposeCityRoadTool();
+    _floorMeasurer.dispose();
     SimViewControl.instance.clear();
     CombatHooks.clear();
     final timingsCb = _timingsCb;
@@ -3212,6 +3229,12 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           // Any tap on the world reclaims keyboard focus (FABs/dropdown may have
           // stolen it), so camera-orbit arrow keys keep working.
           onPointerDown: (e) {
+            // Not while a factory floor is open over the world: this
+            // Listener is an ANCESTOR of the editor, so it would take the
+            // keyboard back from the editor on every click (R and Del
+            // would then act on the world), and its middle-drag would orbit
+            // the camera while the editor's own middle-drag pans the floor.
+            if (_floorSite != null) return;
             _keyFocus.requestFocus();
             if (e.buttons & kMiddleMouseButton != 0) {
               _mmbDragging = true;
@@ -3253,6 +3276,9 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
           // when nothing nearer the pointer wanted the wheel.
           onPointerSignal: (signal) {
             if (signal is! PointerScrollEvent) return;
+            // The floor editor zooms itself on the wheel; the world must not
+            // zoom too behind it.
+            if (_floorSite != null) return;
             GestureBinding.instance.pointerSignalResolver.register(signal,
                 (event) {
               final scroll = event as PointerScrollEvent;
@@ -3678,6 +3704,11 @@ class _SimulationViewState extends State<SimulationView> with SingleTickerProvid
                       child: const MouseRegion(cursor: SystemMouseCursors.none),
                     ),
                   ),
+                // A placed plant's factory floor (docs/plans/factory-floors.md
+                // §4). LAST in the stack and opaque, so no world layer, tool
+                // or HUD under it is hit while it is open; the colony runs on
+                // beneath it, because it is the colony that steps the floor.
+                ?_floorOverlay(),
               ],
             ),
         ),

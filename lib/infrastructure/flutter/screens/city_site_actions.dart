@@ -19,6 +19,8 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
+import '../../../domain/colony/city/city_economy.dart';
+import '../../../domain/colony/city/city_factories.dart';
 import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
@@ -27,6 +29,7 @@ import 'app_theme.dart';
 import 'city_control_ui.dart';
 import 'city_model.dart';
 import 'craft_assembly_screen.dart';
+import 'factory/colony_floor_ui.dart';
 
 /// The actions a HOST supplies, because they need something the sim has no
 /// opinion about — a navigator, a camera, a craft in flight.
@@ -36,7 +39,13 @@ class CitySiteHooks {
     this.onTargetPad,
     this.targetPadHint,
     this.extra,
+    this.onOpenFactoryFloor,
   });
+
+  /// Show [site]'s factory floor in the host's own view
+  /// ([ColonyFloorOverlay]). Null hides the "Factory floor" action: a host
+  /// that cannot keep the colony running under the editor must not open it.
+  final void Function(String site)? onOpenFactoryFloor;
 
   /// Open the VAB to design and launch a craft from this site. Null hides the
   /// action entirely (a host with nowhere to launch from).
@@ -276,15 +285,29 @@ void showCitySiteDetail(
   ];
   // An idle building's throughput is what it makes NOW, not its nameplate.
   final idle = sim.idleForSky(spec);
-  spec.inputs.forEach(
-      (k, v) => io.add('−${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
-  spec.outputs.forEach((k, v) =>
-      io.add('+${(idle ? 0.0 : v).toStringAsFixed(1)} ${Commodity.name(k)}/s'));
+  // A floor plant runs on its floor's rates, not the nameplate: a designed
+  // floor makes what it was measured to make, and a firm's idled stations
+  // make less. Its owner and books lead (docs/plans/factory-floors.md §4).
+  final floor = sim.floorRatesAt(site, spec) == null
+      ? const <String>[]
+      : floorSiteLines(sim, site);
+  if (floor.isNotEmpty) {
+    io.addAll(floor);
+  } else {
+    spec.inputs.forEach(
+        (k, v) => io.add('−${v.toStringAsFixed(1)} ${Commodity.name(k)}/s'));
+    spec.outputs.forEach((k, v) => io
+        .add('+${(idle ? 0.0 : v).toStringAsFixed(1)} ${Commodity.name(k)}/s'));
+  }
   if (spec.powerOutput > 0) {
     io.add('+${spec.powerOutput.toStringAsFixed(0)} power');
   }
-  if (spec.powerDraw > 0) io.add('−${spec.powerDraw.toStringAsFixed(0)} power');
-  if (spec.jobs > 0) io.add('${spec.jobs} jobs');
+  if (floor.isEmpty) {
+    if (spec.powerDraw > 0) {
+      io.add('−${spec.powerDraw.toStringAsFixed(0)} power');
+    }
+    if (spec.jobs > 0) io.add('${spec.jobs} jobs');
+  }
   if (spec.housing > 0) io.add('${spec.housing} housing');
   // Lead the WHY with the status diagnosis, then the IO stats so the modal
   // explains the flagged problem instead of just listing throughput.
@@ -333,13 +356,16 @@ void showCitySiteMenu({
         Icons.warning_amber,
         'Disable safety systems',
         'Override the SCRAM interlocks. What could go wrong?',
-        AppTheme.danger, () {
+        AppTheme.danger, () async {
+      // Never a floor plant today, but the rule is the demolition's.
+      if (!await confirmFloorLoss(context, sim, site)) return;
       sim.disaster = Disaster.nuke;
       sim.disasterTime = Disaster.nuke.duration;
       sim.radiation = (sim.radiation + 0.3).clamp(0.0, 1.0);
       demolishSite(sim, site); // the reactor is gone
       sim.attend(); // an act of governance (secession §3.3), if a rash one
       onChanged();
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('☢ MELTDOWN — safety interlocks disabled. Oops.'),
           backgroundColor: Color(0xFF6B1414),
@@ -456,10 +482,53 @@ void showCitySiteMenu({
         () => showDeliveryConfig(
             context: context, sim: sim, site: site, onChanged: onChanged)));
   }
+  // A placed plant's factory floor (docs/plans/factory-floors.md §4): only
+  // where a floor record exists, which only a placed floor plant has — a
+  // zoned lot never qualifies.
+  final rec = sim.factoryFloors[site];
+  if (rec != null && hooks.onOpenFactoryFloor != null) {
+    actions.add(gatedSiteAction(
+        context,
+        sim,
+        Icons.precision_manufacturing,
+        'Factory floor',
+        rec.designed
+            ? 'Open its floor: your design, live.'
+            : 'Open its floor: the template layout, live. Design a better one.',
+        AppTheme.accent,
+        () => hooks.onOpenFactoryFloor!(site)));
+  }
+  // Who runs it (§7 Q9-Q11): nationalise a firm's plant, or privatise a
+  // state one where the economy allows a buyer.
+  if (rec != null) {
+    final state = sim.ownerOf(site).isState;
+    final communist = sim.economy == Economy.communism;
+    if (!state || !communist) {
+      actions.add(gatedSiteAction(
+          context,
+          sim,
+          state ? Icons.storefront : Icons.account_balance,
+          state ? 'Privatise' : 'Nationalise',
+          state
+              ? 'Sell it to a new firm: it pays corporate tax and runs to a '
+                  'profit.'
+              : 'Take it into state hands: its losses become the industry '
+                  'deficit.',
+          AppTheme.accent2, () {
+        if (state ? sim.privatise(site) : sim.nationalise(site)) sim.attend();
+        onChanged();
+      }));
+    }
+  }
   if (hooks.extra != null) actions.addAll(hooks.extra!(site, spec));
   actions.add(gatedSiteAction(
       context, sim, Icons.delete, 'Demolish',
-      'Tear it down (partial ore refund).', AppTheme.danger, () {
+      sim.floorIsDesigned(site)
+          ? 'Tear it down — its custom floor design is lost.'
+          : 'Tear it down (partial ore refund).',
+      AppTheme.danger, () async {
+    // A designed floor is the player's work: asked first (§3 Persistence).
+    if (!await confirmFloorLoss(context, sim, site)) return;
     demolishSite(sim, site);
     sim.attend();
     onChanged();

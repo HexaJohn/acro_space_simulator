@@ -68,9 +68,16 @@ class FactoryFloorScreen extends StatefulWidget {
     this.onSaveBlueprint,
     this.unlocks = FactoryUnlocks.all,
     this.drivesSim = true,
+    this.onClose,
   });
 
   final FactorySim sim;
+
+  /// What the back arrow does. Null pops the route the screen was pushed
+  /// on. A host that shows the editor INSIDE its own view (the colony, so
+  /// its ticker keeps running) passes its own close, which is also where
+  /// the colony settles the edit (`CityFactories.closeFloor`).
+  final VoidCallback? onClose;
 
   /// What the colony has unlocked, for DISPLAY: locked handler kinds and
   /// station modes are greyed. The sim enforces its own unlocks.
@@ -118,6 +125,14 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   void initState() {
     super.initState();
     _ticker = createTicker(_onTick)..start();
+    // Take the keyboard once mounted. `autofocus` alone is not enough when
+    // the editor is shown inside a host that already holds focus (the
+    // colony view's own key node): autofocus only fires in a scope with
+    // nothing focused, and R / Del would then rotate and delete in the
+    // world instead of on the floor.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focus.requestFocus();
+    });
   }
 
   /// A new sim or port means a new floor: the controller (camera, selection,
@@ -176,6 +191,7 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
               _TopBar(
                   c: controller,
                   title: widget.title,
+                  onBack: widget.onClose,
                   onSave: widget.onSaveBlueprint == null
                       ? null
                       : () => widget.onSaveBlueprint!(
@@ -283,10 +299,17 @@ String _fmtRate(double v) => v >= 10
         : v.toStringAsFixed(3);
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({required this.c, required this.title, required this.onSave});
+  const _TopBar(
+      {required this.c,
+      required this.title,
+      required this.onSave,
+      this.onBack});
   final FactoryEditorController c;
   final String title;
   final VoidCallback? onSave;
+
+  /// The host's close; null pops the route.
+  final VoidCallback? onBack;
 
   @override
   Widget build(BuildContext context) {
@@ -302,9 +325,10 @@ class _TopBar extends StatelessWidget {
         child: Row(
           children: [
             IconButton(
+              key: const Key('factory-back'),
               icon: const Icon(Icons.arrow_back, color: AppTheme.text),
-              onPressed: () => Navigator.of(context).maybePop(),
-              tooltip: 'Back',
+              onPressed: onBack ?? () => Navigator.of(context).maybePop(),
+              tooltip: onBack == null ? 'Back' : 'Close floor',
             ),
             Flexible(
               child: Text(title,

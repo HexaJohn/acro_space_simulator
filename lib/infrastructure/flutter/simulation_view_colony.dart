@@ -155,8 +155,18 @@ extension _SimulationViewColony on _SimulationViewState {
       final site = held.siteMetres(cellM: CitySim.cellM);
       CityNodes.cursorSizeM = site.width;
       CityNodes.cursorDepthM = site.depth;
-      CityNodes.cursorBad = held.claimsOwnSite &&
-          _siteStatusAt(city, held, Vec2(hit.east, hit.north)) != 0;
+      // A chosen floor blueprint too big for the plant's site refuses it
+      // everywhere (docs/plans/factory-floors.md §3 "Design before
+      // building"): the ghost is red on every lot, and the toolbar says why
+      // before the click — said once, not on every mouse move.
+      final misfit = city.floorBlueprintRefusal(held);
+      CityNodes.cursorBad = misfit != null ||
+          (held.claimsOwnSite &&
+              _siteStatusAt(city, held, Vec2(hit.east, hit.north)) != 0);
+      if (misfit != null && _cityEdit.blocked != misfit) {
+        _cityEdit.blocked = misfit;
+        _cityEdit.changed();
+      }
     } else {
       CityNodes.cursorSizeM = CitySim.cellM;
       CityNodes.cursorDepthM = CitySim.cellM;
@@ -744,8 +754,75 @@ extension _SimulationViewColony on _SimulationViewState {
       ),
       onTargetPad: (site) => _targetPad(city, site),
       targetPadHint: hint,
+      onOpenFactoryFloor: (site) => _openFactoryFloor(city, site),
       extra: (site, spec) => _combatSiteRows(city, site, spec),
     );
+  }
+
+  /// Shows [site]'s factory floor over the view ([ColonyFloorOverlay]).
+  /// False when the site has no floor. A floor already open is closed first
+  /// (settled), so only one plant is ever live in the editor.
+  bool _openFactoryFloor(CitySim city, String site) {
+    if (city.factoryFloors[site] == null) return false;
+    final open = _floorSite;
+    final openCity = _floorCity;
+    if (open != null && openCity != null) {
+      if (open == site && identical(openCity, city)) return true;
+      openCity.closeFloor(open);
+    }
+    rebuild(() {
+      // A captured mouse has no cursor to edit with, and a key held as the
+      // editor opened would stay latched: its key-up goes to the editor.
+      if (_pointerLock.captured) _releaseMouseLook();
+      _keysDown.clear();
+      _mmbDragging = false;
+      _floorSite = site;
+      _floorCity = city;
+    });
+    return true;
+  }
+
+  /// The floor overlay is done (closed, or its plant gone): take it down
+  /// and give the keyboard back to the world.
+  void _onFactoryFloorClosed(FloorEditOutcome? outcome) {
+    if (!mounted) return;
+    rebuild(() {
+      _floorSite = null;
+      _floorCity = null;
+    });
+    _keyFocus.requestFocus();
+  }
+
+  /// The open floor over the world, or null.
+  Widget? _floorOverlay() {
+    final site = _floorSite, city = _floorCity;
+    if (site == null || city == null) return null;
+    return Positioned.fill(
+      key: const Key('colony-floor-overlay'),
+      child: ColonyFloorOverlay(
+        key: ValueKey('${identityHashCode(city)}/$site'),
+        city: city,
+        site: site,
+        onClosed: _onFactoryFloorClosed,
+      ),
+    );
+  }
+
+  /// `SimViewControl.factoryFloor`: open [site] on the colony being
+  /// edited, or close the open floor (null), as the player's clicks do.
+  Map<String, Object?> _factoryFloorControl(String? site) {
+    final city = _editingCity;
+    if (site != null) {
+      final ok = city != null && _openFactoryFloor(city, site);
+      return {'open': _floorSite, if (!ok) 'error': 'no floor at $site'};
+    }
+    final open = _floorSite, openCity = _floorCity;
+    if (open == null || openCity == null) return {'open': null};
+    // Closed here, settled by the colony; the overlay sees its floor gone
+    // on its next frame and takes itself down.
+    final outcome = openCity.closeFloor(open);
+    _onFactoryFloorClosed(outcome);
+    return {'open': null, 'closed': open, 'capexDelta': outcome.capexDelta};
   }
 
   /// Aim the focused craft's landing guidance at [site]'s pad.
@@ -1360,6 +1437,7 @@ extension _SimulationViewColony on _SimulationViewState {
   /// The route inspector and the Lane speed view for dev tooling (E32):
   /// the same paths V and a click on a car take.
   void _registerTrafficControl(SimViewControl c) {
+    c.factoryFloor = (site) => mounted ? _factoryFloorControl(site) : const {};
     c.selectVehicle = (handle) {
       final city = _editingCity;
       if (!mounted || city == null) return null;

@@ -109,6 +109,13 @@ class SimViewControl {
   /// speed; null puts the tool down. Returns the tool and its view.
   Map<String, Object?> Function(String? view)? setTrafficView;
 
+  /// Open [site]'s factory floor over the colony view, as its site menu's
+  /// "Factory floor" does; null closes whatever floor is open, as its back
+  /// arrow does (docs/plans/factory-floors.md §4). Returns the site open
+  /// after the call (`open`, null for none) and, on a close, the edit's
+  /// capex delta.
+  Map<String, Object?> Function(String? site)? factoryFloor;
+
   void clear() {
     orbit = null;
     zoom = null;
@@ -131,5 +138,6 @@ class SimViewControl {
     combat = null;
     selectVehicle = null;
     setTrafficView = null;
+    factoryFloor = null;
   }
 }

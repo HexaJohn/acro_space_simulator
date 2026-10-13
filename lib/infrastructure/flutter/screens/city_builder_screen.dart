@@ -32,6 +32,8 @@ import 'city_model.dart';
 import 'city_loyalty_ui.dart';
 import 'city_panels.dart';
 import 'city_site_actions.dart';
+import 'factory/colony_floor_ui.dart';
+import '../../../application/factory/colony_floor_measurer.dart';
 
 /// City builder. You paint RCI **zones** at low/medium/high **density** (buildings
 /// grow there on their own under demand) and place **utilities, factories,
@@ -224,6 +226,8 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       _sim.advance(dt);
       _air.step(_sim, dt);
     }
+    // Edited floors queue for measurement; the work runs off the frame.
+    _floorMeasurer.pump(_sim);
     setState(() {});
   }
 
@@ -240,8 +244,42 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   late final TabController _tabs;
 
+  /// The placed plant whose factory floor is open over the screen
+  /// (docs/plans/factory-floors.md §4). Hosted in this screen's own stack,
+  /// not pushed: a pushed opaque route offstages the screen, its ticker
+  /// stops, and the colony stepping the floor freezes under the editor.
+  String? _floorSite;
+
+  /// Re-measures this colony's edited floors off the frame.
+  final ColonyFloorMeasurer _floorMeasurer = ColonyFloorMeasurer();
+
+  /// The designed floor the player agreed to lose, for the one tap being
+  /// replayed after the question ([_floorAtRisk]).
+  String? _floorLossConfirmed;
+
+  /// The designed factory floor the held tool would tear down at [k], or
+  /// null: any tool that clears a building's cell, as `_demolitionRefused`
+  /// counts them (a utility only on its same-type toggle).
+  String? _floorAtRisk(int k) {
+    final site = _sim.designedFloorAtCell(k);
+    if (site == null) return null;
+    final tears = switch (_tool) {
+      CityBuilderTool.retrofit || CityBuilderTool.inspect => false,
+      CityBuilderTool.utility =>
+        _sim.utils[_sim.anchorOf(k) ?? k]?.type == _selectedUtil.type,
+      _ => true,
+    };
+    return tears ? site : null;
+  }
+
+  /// A drag or a fill never asks: it skips a designed floor and says how to
+  /// demolish it on purpose.
+  static const String _floorDragSkip =
+      'A designed factory floor stands here — tap it to demolish it.';
+
   @override
   void dispose() {
+    _floorMeasurer.dispose();
     _ticker.dispose();
     _tabs.dispose();
     _drawerScroll.dispose();
@@ -481,6 +519,18 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       setState(() {});
       return;
     }
+    // A designed floor is the player's work: asked before it is lost, then
+    // the same tap is replayed (docs/plans/factory-floors.md §3).
+    final risk = _floorAtRisk(k);
+    if (risk != null && _floorLossConfirmed != risk) {
+      confirmFloorLoss(context, _sim, risk).then((ok) {
+        if (!ok || !mounted) return;
+        _floorLossConfirmed = risk;
+        _onTapCell(x, y);
+        _floorLossConfirmed = null;
+      });
+      return;
+    }
     setState(() {
       _sim.blocked = null;
       switch (_tool) {
@@ -600,6 +650,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       setState(() {});
       return;
     }
+    if (!noop && _floorAtRisk(k) != null) {
+      setState(() => _sim.blocked = _floorDragSkip);
+      return;
+    }
     setState(() {
       _sim.blocked = null;
       switch (_tool) {
@@ -656,6 +710,10 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           refused = _sim.blocked;
           continue;
         }
+        if (_tool != CityBuilderTool.retrofit && _floorAtRisk(k) != null) {
+          refused = _floorDragSkip;
+          continue;
+        }
         acted = true;
         if (_tool == CityBuilderTool.retrofit) {
           _sim.retrofitCell(k);
@@ -701,6 +759,28 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
 
   @override
   Widget build(BuildContext context) {
+    final floor = _floorSite;
+    final page = _page(context);
+    if (floor == null) return page;
+    // The open floor over the whole screen, app bar included; the screen
+    // (and its ticker, and so the colony) keeps running under it.
+    return Stack(children: [
+      page,
+      Positioned.fill(
+        key: const Key('colony-floor-overlay'),
+        child: ColonyFloorOverlay(
+          key: ValueKey(floor),
+          city: _sim,
+          site: floor,
+          onClosed: (_) {
+            if (mounted) setState(() => _floorSite = null);
+          },
+        ),
+      ),
+    ]);
+  }
+
+  Widget _page(BuildContext context) {
     return AppTheme.scaffold(
       context: context,
       title: 'CITY BUILDER',
@@ -1806,6 +1886,7 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
   /// targeting in their place.
   CitySiteHooks _siteHooks(int anchor) => CitySiteHooks(
         onOpenVab: _openVab,
+        onOpenFactoryFloor: (site) => setState(() => _floorSite = site),
         extra: (site, spec) => [
           if (spec.type == 'spaceport') ...[
             gatedSiteAction(
@@ -1979,7 +2060,8 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           if (locked)
             Text('pop ${u.unlockPop}', style: AppTheme.dim)
           else
-            _costChip(u.buildCost),
+            // A designed floor's capex, not the nameplate.
+            _costChip(_sim.buildCostOf(u)),
         ]),
         subtitle: Text(_specSummary(u), style: AppTheme.dim),
         onExpansionChanged: (_) => setState(() {
@@ -2052,7 +2134,13 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
       if (s.storageBonus > 0)
         line('Storage', '+${s.storageBonus.toStringAsFixed(0)}', AppTheme.accent2),
       const SizedBox(height: 4),
-      Text('Build: ${s.buildCost.toStringAsFixed(0)} ore', style: AppTheme.dim),
+      Text('Build: ${_sim.buildCostOf(s).toStringAsFixed(0)} ore',
+          style: AppTheme.dim),
+      // Which floor a new plant is stamped with, and the sandbox to design
+      // one before building (docs/plans/factory-floors.md §3).
+      if (isFloorPlant(s))
+        FloorBlueprintPicker(
+            city: _sim, spec: s, onChanged: () => setState(() {})),
     ]);
   }
 

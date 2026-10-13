@@ -253,6 +253,25 @@ extension CityFactories on CitySim {
   /// loses the design, so the UI asks first.
   bool floorIsDesigned(String site) => factoryFloors[site]?.designed ?? false;
 
+  /// The designed floor a clear of grid [cell] would lose: the site id of
+  /// the building covering it when that building's floor is designed, else
+  /// null. Any covered tile counts, as `clearCell` clears the whole
+  /// building from any of them.
+  String? designedFloorAtCell(int cell) {
+    final site = CitySim.siteIdOfCell(anchorOf(cell) ?? cell);
+    return floorIsDesigned(site) ? site : null;
+  }
+
+  /// The steady-state rates [spec] at [site] runs on this tick, when its
+  /// floor runs it (a template's are the spec's own, seeded); null when it
+  /// runs on the spec's flat recipe (no floor, or the kill-switch is off).
+  /// What the stock readouts must show for a floor plant, or a designed
+  /// floor's real output would read as its nameplate.
+  MeasuredRates? floorRatesAt(String site, CityBuildingSpec spec) {
+    if (!factoryFloorsEnabled || !isFloorPlant(spec)) return null;
+    return factoryFloors[site]?.rates;
+  }
+
   // ---- editor ---------------------------------------------------------------
 
   /// Opens [site]'s floor at full fidelity for the editor, built with the

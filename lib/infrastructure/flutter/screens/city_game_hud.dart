@@ -32,6 +32,7 @@ import 'city_control_ui.dart';
 import 'city_loyalty_ui.dart';
 import 'city_reclaim_ui.dart';
 import 'combat/occupation_panel.dart';
+import 'factory/colony_floor_ui.dart';
 import 'traffic_lane_speed_overlay.dart' show TrafficLaneSpeedOverlay;
 
 /// Which drawer is open under the top bar.
@@ -171,6 +172,14 @@ class _CityGameHudState extends State<CityGameHud> {
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
                     child: BindingTermsCard(city: city, compact: true),
+                  ),
+                // A plant whose firm failed waits on the player: run it as
+                // the state's, or sell it on (factory-floors.md §7 Q11).
+                if (city.colonyEconomy.offers.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: FirmOfferCard(
+                        city: city, onChanged: () => setState(() {})),
                   ),
                 if (_panel != CityGamePanel.none)
                   Padding(
@@ -640,8 +649,8 @@ class _CityGameHudState extends State<CityGameHud> {
       Text(
           'The treasury pays for ROADS, land and policy: a road is bought '
           'when it is laid and costs upkeep every week after — more on a '
-          'bridge, most in a tunnel. BUILDINGS are paid in ore — mine it, '
-          'ship it in, or earn it at a milestone.',
+          "bridge, most in a tunnel. BUILDINGS are paid in ore, a plant's "
+          'floor too — mine it, ship it in, or earn it at a milestone.',
           style: AppTheme.dim.copyWith(fontSize: 11)),
       const SizedBox(height: 10),
       _kv('Treasury', '§${city.funds.toStringAsFixed(0)}'),
@@ -678,6 +687,16 @@ class _CityGameHudState extends State<CityGameHud> {
           _kv('Industrial subsidies',
               '§${city.colonyEconomy.industrialSubsidyTotal.toStringAsFixed(0)} paid',
               AppTheme.warn),
+        // Said only once a plant stands, so the drawer of a colony without
+        // one keeps its height (its tax slider stays clear of the toolbar).
+        Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: Text(
+              'Plants keep books at local prices: a firm is taxed on its '
+              "profit, a state plant's loss is the deficit, and a floor "
+              'upgrade no firm would pay back is subsidised.',
+              style: AppTheme.dim.copyWith(fontSize: 10)),
+        ),
       ],
       const Divider(height: 14, color: Color(0xFF1E2A38)),
       _kv('Net', '${net >= 0 ? '+' : ''}${net.toStringAsFixed(2)} §/s',

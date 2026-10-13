@@ -27,6 +27,7 @@ import 'app_theme.dart';
 import 'city_control_ui.dart';
 import 'city_model.dart';
 import 'city_panels.dart';
+import 'factory/colony_floor_ui.dart';
 import 'road_tool_controller.dart';
 import 'road_tool_panel.dart';
 
@@ -223,6 +224,37 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
     return false;
   }
 
+  /// Asks the player before a demolition loses [site]'s designed factory
+  /// floor (docs/plans/factory-floors.md §3 "Persistence"); installed by the
+  /// toolbar, which has a context to ask from. Null (headless): the
+  /// bulldozer refuses such a plant and says to use its menu.
+  Future<bool> Function(String site)? askFloorLoss;
+
+  /// Sites whose question is on screen, so a bulldozer dragged on across
+  /// the same plant doesn't stack a second dialog on the first.
+  final Set<String> _askingFloorLoss = {};
+
+  /// Clears [site] with [demolish] once the player agrees to lose its
+  /// designed floor.
+  void _demolishDesignedFloor(
+      CitySim city, String site, void Function() demolish) {
+    final ask = askFloorLoss;
+    if (ask == null) {
+      blocked = "This plant's custom floor design would be lost — demolish "
+          'it from its menu.';
+      notifyListeners();
+      return;
+    }
+    if (!_askingFloorLoss.add(site)) return;
+    ask(site).then((ok) {
+      _askingFloorLoss.remove(site);
+      if (!ok) return;
+      demolish();
+      city.attend();
+      notifyListeners();
+    });
+  }
+
   void setHover(int? cell) {
     if (cell == hoverCell) return;
     hoverCell = cell;
@@ -252,6 +284,11 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
         }
         notifyListeners();
       case CityEditTool.bulldoze:
+        if (city.floorIsDesigned(parcelId)) {
+          _demolishDesignedFloor(
+              city, parcelId, () => city.clearParcel(parcelId));
+          return;
+        }
         city.clearParcel(parcelId);
         city.attend();
         notifyListeners();
@@ -388,6 +425,13 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
         city.placeUtil(cell, spec);
         city.recompute();
       case CityEditTool.bulldoze:
+        if (city.designedFloorAtCell(cell) case final site?) {
+          _demolishDesignedFloor(city, site, () {
+            city.clearCell(cell);
+            city.recompute();
+          });
+          return;
+        }
         city.clearCell(cell);
         city.recompute();
       case CityEditTool.retrofit:
@@ -459,6 +503,7 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
   Widget build(BuildContext context) {
     _maxWidth = math.max(240.0, MediaQuery.sizeOf(context).width - 24);
     controller.gateCity = city;
+    controller.askFloorLoss = (site) => confirmFloorLoss(context, city, site);
     return AnimatedBuilder(
       animation: controller,
       builder: (context, _) => Align(
@@ -923,7 +968,8 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
               style: const TextStyle(fontSize: 9, color: Color(0xFF6D8095))),
           const SizedBox(width: 8),
           Text(
-            locked ? 'pop ${u.unlockPop}' : '${u.buildCost.round()} ore',
+            // A designed floor's capex, not the nameplate.
+            locked ? 'pop ${u.unlockPop}' : '${city.buildCostOf(u).round()} ore',
             style: TextStyle(
                 fontSize: 10,
                 color: locked
@@ -1020,8 +1066,16 @@ class _CityEditOverlayState extends State<CityEditOverlay> with CityPanels {
             '${s.siteMetres().width.round()}x'
                 '${s.siteMetres().depth.round()} m',
             const Color(0xFF9FB4CC)),
-        line('Build', '${s.buildCost.toStringAsFixed(0)} ore',
-            city.stockOf('ore') >= s.buildCost ? good : bad),
+        line('Build', '${city.buildCostOf(s).toStringAsFixed(0)} ore',
+            city.stockOf('ore') >= city.buildCostOf(s) ? good : bad),
+        // Which floor a new plant is stamped with, and the sandbox to
+        // design one before building (docs/plans/factory-floors.md §3).
+        if (isFloorPlant(s))
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: FloorBlueprintPicker(
+                city: city, spec: s, onChanged: controller.changed),
+          ),
       ]),
     );
   }

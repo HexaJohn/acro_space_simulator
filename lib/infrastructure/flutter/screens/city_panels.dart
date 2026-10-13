@@ -20,7 +20,12 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
+import '../../../domain/colony/city/city_economy.dart';
+import '../../../domain/colony/city/city_factories.dart';
+import '../../../domain/colony/city/factory/factory_sim_api.dart'
+    show MeasuredRates;
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_reclaim.dart';
 import '../../../domain/colony/city/city_sim.dart';
@@ -796,9 +801,18 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
         ]),
       ),
     ];
+    // A floor's intermediates (plates, wire, billets shipped between
+    // plants) are stock too, though no colony commodity names them: listed
+    // after the colony's own, under COMPONENTS with their item labels.
+    final intermediates = [
+      for (final k in sim.stock.keys)
+        if (!Commodity.label.containsKey(k) &&
+            Commodity.section(k) == 'COMPONENTS')
+          k,
+    ]..sort();
     // Group by section: Raw Resources / Components / Finished Goods.
     for (final section in Commodity.sections) {
-      final inSection = Commodity.ordered
+      final inSection = [...Commodity.ordered, ...intermediates]
           .where((c) => Commodity.section(c) == section && show(c))
           .toList();
       if (inSection.isEmpty) continue;
@@ -854,7 +868,17 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
   /// consumption is the same in both.
   Map<String, double> netRates({bool throttled = true}) {
     final r = <String, double>{};
+    for (final (site, spec, rates) in _floorPlants()) {
+      final t = (throttled ? sim.throttleFor(spec) : 1.0) *
+          sim.floorThrottleOf(site);
+      rates.outPerS.forEach((k, v) => r[k] = (r[k] ?? 0) + v * t);
+      rates.inPerS.forEach((k, v) => r[k] = (r[k] ?? 0) - v * t);
+    }
     for (final e in sim.activeSpecs) {
+      // A floor plant was counted above, at its floor's rates.
+      if (sim.floorRatesAt(CitySim.siteIdOfCell(e.key), e.value) != null) {
+        continue;
+      }
       final t = throttled ? sim.throttleFor(e.value) : 1.0;
       // A harvester under a sky with no oxygen to take makes nothing.
       final yields = !sim.idleForSky(e.value);
@@ -879,6 +903,25 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
   }
   String fmtRate(double r) =>
       r.abs() < 0.05 ? '±0/s' : '${r >= 0 ? "+" : ""}${r.toStringAsFixed(1)}/s';
+  /// Every running plant whose FLOOR sets its rates (docs/plans/
+  /// factory-floors.md §3): (site, spec, the floor's steady-state rates).
+  /// The readouts must show these, not the spec's nameplate — a designed
+  /// floor makes what it was measured to make, and a placed lot's plant is
+  /// one the grid walk in [netRates] never sees.
+  List<(String, CityBuildingSpec, MeasuredRates)> _floorPlants() {
+    final out = <(String, CityBuildingSpec, MeasuredRates)>[];
+    for (final e in sim.activeSpecs) {
+      final site = CitySim.siteIdOfCell(e.key);
+      final r = sim.floorRatesAt(site, e.value);
+      if (r != null) out.add((site, e.value, r));
+    }
+    for (final e in sim.parcelBuildings.entries) {
+      final r = sim.floorRatesAt(e.key, e.value);
+      if (r != null) out.add((e.key, e.value, r));
+    }
+    return out;
+  }
+
   /// Per-building producer/consumer breakdown for a commodity (counts + total
   /// throttled rate per building type).
   ({List<({String label, double rate, int count})> producers,
@@ -886,8 +929,23 @@ mixin CityPanels<T extends StatefulWidget> on State<T> {
     double lifeSupport}) _commodityBreakdown(String c) {
     final prod = <String, ({double rate, int count})>{};
     final cons = <String, ({double rate, int count})>{};
+    void add(Map<String, ({double rate, int count})> m, String label,
+        double rate) {
+      final cur = m[label];
+      m[label] = (rate: (cur?.rate ?? 0) + rate, count: (cur?.count ?? 0) + 1);
+    }
+
+    // Floor plants at their floors' rates (see [_floorPlants]).
+    for (final (site, s, rates) in _floorPlants()) {
+      final t = sim.throttleFor(s) * sim.floorThrottleOf(site);
+      final out = (rates.outPerS[c] ?? 0) * sim.biomeMult(c) * t;
+      final inp = (rates.inPerS[c] ?? 0) * t;
+      if (out > 0) add(prod, s.label, out);
+      if (inp > 0) add(cons, s.label, inp);
+    }
     for (final e in sim.activeSpecs) {
       final s = e.value;
+      if (sim.floorRatesAt(CitySim.siteIdOfCell(e.key), s) != null) continue;
       final yields = !sim.idleForSky(s);
       final out = yields
           ? (s.outputs[c] ?? 0) * sim.biomeMult(c) * sim.throttleFor(s)

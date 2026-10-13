@@ -52,6 +52,20 @@
 ///   traffic=stats | graph=audit    the agents' numbers; their lane graph
 ///   site=plan&id=SITE              a site's access plan as JSON
 ///                                  (docs/plans/site-access.md §4)
+///
+/// Factory floors (docs/plans/factory-floors.md), also on
+/// `ext.acro.citygame`; the status always carries `factories` (per site:
+/// type, designed, owner, health, rates in/out, measured, live) and
+/// `economy` (corporate tax and industry deficit in §/s, pending firm
+/// offers, a few local prices):
+///
+///   factory=place:TYPE   a TYPE plant (kFactoryPlantTypes: steelmill,
+///                        refinery, …) on the first free served lot, else
+///                        a site claimed near the origin; free of ore
+///   factory=open:SITE    open SITE's floor over the view, as its site
+///                        menu's "Factory floor" does
+///   factory=close:SITE   close it, as its back arrow does (the edit's
+///                        capex delta is reported)
 library;
 
 import 'dart:convert';
@@ -65,6 +79,10 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_scene/scene.dart' as fs;
 
 import 'domain/colony/city/city_config.dart';
+import 'domain/colony/city/city_building_spec.dart';
+import 'domain/colony/city/city_economy.dart';
+import 'domain/colony/city/city_factories.dart';
+import 'domain/colony/city/factory/factory_templates.dart';
 import 'domain/colony/city/city_progression.dart';
 import 'domain/colony/city/city_sim.dart';
 import 'domain/colony/city/city_starter_kit.dart';
@@ -347,7 +365,109 @@ Map<String, dynamic> _status(CitySim c) => {
         'restThrottle': c.restThrottle,
       },
       'agents': _agentsStatus(c.agents),
+      'factories': _factoriesStatus(c),
+      'economy': _economyStatus(c),
     };
+
+/// The status's `factories` block: every floor plant, by site.
+Map<String, Object?> _factoriesStatus(CitySim c) {
+  final sites = <String, Object?>{};
+  for (final id in c.factoryFloors.siteIds) {
+    final rec = c.factoryFloors[id]!;
+    final owner = c.ownerOf(id);
+    sites[id] = {
+      'type': c.siteSpec(id)?.type,
+      'designed': rec.designed,
+      'owner': owner.isState ? 'state' : owner.firmId,
+      'health': c.firmBookOf(id)?.health.name,
+      'throttle': c.floorThrottleOf(id),
+      'in': rec.rates.inPerS,
+      'out': rec.rates.outPerS,
+      'jobs': rec.rates.jobs,
+      'powerKw': rec.rates.powerKw,
+      'measured': rec.measured && !rec.dirty,
+      'dirty': rec.dirty,
+      'live': rec.live != null,
+    };
+  }
+  return {
+    'count': sites.length,
+    'enabled': c.factoryFloorsEnabled,
+    'library': c.factoryFloors.library.keys.toList(),
+    'sites': sites,
+  };
+}
+
+/// The status's `economy` block: the plants' real money and a few prices.
+Map<String, Object?> _economyStatus(CitySim c) {
+  final book = c.localPrices;
+  return {
+    'corporateTaxRate': c.corporateTaxRate,
+    'industryDeficitRate': c.industryDeficitRate,
+    'subsidyTotal': c.colonyEconomy.industrialSubsidyTotal,
+    'pendingOffers': [for (final o in c.pendingFirmOffers) o.site],
+    'notices': c.colonyEconomy.notices.length,
+    'prices': book == null
+        ? null
+        : {
+            for (final k in const ['ore', 'steel', 'water', 'food', 'electronics'])
+              k: book.price(k),
+          },
+  };
+}
+
+/// `factory=place:<type>|open:<site>|close:<site>` (see the header).
+Object? _factoryHook(CitySim c, String spec) {
+  final i = spec.indexOf(':');
+  if (i <= 0) return {'error': 'want place:TYPE, open:SITE or close:SITE'};
+  final verb = spec.substring(0, i), arg = spec.substring(i + 1);
+  switch (verb) {
+    case 'place':
+      if (!kFactoryPlantTypes.contains(arg)) {
+        return {'error': 'not a floor plant: $arg', 'types': kFactoryPlantTypes};
+      }
+      final plant = kUtilCatalog.firstWhere((s) => s.type == arg);
+      final site = _placePlant(c, plant);
+      if (site != null) c.recompute();
+      return {'placed': site, if (site == null) 'error': c.blocked};
+    case 'open':
+    case 'close':
+      final drive = SimViewControl.instance.factoryFloor;
+      if (drive != null) return drive(verb == 'open' ? arg : null);
+      // No view yet: the colony side alone.
+      if (verb == 'open') return {'open': null, 'error': 'no view yet'};
+      return {'capexDelta': c.closeFloor(arg).capexDelta};
+  }
+  return {'error': 'unknown factory verb: $verb'};
+}
+
+/// Places [plant] as a player would, minus the ore: the first free served
+/// street lot that takes it, else a site claimed on a widening ring around
+/// the origin (a plant that brings its own plot). The site, or null.
+String? _placePlant(CitySim c, CityBuildingSpec plant) {
+  final net = c.parcelNetwork();
+  for (final lot in c.layout.autoParcels) {
+    if (c.parcelBuildings.containsKey(lot.id) || !net.lotServed(lot.id)) {
+      continue;
+    }
+    if (c.placeOnParcel(lot.id, plant)) return lot.id;
+  }
+  // claimSite charges the build cost; the hook is free, so the ore is lent
+  // and, when no site was claimed (nothing spent it), taken back.
+  final cost = c.buildCostOf(plant);
+  c.stock['ore'] = c.stockOf('ore') + cost;
+  for (var ring = 1; ring <= 8; ring++) {
+    final r = ring * 400.0; // metres: a plant site is a few hundred across
+    for (var k = 0; k < 8; k++) {
+      final a = k * math.pi / 4; // eight bearings a ring
+      final claimed =
+          c.claimSite(plant, Vec2(r * math.cos(a), r * math.sin(a)));
+      if (claimed != null) return claimed.id;
+    }
+  }
+  c.stock['ore'] = c.stockOf('ore') - cost;
+  return null;
+}
 
 /// The status's `agents` block (docs/plans/agent-traffic.md §16.4): slice
 /// 1's share of it, with no citizens, pedestrians, parking, services or
@@ -404,6 +524,7 @@ Map<String, Object?> _agentHooks(CitySim c, Map<String, String> p) {
   if (p['traffic'] == 'stats') did['traffic'] = _trafficStats(c);
   if (p['graph'] == 'audit') did['graph'] = _graphAudit(a);
   if (p['site'] == 'plan') did['site'] = _sitePlan(c, p['id']);
+  if (p['factory'] case final f?) did['factory'] = _factoryHook(c, f);
   return did;
 }
 
