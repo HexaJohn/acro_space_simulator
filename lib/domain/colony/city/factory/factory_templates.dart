@@ -63,6 +63,7 @@ import 'factory_grid.dart';
 import 'factory_handling.dart';
 import 'floor_blueprint.dart';
 import 'template_layout.dart';
+import 'templates/refinery_template.dart';
 
 /// The plant type the Steel Mill template is for (`CityBuildingSpec.type`).
 const String kSteelMillType = 'steelmill';
@@ -86,12 +87,12 @@ const int kSteelMillForklifts = 2;
 const int kSteelMillCranes = 2;
 
 /// A fresh template blueprint for [plantType], or null when that plant has
-/// none (every zoned spec, and every placed plant but the Steel Mill until
-/// phase 6).
+/// none (every zoned spec, and every placed plant without a template yet).
 FloorBlueprint? factoryTemplateFor(String plantType) {
   ensureFactoryCatalog();
   return switch (plantType) {
     kSteelMillType => _steelMill(),
+    kRefineryType => refineryTemplate(),
     _ => null,
   };
 }

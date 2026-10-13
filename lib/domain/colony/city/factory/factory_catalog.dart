@@ -30,6 +30,7 @@ library;
 
 import 'factory_item.dart';
 import 'factory_recipe.dart';
+import 'templates/refinery_template.dart';
 
 /// Recipe ids of the Steel Mill chain. Saved on machines: never rename.
 class SteelRecipes {
@@ -124,5 +125,16 @@ void ensureFactoryCatalog() {
   for (final r in SteelRecipes.all) {
     FactoryRecipes.register(r);
   }
+  for (final register in _kChainRegistrars) {
+    register();
+  }
   _loaded = true;
 }
+
+/// Every plant chain that registers its own items and recipes from its
+/// template file. Loading a saved floor (`FactoryFloor.fromJson`,
+/// `fromBlueprint`) calls only [ensureFactoryCatalog], so a chain missing
+/// here goes dead after a save/load in a fresh process: its recipe ids
+/// resolve to nothing and the stations never run. (The import cycle with
+/// the template files is fine in Dart.)
+const List<void Function()> _kChainRegistrars = [registerRefineryChain];

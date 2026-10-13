@@ -125,9 +125,11 @@ void main() {
   });
 
   /// "Fine, not great" (§3 Reward): a designer who automates the hot and
-  /// chemical stations, gives each press and filler one operator and buys
-  /// one more forklift ships at least as much for far fewer jobs (the
-  /// labour lever) — proof the reward exists.
+  /// chemical stations and gives each press and filler one operator ships
+  /// at least as much for far fewer jobs (the labour lever) — proof the
+  /// reward exists. The template's own forklifts keep up with the faster
+  /// stations, so no extra vehicle is bought: measured 17 jobs against 29
+  /// (-41%), and the 0.6 bound pins that figure.
   test('an improved design beats it on labour at the same output', () {
     final r0 = _measure(FactoryFloor.fromBlueprint(refineryTemplate()));
 
@@ -140,12 +142,11 @@ void main() {
       bp.placements[i] =
           p.copyWith(mode: hot ? MachineMode.automated : MachineMode.assisted);
     }
-    // Faster stations hand the forklifts their totes in tighter bursts, so
-    // the designer buys one more: a driver is cheaper than a filler crew.
-    bp.roster[HandlerKind.forklift] = bp.roster[HandlerKind.forklift]! + 1;
     final r1 = _measure(FactoryFloor.fromBlueprint(bp));
 
-    expect(r1.jobs, lessThanOrEqualTo(r0.jobs * 0.85),
+    // The plan's bar is >= 15% fewer jobs; 0.6 also pins the reported
+    // 17-of-29 design (18 jobs, e.g. with a needless extra forklift, fails).
+    expect(r1.jobs, lessThanOrEqualTo(r0.jobs * 0.6),
         reason: '${r1.jobs} jobs against the template\'s ${r0.jobs}');
     for (final c in _spec.outputs.keys) {
       expect(r1.outPerS[c]!, greaterThanOrEqualTo(r0.outPerS[c]! * 0.98),

@@ -8,6 +8,7 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.da
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/templates/refinery_template.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'factory_test_support.dart';
@@ -40,7 +41,8 @@ void main() {
     expect(bp.hall.depthM, inInclusiveRange(40, 250));
     expect(factoryTemplateFor('i-low'), isNull,
         reason: 'zoned industry never gets a floor');
-    expect(factoryTemplateFor('refinery'), isNull);
+    expect(factoryTemplateFor('refinery')?.plantType, kRefineryType,
+        reason: 'the Refinery has its own template now');
     expect(identical(factoryTemplateFor('steelmill'),
         factoryTemplateFor('steelmill')), isFalse,
         reason: 'each call is a fresh blueprint the caller may edit');
