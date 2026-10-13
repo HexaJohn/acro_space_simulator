@@ -1,6 +1,6 @@
 # Factory floors
 
-Status: draft, 2026-10-12. Short on purpose: vision, model, phases, decisions.
+Status: waves 0-3 BUILT on dev 2026-10-13 (phases 1-6 integrated; phase 7 freight waits on agent traffic). Draft 2026-10-12. Short on purpose: vision, model, phases, decisions.
 Only the next phase gets a detailed spec, just before it is built.
 
 ## 1. Vision
@@ -386,3 +386,26 @@ Exit criteria: `flutter test test/colony/factory` is green; the Steel Mill templ
 rate is within 5% of the Steel Mill's 2 ore → 1.5 steel + 0.4 tubes/s; a hand-tuned test
 layout beats the template (proving there's a reward to chase) but stays under the 1.5× cap;
 and no existing file is modified.
+
+## 9. As built (2026-10-13)
+
+- **Wave 0** contracts d1a4a9f. **Wave 1**: floor core, editor, economy domain and measurement, merged
+  2132234. **Wave 2**: vehicles and automation 376f98c, seven plant templates and the real-floor
+  editor 98f9013. **Wave 3**: colony integration b4a53ca..8d699aa.
+- **Templates are seeded, not measured.** An untouched plant runs on its spec's flat rate, so placing
+  one changes nothing. Only designed floors are measured, off-thread, with `measureSettingsFor`.
+- **The 1.5× reward cap is enforced in `CityFactoryPort`** on output value, using Earth prices.
+- **The editor opens as an overlay inside the live view** (`drivesSim:false`). The colony keeps
+  ticking and drives the open floor; there is exactly one driver.
+- **Economy.** Shadow prices are solved once per colony day. Firms book P&L, corporate tax goes to
+  `funds` via `kCreditsToFunds`, state losses go to `industryDeficitRate`, and firm offers appear in
+  the HUD.
+- **Open items:**
+  1. A real-input playtest is still owed. The 2026-10-13 run was dev-hook driven because the
+     Windows screensaver blocked synthetic input.
+  2. A dark blob is drawn at the Steel Mill's charging bay in the live view at default zoom; it isn't
+     there offscreen.
+  3. Rocket Parts and Missile corporate tax is large relative to worker tax (a balance flag).
+  4. Off-world Steel Mill, Refinery and Rations margins are about 0.1-0.3%.
+  5. A road edit that drops a designed floor only posts a notice.
+  6. Firm offers show in the flight view only while the editor overlay is open.

@@ -66,6 +66,9 @@
 ///                        menu's "Factory floor" does
 ///   factory=close:SITE   close it, as its back arrow does (the edit's
 ///                        capex delta is reported)
+///   pop=N                set the population to N and pin migration, so a
+///                        plant can be tried with enough hands to staff it
+///                        (a precondition; deaths still apply)
 library;
 
 import 'dart:convert';
@@ -521,6 +524,12 @@ Map<String, Object?> _agentHooks(CitySim c, Map<String, String> p) {
     final i = int.tryParse(p['class'] ?? '') ?? RoadClass.street.index;
     final cls = RoadClass.values[i.clamp(0, RoadClass.values.length - 1)];
     did['road'] = pts.length < 2 ? null : c.commitRoad(pts, cls);
+  }
+  final pop = double.tryParse(p['pop'] ?? '');
+  if (pop != null && pop >= 0) {
+    c.population = pop;
+    c.pinPopulation = true;
+    did['pop'] = pop;
   }
   if (p['traffic'] == 'spawn') {
     final n = (int.tryParse(p['n'] ?? '') ?? 1).clamp(0, 4096);
