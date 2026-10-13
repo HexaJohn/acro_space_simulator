@@ -31,6 +31,7 @@ import '../building.dart';
 import '../surface_placement.dart';
 import '../city_network.dart';
 import 'city_building_spec.dart';
+import 'city_factories.dart';
 import 'city_config.dart';
 import 'city_layout.dart';
 import 'city_loyalty.dart';
@@ -52,6 +53,8 @@ import 'shuttle_run.dart';
 import 'site_access/site_access_book.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
+import 'economy/local_prices.dart' show kKjPerPowerUnitS;
+import 'factory/factory_floors.dart';
 import 'traffic/city_agents.dart';
 import '../../terrain/terrain_field.dart';
 import 'traffic_laws.dart';
@@ -560,6 +563,35 @@ class CitySim {
   /// The colony at war: troopers away, wounded, a garrison on its port, and
   /// the operation's inbox and outbox (`city_war.dart`, combat.md §7).
   final CityWarState war = CityWarState();
+
+  /// Every placed plant's factory floor, by site id
+  /// (docs/plans/factory-floors.md; the rules are in `city_factories.dart`).
+  /// A floor plant gets its template on placement, running on the spec's
+  /// own flat rate, so a colony that never opens a floor plays as before.
+  final FactoryFloors factoryFloors = FactoryFloors();
+
+  /// The library blueprint new plants of a type are built with: plant type
+  /// -> blueprint name ([CityFactories.floorBlueprintFor]). Absent = the
+  /// template.
+  final Map<String, String> selectedFloorBlueprint = {};
+
+  /// Ore owed (+) or freed (-) by editing a built floor, by site, until the
+  /// economy settles it ([CityFactories.closeFloor]).
+  final Map<String, double> pendingFloorInvestment = {};
+
+  /// Each floor plant's banked reward-cap allowance, in raw-input-equivalent
+  /// value ([CityFactories.stepFloorSite]). Runtime only: at worst a load
+  /// starts a plant's bank empty, which clips a minute's burst, not output.
+  final Map<String, double> floorValueBank = {};
+
+  /// DEBUG kill-switch: false runs every plant on its spec's flat rate as
+  /// before floors existed (floors kept, never stepped). The regression test
+  /// compares the two.
+  bool factoryFloorsEnabled = true;
+
+  /// [site]'s floor when this tick runs it instead of [s]'s flat rate.
+  FloorRecord? _floorRun(String site, CityBuildingSpec s) =>
+      factoryFloorsEnabled && isFloorPlant(s) ? factoryFloors[site] : null;
 
   /// Colony seconds this colony has run: the neglect clock (§3.1).
   double get colonyTimeS => loyalty.colonyTimeS;
@@ -1423,10 +1455,16 @@ class CitySim {
           ? 1.0
           : siteFactorOf(CityWar.cellSite(e.key));
       final uf = utilFactor(e.key) * sf;
+      // A floor plant draws and staffs what its floor needs; a template's
+      // rates are the spec's own numbers (1 power unit = 1 MW).
+      final fr = isFloorPlant(s) ? _floorRun(siteIdOfCell(e.key), s) : null;
+      final sDraw =
+          fr == null ? s.powerDraw : fr.rates.powerKw / kKjPerPowerUnitS;
+      final num sJobs = fr == null ? s.jobs : fr.rates.jobs;
       powerOut += s.powerOutput * powerFactor(s.type) * sf;
-      powerDraw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
+      powerDraw += sDraw * (s.housing > 0 || sJobs > 0 ? uf : 1.0);
       housing += (s.housing * uf).round();
-      jobs += (s.jobs * uf).round();
+      jobs += (sJobs * uf).round();
       computeSupply += s.computeOutput;
       computeDemand += s.computeDraw;
       s.services.forEach((k, v) => services[k] = (services[k] ?? 0) + v * uf);
@@ -1438,7 +1476,7 @@ class CitySim {
     // grown lots ramp with occupancy, and only SERVED lots take part — an
     // unreachable building no more works here than a disconnected one does on
     // the grid.
-    final parcelActive = <(CityBuildingSpec, double)>[];
+    final parcelActive = <(CityBuildingSpec, double, String)>[];
     if (layout.parcels.isNotEmpty) {
       final parcelNet = parcelNetwork();
       for (final (parcel, s) in parcelBuiltLots()) {
@@ -1449,11 +1487,18 @@ class CitySim {
                 : parcelUtil(parcel.id)) *
             sf;
         if (uf <= 0) continue;
-        parcelActive.add((s, uf));
+        parcelActive.add((s, uf, parcel.id));
+        // A floor plant's own draw and jobs, as on the grid above.
+        final fr = parcelBuildings.containsKey(parcel.id)
+            ? _floorRun(parcel.id, s)
+            : null;
+        final sDraw =
+            fr == null ? s.powerDraw : fr.rates.powerKw / kKjPerPowerUnitS;
+        final num sJobs = fr == null ? s.jobs : fr.rates.jobs;
         powerOut += s.powerOutput * powerFactor(s.type) * sf;
-        powerDraw += s.powerDraw * (s.housing > 0 || s.jobs > 0 ? uf : 1.0);
+        powerDraw += sDraw * (s.housing > 0 || sJobs > 0 ? uf : 1.0);
         housing += (s.housing * uf).round();
-        jobs += (s.jobs * uf).round();
+        jobs += (sJobs * uf).round();
         computeSupply += s.computeOutput;
         computeDemand += s.computeDraw;
         s.services.forEach((k, v) => services[k] = (services[k] ?? 0) + v * uf);
@@ -1506,7 +1551,7 @@ class CitySim {
           utilFactor(e.key) *
               (war.deployed.isEmpty ? 1.0 : siteFactorOf(CityWar.cellSite(e.key))));
     }
-    for (final (s, uf) in parcelActive) {
+    for (final (s, uf, _) in parcelActive) {
       tallyLife(s, uf);
     }
     final lifePower =
@@ -1539,7 +1584,7 @@ class CitySim {
     for (final e in active) {
       medDemand += e.value.inputs[Commodity.medicine] ?? 0;
     }
-    for (final (s, _) in parcelActive) {
+    for (final (s, _, _) in parcelActive) {
       medDemand += s.inputs[Commodity.medicine] ?? 0;
     }
     if (medDemand > 0) {
@@ -1584,8 +1629,24 @@ class CitySim {
       }
     }
 
+    // Floor plants skip the flat recipe below and trade through their floor
+    // after both loops: (site, spec, share of its staff at home).
+    final floorRuns = <(String, CityBuildingSpec, double)>[];
     for (final e in active) {
       final s = e.value;
+      if (isFloorPlant(s)) {
+        final site = siteIdOfCell(e.key);
+        if (_floorRun(site, s) != null) {
+          floorRuns.add((
+            site,
+            s,
+            war.deployed.isEmpty
+                ? 1.0
+                : siteFactorOf(CityWar.cellSite(e.key)),
+          ));
+          continue;
+        }
+      }
       final th = throttleFor(s);
       // Can we afford this building's inputs this tick?
       var canRun = true;
@@ -1615,7 +1676,12 @@ class CitySim {
     // grown block consumes and produces half, where the cell path lets an
     // under-construction tile produce at full rate — a quirk not worth
     // reproducing.
-    for (final (s, uf) in parcelActive) {
+    for (final (s, uf, site) in parcelActive) {
+      // A placed lot's uf is its share of staff at home.
+      if (parcelBuildings.containsKey(site) && _floorRun(site, s) != null) {
+        floorRuns.add((site, s, uf));
+        continue;
+      }
       final th = throttleFor(s);
       var canRun = true;
       s.inputs.forEach((k, v) {
@@ -1638,6 +1704,35 @@ class CitySim {
         }
       });
       pollutionRate += s.pollution * (s.powerOutput > 0 ? 1 : run) * emissionCut;
+    }
+
+    // Factory floors (docs/plans/factory-floors.md §3 "Coupling to the
+    // colony"): each floor plant skipped above takes its inputs from stock
+    // and ships its outputs through its floor instead, in site-id order,
+    // against the storage cap read once for the tick. Power and staffing
+    // shares are the rest-of-colony ones the flat path's restThrottle is
+    // built from, each scaled by the share of the plant at work (strike,
+    // troopers away), so a template floor runs at exactly the flat rate.
+    if (floorRuns.isNotEmpty) {
+      floorRuns.sort((a, b) => a.$1.compareTo(b.$1));
+      final cap = stockCap;
+      final plantPower = math.min(restPower, computeRatio);
+      for (final (site, s, sf) in floorRuns) {
+        final atWork = loyalty.strikeThrottle * sf;
+        final r = stepFloorSite(site, s, dt,
+            stockCap: cap,
+            powerShare: plantPower * atWork,
+            staffingShare: restStaff * atWork);
+        r.taken.forEach((k, u) => flow(k, -u / dt));
+        r.given.forEach((k, u) => flow(
+            k,
+            u * biomeMult(k) * bountyMult * eventProductionMult / dt,
+            isLifeSupport(s)));
+        // A live floor reports no share: it smokes at the colony's throttle.
+        final run =
+            r.live ? math.min(plantPower, restStaff) * atWork : r.share;
+        pollutionRate += s.pollution * run * emissionCut;
+      }
     }
 
     // The freighters the player has booked are supply too, if never local
@@ -1887,7 +1982,7 @@ class CitySim {
     for (final e in activeSpecs) {
       careRate += e.value.deathcareRate;
     }
-    for (final (s, _) in parcelActive) {
+    for (final (s, _, _) in parcelActive) {
       careRate += s.deathcareRate;
     }
     corpses = (corpses - careRate * dt).clamp(0, double.infinity);
@@ -3045,6 +3140,7 @@ class CitySim {
     buildStyle.remove(k);
     decompressTimer.remove(k);
     if (landerPad == siteIdOfCell(k)) landerPad = null;
+    floorSiteGone(siteIdOfCell(k)); // a flattened plant's floor goes with it
     recompute();
   }
 
@@ -3704,6 +3800,7 @@ class CitySim {
     for (final c in footCells(anchor % grid, anchor ~/ grid, spec)) {
       if (c != anchor) footprint[c] = anchor;
     }
+    assignFloorFor(siteIdOfCell(anchor), spec); // a floor plant's floor
   }
 
   /// Lay a road tile, capturing whether it's a sealed (tube) road — i.e. it was
@@ -3743,6 +3840,7 @@ class CitySim {
       for (final c in footCells(anchor % grid, anchor ~/ grid, u)) {
         footprint.remove(c);
       }
+      floorSiteGone(siteIdOfCell(anchor));
     }
     siteBuiltRevision++;
     zones.remove(anchor);
@@ -4343,6 +4441,7 @@ class CitySim {
     for (final e in renamed.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;
+      floorSiteRenamed(e.key, e.value);
       final grown = grownParcels.remove(e.key);
       if (grown != null) grownParcels[e.value] = grown;
       final fire = lotFires.remove(e.key);
@@ -4377,6 +4476,11 @@ class CitySim {
     lotFires.removeWhere((id, _) => lost(id));
     deliveries.removeWhere((id, _) => lost(id));
     craft.removeWhere((c) => lost(c.site));
+    // Over the floors' own ids, never `dropMissing(lots)`: that would drop
+    // every grid (`cell-N`) floor, which `lost` rightly leaves alone.
+    for (final id in factoryFloors.siteIds) {
+      if (lost(id)) floorSiteGone(id);
+    }
     final pad = landerPad;
     if (pad != null && lost(pad)) landerPad = null;
   }
@@ -5162,6 +5266,7 @@ class CitySim {
         // Burned out: the building is gone, the lot reverts to zoned ground.
         parcelBuildings.remove(id);
         grownParcels.remove(id);
+        floorSiteGone(id);
         siteBuiltRevision++;
         done.add(id);
         return;
@@ -5213,6 +5318,7 @@ class CitySim {
     if (layout.parcelById(parcelId) == null) return false;
     if (layout.easementOf?.call(parcelId) != null) return false;
     parcelBuildings[parcelId] = spec;
+    assignFloorFor(parcelId, spec); // a floor plant's floor
     return true;
   }
 
@@ -5453,6 +5559,13 @@ class CitySim {
         },
         'support': support.toList(),
         if (agents.hasState) 'agents': agents.toJson(),
+        // Factory floors (docs/plans/factory-floors.md "Persistence"):
+        // omitted when empty, so a colony without plants saves as before.
+        if (!factoryFloors.isEmpty) 'factories': factoryFloors.toJson(),
+        if (selectedFloorBlueprint.isNotEmpty)
+          'floorPicks': Map.of(selectedFloorBlueprint),
+        if (pendingFloorInvestment.isNotEmpty)
+          'floorCapexDue': Map.of(pendingFloorInvestment),
       };
 
   /// [fineCorridors] as saved: those of roads still in the layout.
@@ -5712,6 +5825,33 @@ class CitySim {
     sim.loyalty.garrisonHoldsPort = held != null && !held.occupation && held.count > 0;
     sim.loyalty.garrisonHoldsColony = held != null && held.occupation && held.count > 0;
     sim.agents.restore(j['agents']);
+    // Factory floors, after every building is back. Loading writes the
+    // fields directly (no placement hooks ran), so reconcile: an old save's
+    // plants get their template floors and run exactly as they did.
+    final savedFloors = j['factories'];
+    if (savedFloors is Map) {
+      final f = FactoryFloors.fromJson(savedFloors.cast<String, Object?>());
+      // Copied record by record into the colony's own (final) store.
+      for (final id in f.siteIds) {
+        final saved = f[id]!;
+        sim.factoryFloors
+            .assign(id, saved.blueprint,
+                designed: saved.designed,
+                owner: saved.owner,
+                rates: saved.measured ? saved.rates : null)
+            .dirty = saved.dirty || !saved.measured;
+      }
+      for (final e in f.library.entries) {
+        sim.factoryFloors.saveBlueprint(e.key, e.value);
+      }
+    }
+    (j['floorPicks'] as Map?)?.forEach((type, name) {
+      sim.selectedFloorBlueprint[type as String] = name as String;
+    });
+    (j['floorCapexDue'] as Map?)?.forEach((site, ore) {
+      sim.pendingFloorInvestment[site as String] = (ore as num).toDouble();
+    });
+    sim.reconcileFactoryFloors();
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and
     // creating the book hands the layout its easement lookup (§3.7a) before
@@ -5832,6 +5972,7 @@ class CitySim {
     for (final e in moved.entries) {
       final placed = parcelBuildings.remove(e.key);
       if (placed != null) parcelBuildings[e.value] = placed;
+      floorSiteRenamed(e.key, e.value);
       final grown = grownParcels.remove(e.key);
       if (grown != null) grownParcels[e.value] = grown;
       final fire = lotFires.remove(e.key);
@@ -5951,6 +6092,10 @@ class CitySim {
   /// The same predicate the placement uses, exposed so the editor can colour
   /// the ghost before the player commits rather than refusing afterwards.
   String? siteBlockedReason(CityBuildingSpec spec, Vec2 centre) {
+    // The chosen floor blueprint must fit the plant's site (the ghost says
+    // so before the click, §3 "Design before building").
+    final misfit = floorBlueprintRefusal(spec);
+    if (misfit != null) return misfit;
     final poly = siteFootprint(spec, centre);
     if (!layout.canAddManualParcel(poly)) {
       return 'Blocked — the site crosses a road or another plot.';
@@ -6006,8 +6151,10 @@ class CitySim {
       blocked = why;
       return null;
     }
-    if (stockOf('ore') < spec.buildCost) {
-      blocked = 'Needs ${spec.buildCost.toStringAsFixed(0)} ore.';
+    // A designed floor costs its capex instead ([CityFactories.buildCostOf]).
+    final cost = buildCostOf(spec);
+    if (stockOf('ore') < cost) {
+      blocked = 'Needs ${cost.toStringAsFixed(0)} ore.';
       return null;
     }
     // Where every keyed lot stood, before staking the plot moves the ground.
@@ -6044,7 +6191,8 @@ class CitySim {
     }
     if (regenerateLots) _carryLotsAcross(before);
     parcelBuildings[parcel.id] = spec;
-    stock['ore'] = stockOf('ore') - spec.buildCost;
+    assignFloorFor(parcel.id, spec); // a floor plant's floor
+    stock['ore'] = stockOf('ore') - cost;
     blocked = null;
     return parcel;
   }
@@ -6059,6 +6207,7 @@ class CitySim {
     siteBuiltRevision++;
     parcelBuildings.remove(parcelId);
     grownParcels.remove(parcelId);
+    floorSiteGone(parcelId);
     lotFires.remove(parcelId);
     deliveries.remove(parcelId);
     craft.removeWhere((c) => c.site == parcelId);

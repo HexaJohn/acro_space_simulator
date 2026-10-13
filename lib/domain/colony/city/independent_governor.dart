@@ -43,6 +43,7 @@ library;
 import 'dart:math' as math;
 
 import 'city_building_spec.dart';
+import 'city_factories.dart';
 import 'city_loyalty.dart';
 import 'city_sim.dart';
 import 'city_site_rules.dart';
@@ -514,7 +515,7 @@ extension IndependentGovernorSim on CitySim {
         // Never the last of the ore: the reserve stays in the store.
         if (unlocked(s) &&
             _placeable(s) &&
-            stockOf(Commodity.ore) - s.buildCost >= t.oreReserve)
+            stockOf(Commodity.ore) - buildCostOf(s) >= t.oreReserve)
           s,
     ];
   }
@@ -534,7 +535,7 @@ extension IndependentGovernorSim on CitySim {
         // farm stood on — before staking a new one.
         final plot = _freePlot(s);
         if (plot != null && placeOnParcel(plot.id, s)) {
-          stock[Commodity.ore] = stockOf(Commodity.ore) - s.buildCost;
+          stock[Commodity.ore] = stockOf(Commodity.ore) - buildCostOf(s);
           return true;
         }
         final centre = _findSite(s, t);
@@ -543,12 +544,13 @@ extension IndependentGovernorSim on CitySim {
       }
       final lot = _freeLots().firstOrNull;
       if (lot == null || !placeOnParcel(lot.id, s)) return false;
-      stock[Commodity.ore] = stockOf(Commodity.ore) - s.buildCost;
+      stock[Commodity.ore] = stockOf(Commodity.ore) - buildCostOf(s);
       return true;
     }
     final cell = _freeCell(s);
     if (cell == null) return false;
-    stock[Commodity.ore] = stockOf(Commodity.ore) - s.buildCost;
+    // A floor plant built with a designed floor costs that floor's capex.
+    stock[Commodity.ore] = stockOf(Commodity.ore) - buildCostOf(s);
     placeUtil(cell, s);
     recompute();
     return true;

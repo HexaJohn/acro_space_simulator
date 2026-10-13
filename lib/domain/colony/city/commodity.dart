@@ -9,6 +9,17 @@
 /// runs a much richer supply chain (military goods, advanced manufacturing
 /// inputs, compute) that would bloat the vessel-side resource model. The two
 /// meet only at the spaceport, where a delivery converts between them.
+///
+/// Factory floors add their own intermediates (pig iron, slag, circuit
+/// boards ...: `FactoryItems`) once a plant ships one to stock; [name] and
+/// [section] know them through the item table, so a stock panel lists them
+/// under COMPONENTS without each being registered here
+/// (docs/plans/factory-floors.md §3 "Intermediates are real goods").
+library;
+
+import 'factory/factory_catalog.dart';
+import 'factory/factory_item.dart';
+
 class Commodity {
   // Raw / basic
   static const ore = 'ore';
@@ -50,7 +61,15 @@ class Commodity {
     garbage: 'Garbage', sewage: 'Sewage',
   };
 
-  static String name(String c) => label[c] ?? c;
+  /// Display name: the colony label, else a factory item's own label (a
+  /// floor's intermediate), else the raw id.
+  static String name(String c) => label[c] ?? _factoryItem(c)?.label ?? c;
+
+  /// [c] as a factory item, with every plant chain's items registered.
+  static FactoryItem? _factoryItem(String c) {
+    ensureFactoryCatalog();
+    return FactoryItems.byId(c);
+  }
 
   /// Stockpile section a commodity belongs to: raw extracted resources,
   /// intermediate manufacturing components, or finished/military goods.
@@ -61,6 +80,9 @@ class Commodity {
     if (_raw.contains(c)) return 'RAW RESOURCES';
     if (_components.contains(c)) return 'COMPONENTS';
     if (_waste.contains(c)) return 'WASTE';
+    // A floor's intermediate (anything the item table knows that isn't a
+    // colony commodity already sorted above) is a component.
+    if (!label.containsKey(c) && _factoryItem(c) != null) return 'COMPONENTS';
     return 'FINISHED GOODS';
   }
 

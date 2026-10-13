@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/colony/city/city_building_spec.dart';
 import '../../../domain/colony/city/city_control.dart';
+import '../../../domain/colony/city/city_factories.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
 import '../../../domain/colony/city/city_term_guard.dart';
@@ -322,8 +323,10 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
       blocked = why;
       return;
     }
-    if (city.stockOf('ore') < spec.buildCost) {
-      blocked = 'Needs ${spec.buildCost.toStringAsFixed(0)} ore.';
+    // A designed factory floor costs its capex instead.
+    final cost = city.buildCostOf(spec);
+    if (city.stockOf('ore') < cost) {
+      blocked = 'Needs ${cost.toStringAsFixed(0)} ore.';
       return;
     }
     if (!city.placeOnParcel(parcelId, spec)) {
@@ -331,7 +334,7 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
       blocked = note == null ? 'That lot is taken.' : 'This lot is an $note.';
       return;
     }
-    city.stock['ore'] = city.stockOf('ore') - spec.buildCost;
+    city.stock['ore'] = city.stockOf('ore') - cost;
     city.attend();
     notifyListeners();
   }
@@ -372,15 +375,16 @@ class CityEditController extends ChangeNotifier with RoadToolEditing {
           blocked = why;
           return;
         }
-        if (city.stockOf('ore') < spec.buildCost) {
-          blocked = 'Needs ${spec.buildCost.toStringAsFixed(0)} ore.';
+        final cost = city.buildCostOf(spec);
+        if (city.stockOf('ore') < cost) {
+          blocked = 'Needs ${cost.toStringAsFixed(0)} ore.';
           return;
         }
         if (!city.footprintFree(cell % city.grid, cell ~/ city.grid, spec)) {
           blocked = 'No room for ${spec.label} here.';
           return;
         }
-        city.stock['ore'] = city.stockOf('ore') - spec.buildCost;
+        city.stock['ore'] = city.stockOf('ore') - cost;
         city.placeUtil(cell, spec);
         city.recompute();
       case CityEditTool.bulldoze:

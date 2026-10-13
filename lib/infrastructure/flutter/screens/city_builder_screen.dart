@@ -12,6 +12,7 @@ import 'package:flutter/scheduler.dart';
 import '../../../application/usecases/local_colony_atmosphere.dart';
 import '../../../domain/colony/city/city_config.dart';
 import '../../../domain/colony/city/city_control.dart';
+import '../../../domain/colony/city/city_factories.dart';
 import '../../../domain/colony/city/city_loyalty.dart';
 import '../../../domain/colony/city/city_sim.dart';
 import '../../../domain/colony/city/city_site_rules.dart';
@@ -522,12 +523,14 @@ class _CityBuilderScreenState extends State<CityBuilderScreen>
           } else if (!_sim.footprintSupported(
               x, y, _selectedUtil.footW, _selectedUtil.footH)) {
             _sim.blocked = 'Needs ${_sim.supportLabel} support here — build the structure first.';
-          } else if (_sim.stockOf(Commodity.ore) < _selectedUtil.buildCost) {
+          } else if (_sim.stockOf(Commodity.ore) <
+              _sim.buildCostOf(_selectedUtil)) {
+            // A designed factory floor costs its capex instead.
             _sim.blocked =
-                'Need ${_selectedUtil.buildCost.toStringAsFixed(0)} ore for ${_selectedUtil.label}.';
+                'Need ${_sim.buildCostOf(_selectedUtil).toStringAsFixed(0)} ore for ${_selectedUtil.label}.';
           } else {
             _sim.stock[Commodity.ore] =
-                _sim.stockOf(Commodity.ore) - _selectedUtil.buildCost;
+                _sim.stockOf(Commodity.ore) - _sim.buildCostOf(_selectedUtil);
             _sim.placeUtil(k, _selectedUtil);
           }
         case CityBuilderTool.zone:

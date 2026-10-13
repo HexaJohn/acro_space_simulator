@@ -19,6 +19,7 @@ import '../../planetary/atmospheric_composition.dart';
 import '../../planetary/planet_atmosphere_service.dart';
 import '../../planetary/volatile_reservoir.dart';
 import 'city_building_spec.dart';
+import 'city_factories.dart';
 import 'city_sim.dart';
 
 /// The placement rules the colony's own mutators do not make (they place
@@ -35,8 +36,12 @@ extension CitySiteRules on CitySim {
   /// warming tower on a world already as warm as they aim for (Earth,
   /// Venus); a Carbon Sequestrator under air with no CO2 above the floor it
   /// stops at.
+  /// A floor plant whose chosen blueprint's hall is bigger than its site is
+  /// refused too ([CityFactories.floorBlueprintRefusal]).
   /// Footprint, cost and unlocks are the callers' own checks.
   String? placementRefusal(CityBuildingSpec spec) {
+    final misfit = floorBlueprintRefusal(spec);
+    if (misfit != null) return misfit;
     if (spec.type == 'o2harvester' && !o2Harvestable) {
       return '${body.name} has no harvestable oxygen — use Electrolysis '
           'instead.';
