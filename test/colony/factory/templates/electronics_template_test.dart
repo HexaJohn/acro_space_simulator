@@ -4,7 +4,10 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 import 'dart:convert';
+import 'dart:isolate';
+import 'dart:math';
 
+import 'package:acro_space_simulator/application/factory/floor_measure_runner.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_capex.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
@@ -27,10 +30,10 @@ import '../factory_test_support.dart';
 final CityBuildingSpec _spec =
     kUtilCatalog.firstWhere((s) => s.type == kElectronicsType);
 
-/// Warm-up past every buffer filling (the 36 m chassis belt and the board
-/// shop take a few minutes), then a 20-minute window: ~70 crates either
-/// way, so one crate of lumpiness is under 2%.
-const _settings = MeasureSettings(warmupS: 600, windowS: 1200, earlyStop: false);
+/// Exactly the settings the template file tells the lead to measure it
+/// with, so the spec-rate test proves THAT figure is enough (a 600 s
+/// warm-up here once hid that the floor needs ~240 s to prime).
+const _settings = kElectronicsMeasureSettings;
 
 MeasuredRates _measure(FloorBlueprint bp) =>
     measureBlueprint(bp, FactoryFloor.fromBlueprint, settings: _settings);
@@ -61,6 +64,99 @@ void main() {
         reason: 'ships nothing but electronics');
     expect(r.outPerS['electronics']!, closeTo(elecOut, elecOut * 0.05));
     expect(r.jobs, closeTo(_spec.jobs, _spec.jobs * 0.10));
+  });
+
+  /// The floor primes for ~240 s and ships in crates of ten, so the
+  /// standard measurement (60 s + 300 s) reads it far under spec. The
+  /// template therefore names the settings it must be measured with; they
+  /// must clear the priming with margin and make one crate a small share
+  /// of the window, or "Reset to template" would cut the plant's
+  /// off-screen output.
+  test('names measurement settings that clear its priming', () async {
+    expect(kElectronicsMeasureSettings.warmupS, greaterThanOrEqualTo(300));
+    expect(kElectronicsMeasureSettings.windowS, greaterThanOrEqualTo(1200));
+    // The settings as they cross to a measure worker survive the trip.
+    final back = MeasureSettings.fromJson(kElectronicsMeasureSettings.toJson());
+    expect(back.warmupS, kElectronicsMeasureSettings.warmupS);
+    expect(back.windowS, kElectronicsMeasureSettings.windowS);
+    // And through the runner the lead will use, the template reads spec.
+    final r = SyncFloorMeasureRunner(FactoryFloor.fromBlueprint,
+        setup: registerElectronicsChain);
+    await expectLater(
+        r.measure(electronicsTemplate(), settings: kElectronicsMeasureSettings)
+            .then((m) => m.outPerS['electronics']),
+        completion(closeTo(_spec.outputs['electronics']!,
+            _spec.outputs['electronics']! * 0.05)));
+  });
+
+  /// A save holding an electronics floor can be loaded, and a template
+  /// measured, in an isolate whose registries start empty (a fresh process,
+  /// or the measure runner's worker) once `registerElectronicsChain` — and
+  /// nothing else — has run there. Without it the floor's recipes are
+  /// unknown, which is why the template's doc makes the hook blocking.
+  test('a fresh isolate loads a saved floor after only the chain setup',
+      () async {
+    final f = FactoryFloor.fromBlueprint(electronicsTemplate());
+    final pf = InfiniteColonyPort();
+    f.step(300, pf);
+    final saved = jsonEncode(f.toJson());
+    f.step(60, pf);
+    final expected = jsonEncode(f.toJson());
+    final bpJson = jsonEncode(electronicsTemplate().toJson());
+
+    // Without the setup a fresh isolate does not know the chain.
+    final known = await Isolate.run(
+        () => FactoryRecipes.byId(ElectronicsRecipes.stamp.id) != null);
+    expect(known, isFalse, reason: 'statics really start empty');
+
+    final (resumed, rates) = await Isolate.run(() {
+      registerElectronicsChain();
+      final g = FactoryFloor.fromJson(
+          jsonDecode(saved) as Map<String, Object?>);
+      g.step(60, InfiniteColonyPort());
+      final m = measureBlueprintJson(
+          FactoryFloor.fromBlueprint,
+          jsonDecode(bpJson) as Map<String, Object?>,
+          kElectronicsMeasureSettings.toJson());
+      return (jsonEncode(g.toJson()), m);
+    });
+    expect(resumed, expected, reason: 'continues as the original does');
+    expect(MeasuredRates.fromJson(rates).outPerS['electronics'],
+        closeTo(_spec.outputs['electronics']!,
+            _spec.outputs['electronics']! * 0.05));
+  });
+
+  /// The doc's handling figures are measured, not guessed: walkers' longest
+  /// tray and kit hauls (path walked while carrying) match the constants
+  /// the doc cites, to a tile.
+  test('walker hauls match the documented figures', () {
+    final f = FactoryFloor.fromBlueprint(electronicsTemplate());
+    final p = InfiniteColonyPort();
+    final last = <int, (double, double, String?)>{};
+    final walked = <int, double>{};
+    final longest = <String, double>{};
+    for (var t = 0; t < 12000; t++) {
+      f.step(kFactoryStepS, p);
+      for (final h in f.handlers) {
+        if (h.kind != HandlerKind.onFoot) continue;
+        final prev = last[h.id];
+        final held = prev?.$3;
+        if (prev != null && held != null) {
+          final d = (walked[h.id] ?? 0) +
+              sqrt(pow(h.x - prev.$1, 2) + pow(h.y - prev.$2, 2));
+          walked[h.id] = d;
+          if (h.carrying != held) {
+            longest[held] = max(longest[held] ?? 0, d * kFactoryTileM);
+            walked[h.id] = 0;
+          }
+        }
+        last[h.id] = (h.x, h.y, h.carrying);
+      }
+    }
+    expect(longest[ElectronicsItems.canTray.id],
+        closeTo(kElectronicsTrayHaulM, kFactoryTileM));
+    expect(longest[ElectronicsItems.boardKit.id],
+        closeTo(kElectronicsKitHaulM, kFactoryTileM));
   });
 
   /// Placing a templated plant must cost what the plant always cost (the

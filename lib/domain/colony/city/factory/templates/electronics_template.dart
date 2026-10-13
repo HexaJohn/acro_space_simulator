@@ -69,9 +69,14 @@
 ///   chassis.
 /// * **The board shop is hand work.** North of the line, across the
 ///   outbound belt, five manual benches build board kits. WALKERS carry
-///   trays of shield cans from the press to the benches (up to ~25 m) and
-///   kits back across the belt on crossings to the assembly benches' north
-///   side (a few metres). Those trips are the template's real handling.
+///   trays of shield cans from the press to the benches and kits back
+///   across the belt on crossings to the assembly benches' north side.
+///   A walker takes whichever bench needs it, so the hauls vary: measured
+///   over a run, trays go 8-32 m (the press at x 26 to the bench at x 9 is
+///   17 tiles before the walk round the belts; [kElectronicsTrayHaulM])
+///   and kits 4-42 m (the east benches to the west assembly bench;
+///   [kElectronicsKitHaulM]), both ~15 m at the median. Those trips are
+///   the template's real handling.
 /// * The FORKLIFT also takes the packer's crates across the aisle to the
 ///   shipping door, and charges at the bay beside it. One driver covers
 ///   both doors: 0.11 pallets/s of short hops.
@@ -87,6 +92,37 @@
 /// instead of two, and faster), move the shield press next to the benches
 /// so the walkers' hauls shrink, or shrink the hall.
 ///
+/// ## Measuring it (BLOCKING for whoever wires it in)
+///
+/// The line holds ~140 units of work in progress (≈80 chassis queued on
+/// the chassis belt while the board shop's first kits come through, ~14
+/// staged steel pallets, trays, kits and units), so the first crate ships
+/// at ~220 s and the floor reads the spec rate only after ~240 s. It ships
+/// in crates of ten, so a 300 s window is ±1-2 crates (±5-11%) even once
+/// warm. Under `MeasureSettings.standard` (60 s warm-up, 300 s window) a
+/// fresh floor therefore reads 0.53 steel / 0.27 electronics per second,
+/// 56% under spec. Cutting the priming does not fix that: the press's
+/// first stroke alone is ~35 s in, and the crate lumps remain. So
+/// template floors must be measured with [kElectronicsMeasureSettings]
+/// (warm-up ≥ 300 s, window ≥ 1200 s): the lead passes it to
+/// `FloorMeasureRunner.measure` (or raises `kMeasureWarmupS` /
+/// `kMeasureWindowS` for all templates; the Steel Mill also reads 2-8% low
+/// under the standard settings) wherever a template floor is re-measured,
+/// e.g. closing the editor or "Reset to template".
+///
+/// ## Registration (BLOCKING for whoever wires it in)
+///
+/// The 'electronics:*' items and recipes exist only once
+/// [registerElectronicsChain] has run in THAT isolate;
+/// `ensureFactoryCatalog` registers only the Steel chain. So the lead must
+/// also (1) call [registerElectronicsChain] wherever the catalog is ensured
+/// (inside `ensureFactoryCatalog`, or a chain list it walks), or a save
+/// holding an electronics floor fails to load (`FactoryFloor.fromJson`)
+/// in a process that has not built the template yet; and (2) pass it as
+/// the `FloorWorkerSetup` of the `FloorMeasureRunner`, whose worker
+/// isolate starts with empty statics. It is a complete setup on its own
+/// (it ensures the base catalog too).
+///
 /// Jobs: 12 manual stations × 2 + 3 assisted test rigs × 1 + 1 forklift
 /// driver + [kElectronicsWalkers] walkers = 40, the spec's count.
 library;
@@ -96,6 +132,7 @@ import '../factory_entities.dart';
 import '../factory_grid.dart';
 import '../factory_handling.dart';
 import '../factory_item.dart';
+import '../factory_measure.dart';
 import '../factory_recipe.dart';
 import '../floor_blueprint.dart';
 import '../template_layout.dart';
@@ -113,6 +150,24 @@ const HallSize kElectronicsHall = HallSize(40, 50);
 /// 0.3 trips/s in all. Measured: ten hold the spec rate within 2%, eleven
 /// exactly; twelve keeps one spare so a busy moment never starves a bench.
 const int kElectronicsWalkers = 12;
+
+/// How a template floor of this plant must be measured (see "Measuring
+/// it" in the library doc). 300 s of warm-up: the floor reaches the spec
+/// rate at ~240 s, so a minute of margin. 1200 s of window: one crate of
+/// ten is 1.4% of the ~720 units shipped, so crate lumps stay well inside
+/// the ±5% template budget (measured: within 1.4% for every warm-up from
+/// 300 to 540 s).
+const MeasureSettings kElectronicsMeasureSettings =
+    MeasureSettings(warmupS: 300, windowS: 1200);
+
+/// Longest shield-can tray haul a walker makes, press to bench, in metres
+/// (measured over 3000 s: 16 tiles of path). Pinned by a test so the doc's
+/// handling figures can't drift from the layout.
+const double kElectronicsTrayHaulM = 32;
+
+/// Longest board-kit haul, bench to assembly bench, in metres (measured:
+/// 21 tiles, the east board benches to the west assembly bench).
+const double kElectronicsKitHaulM = 42;
 
 /// One forklift works both doors: 0.05 steel pallets/s in and 0.06 crates/s
 /// out, each a hop of a few metres across the aisle, with time to charge.
@@ -266,9 +321,12 @@ class ElectronicsRecipes {
   static const all = [unpack, stamp, shield, board, assemble, test, pack];
 }
 
-/// Registers the chain's items and recipes. Idempotent: the registries
-/// accept the identical const object twice.
+/// Registers the chain's items and recipes, and the base catalog they
+/// build on, so it is a complete `FloorWorkerSetup` on its own (see
+/// "Registration" in the library doc). Idempotent: the registries accept
+/// the identical const object twice.
 void registerElectronicsChain() {
+  ensureFactoryCatalog();
   for (final i in ElectronicsItems.all) {
     FactoryItems.register(i);
   }
