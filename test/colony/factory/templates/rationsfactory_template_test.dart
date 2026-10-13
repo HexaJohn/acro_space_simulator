@@ -27,58 +27,54 @@ import '../factory_test_support.dart';
 final CityBuildingSpec _spec =
     kUtilCatalog.firstWhere((s) => s.type == kRationsType);
 
-/// Measurement for this plant. Food arrives 500 units to a pallet (one
-/// every 500 s) and rations leave 200 to a pallet (one every 250 s), so a
-/// short window reads whole pallets, not a rate: 1200 s would see two or
-/// three food pallets, ±20%. 20 000 s (40 food pallets, 80 ration pallets)
-/// brings one pallet's quantisation under 2.5%. The 1500 s warm-up covers
-/// the first depalletise (250 s), the kettles' first batches and the first
-/// full ration pallet.
-const MeasureSettings _settings = MeasureSettings(
-    warmupS: 1500, windowS: 20000, subWindowS: 500, earlyStop: false);
+/// The spec's long measurement: 300 s warm-up, a full 1200 s window, no
+/// early stop — the floor's settled rate.
+const MeasureSettings _long =
+    MeasureSettings(warmupS: 300, windowS: 1200, earlyStop: false);
 
-MeasuredRates _measure(FloorBlueprint bp) =>
-    measureBlueprint(bp, FactoryFloor.fromBlueprint, settings: _settings);
+MeasuredRates _measure(FloorBlueprint bp,
+        {MeasureSettings settings = _long}) =>
+    measureBlueprint(bp, FactoryFloor.fromBlueprint, settings: settings);
 
-/// A designer's take on the template: the filling table moved between the
-/// two kettles with an arm from each, so no one carries the pans at all,
-/// and the pouches belt round to the same retort line. Same stations, same
-/// modes — only the haul is engineered away.
+/// The template with a different crew [roster], for headcount sweeps.
+FloorBlueprint _withRoster(Map<HandlerKind, int> roster) {
+  final t = rationsfactoryTemplate();
+  return FloorBlueprint(
+      name: t.name,
+      plantType: t.plantType,
+      hall: t.hall,
+      placements: t.placements,
+      roster: roster);
+}
+
+/// A designer's take on the template: the case carriers replaced by a dock
+/// conveyor and a short belt with an arm into each kettle. Same stations,
+/// same modes, same forklift — only the receiving labour is engineered
+/// away (and paid for in conveyor capex).
 FloorBlueprint _improved() {
   final t = rationsfactoryTemplate();
   final l = TemplateLayout();
-  const y = 15; // the template's food row
-  l.add(EntityKind.staging, 16, y + 8, span: (3, 2));
-  l.add(EntityKind.receivingDock, 0, y + 1, item: 'crate:food');
-  l.add(EntityKind.staging, 2, y, span: (2, 2));
-  l.machine(8, y, RationsRecipes.depalletise);
-  l.arm(11, y, Dir4.east);
-  l.beltEast(12, 28, y);
-  l.machine(16, y + 2, RationsRecipes.cook);
-  l.arm(17, y + 1, Dir4.north);
-  l.machine(25, y + 2, RationsRecipes.cook);
-  l.arm(28, y + 1, Dir4.north);
-  // The filler between the kettles; an arm from each feeds it pans.
-  l.machine(21, y + 2, RationsRecipes.fill);
-  l.arm(20, y + 2, Dir4.east);
-  l.arm(24, y + 2, Dir4.west);
-  // Pouches up and across to the retort.
-  l.arm(22, y + 5, Dir4.north);
-  l.beltRun(y + 6, 25, 22, Dir4.north);
-  l.beltEast(22, 48, 26);
-  l.arm(49, 26, Dir4.east);
-  l.machine(50, 26, RationsRecipes.retort, mode: MachineMode.assisted);
-  l.arm(54, 26, Dir4.east);
-  l.machine(55, 26, RationsRecipes.pack);
-  l.add(EntityKind.aisle, 58, 0, span: (2, t.hall.h));
-  l.add(EntityKind.shippingDock, 60, 26, item: 'crate:rations');
-  l.add(EntityKind.chargingBay, 60, 30);
+  // The dock unloads onto a belt along the kettles' north side.
+  l.add(EntityKind.receivingDock, 0, 11, item: 'food');
+  l.beltEast(2, 4, 11);
+  l.arm(2, 10, Dir4.south); // into kettle A
+  l.machine(1, 6, RationsRecipes.cook);
+  l.arm(5, 7, Dir4.east);
+  l.machine(6, 10, RationsRecipes.cook);
+  l.arm(5, 11, Dir4.east); // belt end into kettle B
+  l.arm(7, 9, Dir4.south);
+  l.machine(6, 6, RationsRecipes.fill);
+  l.add(EntityKind.aisle, 9, 2, span: (2, 7));
+  l.add(EntityKind.chargingBay, 11, 6);
+  l.machine(11, 2, RationsRecipes.retort);
+  l.arm(12, 1, Dir4.south);
+  l.add(EntityKind.shippingDock, 12, 0, item: 'rations');
   return FloorBlueprint(
     name: 'Rations Plant (designed)',
     plantType: kRationsType,
     hall: t.hall,
     placements: l.out,
-    roster: {HandlerKind.palletJack: 1, HandlerKind.forklift: 1},
+    roster: {HandlerKind.forklift: 1},
   );
 }
 
@@ -90,8 +86,8 @@ void main() {
   });
 
   test('steady state is the spec rate within 5%, in commodity units', () {
-    // Spec: 1.0 food → 0.8 rations per second. Pallets count their
-    // commodity units at the docks, so these are colony units, not items.
+    // Spec: 1.0 food → 0.8 rations per second, over the spec's ≥ 300 s
+    // warm-up and ≥ 1200 s window.
     expect(_spec.inputs, {'food': 1.0});
     expect(_spec.outputs, {'rations': 0.8});
     expect(base.inPerS.keys, ['food'], reason: 'takes nothing but food');
@@ -99,6 +95,21 @@ void main() {
         reason: 'ships nothing but rations (the steam is vented)');
     expect(base.inPerS['food']!, closeTo(1.0, 0.05));
     expect(base.outPerS['rations']!, closeTo(0.8, 0.04));
+  });
+
+  test('the colony\'s own measurement reads the spec rate too', () {
+    // The colony measures every assigned floor with
+    // MeasureSettings.standard (one minute of warm-up from an empty floor,
+    // at most five minutes measured). A template that is only on spec over
+    // hours would change what the colony gets the moment its floor is
+    // opened — a pallet-lumped version read 3.3 food/s in and no rations
+    // out here.
+    final r = _measure(rationsfactoryTemplate(),
+        settings: MeasureSettings.standard);
+    expect(r.inPerS.keys, ['food']);
+    expect(r.outPerS.keys, ['rations']);
+    expect(r.inPerS['food']!, closeTo(1.0, 0.05), reason: '${r.inPerS}');
+    expect(r.outPerS['rations']!, closeTo(0.8, 0.04), reason: '${r.outPerS}');
   });
 
   test('jobs and build cost match the spec within 10%', () {
@@ -135,63 +146,79 @@ void main() {
       expect(r.id, startsWith('rationsfactory:'));
       expect(identical(FactoryRecipes.byId(r.id), r), isTrue);
     }
-    // The docks use the colony's own packs as they are.
-    expect(identical(FactoryItems.byId('crate:food'), FactoryItems.crateFood),
-        isTrue);
-    expect(identical(
-            FactoryItems.byId('crate:rations'), FactoryItems.crateRations),
-        isTrue);
+    // The docks use the colony's own goods as they are.
+    expect(identical(FactoryItems.byId('food'), FactoryItems.food), isTrue);
+    expect(
+        identical(FactoryItems.byId('rations'), FactoryItems.rations), isTrue);
   });
 
   test('realistic: people and vehicles move the freight, not lights-out', () {
-    // The user's brief: workers, jacks and forklifts move freight; very
-    // few plants run from unloading to loading without anyone lifting a
-    // finger. So every station is crewed, the docks are worked by
-    // vehicles, and walkers really carry the pans.
+    // The user's brief: workers and vehicles move freight; very few plants
+    // run from unloading to loading without anyone lifting a finger. So
+    // every station is crewed, people carry the cases in, and the forklift
+    // does a real share of work, not a token hop.
     final bp = rationsfactoryTemplate();
     for (final p in bp.placements) {
       if (p.kind != EntityKind.machine) continue;
       expect(p.crew, isNot(MachineMode.automated), reason: '${p.recipe}');
     }
-    expect(bp.placements.where((p) => p.kind == EntityKind.belt), isNotEmpty,
-        reason: 'belts through the core where the flow is steady');
-    expect(bp.roster.keys.toSet(),
-        {HandlerKind.onFoot, HandlerKind.palletJack, HandlerKind.forklift});
+    expect(bp.roster.keys.toSet(), {HandlerKind.onFoot, HandlerKind.forklift});
 
     final floor = FactoryFloor.fromBlueprint(bp);
     final port = InfiniteColonyPort();
-    floor.step(1500, port);
+    floor.step(300, port);
     floor.takeLedger();
+    const window = 1200;
     var walkerCarried = false;
-    for (var i = 0; i < 1000; i++) {
+    final working = <int, int>{};
+    for (var i = 0; i < window; i++) {
       floor.step(1, port);
       walkerCarried |= floor.handlers.any((h) =>
           h.kind == HandlerKind.onFoot &&
           h.state == HandlerState.carrying &&
-          h.carrying == RationsItems.tray.id);
+          h.carrying == FactoryItems.food.id);
+      for (final p in floor.blueprint.placements) {
+        if (p.recipe == null) continue;
+        expect(floor.statusOf(p.id), isNot(MachineStatus.unstaffed));
+        if (floor.statusOf(p.id) == MachineStatus.working) {
+          working[p.id] = (working[p.id] ?? 0) + 1;
+        }
+      }
     }
     final l = floor.takeLedger();
-    expect(walkerCarried, isTrue, reason: 'walkers carry the hot pans');
-    expect(l.equipmentSeconds[HandlerKind.palletJack], greaterThan(0),
-        reason: 'a jack takes food pallets from the receiving bay');
-    expect(l.equipmentSeconds[HandlerKind.forklift], greaterThan(0),
-        reason: 'a forklift takes ration pallets to the shipping door');
-    expect(l.itemMetres, greaterThan(0));
+    expect(walkerCarried, isTrue, reason: 'walkers carry the food cases');
+    // Each vehicle earns its place: the forklift drives carts for a real
+    // share of the window (measured ~30%), not the <1% of a one-tile hop.
+    for (final k in bp.roster.keys) {
+      if (k == HandlerKind.onFoot) continue;
+      expect(l.equipmentSeconds[k] ?? 0, greaterThan(0.15 * window),
+          reason: '$k: ${l.equipmentSeconds}');
+    }
+    // Every station's crew is at work for a real share of the time.
     for (final p in floor.blueprint.placements) {
       if (p.recipe == null) continue;
-      expect(floor.statusOf(p.id), isNot(MachineStatus.unstaffed));
-    }
-    // The kettles set the pace, so they never wait on the line.
-    for (final p in floor.blueprint.placements) {
-      if (p.recipe != RationsRecipes.cook.id) continue;
-      expect(floor.statusOf(p.id), isNot(MachineStatus.starved));
+      expect(working[p.id] ?? 0, greaterThan(0.4 * window),
+          reason: '${p.recipe} #${p.id}');
     }
   });
 
+  test('no padded headcount: one carrier fewer falls short', () {
+    // Every carrier is needed: the walk from the cold store is tuned so
+    // eight carry ~0.94 food/s and only nine hold the spec's 1.0. A
+    // template that held the rate with fewer would be padding its jobs.
+    final short = _measure(_withRoster({
+      HandlerKind.onFoot: kRationsWalkers - 1,
+      HandlerKind.forklift: kRationsForklifts,
+    }));
+    expect(short.inPerS['food']!, lessThan(0.97),
+        reason: '${short.inPerS} with ${kRationsWalkers - 1} carriers');
+    expect(base.inPerS['food']!, greaterThan(0.99));
+  });
+
   test('fine, not great: a designed floor beats it on labour', () {
-    // The Reward lever (§3): engineer the pan haul away — the filler
-    // between the kettles, fed by arms — and the same rations come out
-    // with every walker freed for the rest of the colony.
+    // The Reward lever (§3): replace the case carriers with a dock
+    // conveyor and arms, and the same rations come out with half the
+    // workforce freed for the rest of the colony.
     final bp = _improved();
     expect(bp.validate(), isEmpty);
     final r = _measure(bp);
@@ -206,8 +233,8 @@ void main() {
 
   test('deterministic, and save/load mid-run continues identically', () {
     // Two builds must measure the same (aggregate mode caches the
-    // measurement), and a mid-run save — pans in walkers' hands, food on
-    // the belt — must resume bit for bit.
+    // measurement), and a mid-run save — cases in carriers' hands, a cart
+    // on the forklift — must resume bit for bit.
     final again = _measure(rationsfactoryTemplate());
     expect(jsonEncode(again.toJson()), jsonEncode(base.toJson()));
 
@@ -230,8 +257,8 @@ void main() {
   });
 
   test('conserves every commodity unit over its own run', () {
-    // Pallets broken down, food cooked, steam vented: held + shipped −
-    // received − what crafts made must stay zero, checked as it runs.
+    // Cases carried, food cooked, steam vented: held + shipped − received
+    // − what crafts made must stay zero, checked as it runs.
     final f = FactoryFloor.fromBlueprint(rationsfactoryTemplate());
     final port = InfiniteColonyPort();
     for (var i = 0; i < 40; i++) {
