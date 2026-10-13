@@ -49,14 +49,12 @@ void main() {
     expect(f.itemsOnFloor, before, reason: 'nothing vanished with the bay');
     expect(conservationError(f), isEmpty);
     final piles = f.floorPiles.values.expand((m) => m.keys);
-    final rebound = f.handlers.where(
-      (h) => h.kind == HandlerKind.crane && h.carrying == 'steelBillet',
-    );
-    expect(
-      piles.contains('steelBillet') || rebound.isNotEmpty,
-      isTrue,
-      reason: 'the billet is on the floor or still on a hook',
-    );
+    expect(piles, contains('steelBillet'), reason: 'set down, not carried');
+    for (final h in f.handlers) {
+      if (h.kind == HandlerKind.crane) {
+        expect(h.carrying, isNull, reason: 'no hook keeps a load');
+      }
+    }
     f.step(120, port);
     expect(conservationError(f), isEmpty);
   });
@@ -66,18 +64,31 @@ void main() {
     final port = InfiniteColonyPort();
     final fl = carrier(f, HandlerKind.forklift, port);
     final before = f.itemsOnFloor;
+    final metres = f.ledger.itemMetres;
+    final stood = TilePos(fl.x.round(), fl.y.round());
     final aisle = f.blueprint.placements.firstWhere(
       (p) => p.kind == EntityKind.aisle,
     );
     expect(f.remove(aisle.id).ok, isTrue);
     expect(f.itemsOnFloor, before);
     expect(conservationError(f), isEmpty);
-    // Off its aisle it is moved to the charging bay — the only drivable
-    // floor left — where no dock can be reached: it sets the crates down.
-    f.step(5, port);
+    // Off its aisle, it sets the crates down WHERE IT STOOD before it is
+    // moved (empty-handed) to the charging bay: goods never jump across
+    // the hall with no trip and no item-metres.
     final h = f.handlers.firstWhere((h) => h.id == fl.id);
     expect(h.carrying, isNull, reason: 'cut off: it set the crates down');
-    expect(f.floorPiles.values.expand((m) => m.keys), contains('crate:steel'));
+    expect(f.ledger.itemMetres, metres, reason: 'no free ride');
+    final crates = [
+      for (final e in f.floorPiles.entries)
+        if (e.value.containsKey('crate:steel')) e.key,
+    ];
+    expect(crates, isNotEmpty);
+    expect(
+      crates.any((t) => (t.x - stood.x).abs() + (t.y - stood.y).abs() <= 2),
+      isTrue,
+      reason: 'set down beside $stood, not at its new home',
+    );
+    f.step(5, port);
     expect(conservationError(f), isEmpty);
     f.step(120, port);
     expect(conservationError(f), isEmpty);

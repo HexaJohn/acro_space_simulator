@@ -307,13 +307,18 @@ class FactoryFloor implements FactorySim {
   /// under them goes (null: that layer has no floor at all).
   final Map<int, TilePos?> _layerHome = {};
 
-  /// (layer, heaviest load index) of the handlers on the floor, this
-  /// sub-step: who could serve a request at all.
-  List<(int, int)> _fleet = const [];
+  /// Each drive layer's coverable tiles ([driveMask]), by layer. The layer's
+  /// path mask itself is its [driveAnchors].
+  final Map<int, Uint8List> _driveOpen = {};
 
-  /// (layer, from, to) → can a handler on that layer carry from → to.
-  /// Cleared every sub-step and on every edit.
-  final Map<(int, int, int), bool> _routeMemo = {};
+  /// (layer, heaviest load index, region) of the handlers on the floor,
+  /// this sub-step: who could serve a request at all.
+  List<(int, int, int)> _fleet = const [];
+
+  /// (layer, region, from, to) → can a handler in that region of that
+  /// layer carry from → to (region -1: from anywhere on the layer). Cleared
+  /// every sub-step and on every edit.
+  final Map<(int, int, int, int), bool> _routeMemo = {};
 
   List<Placement> _machineList = const [];
   List<Placement> _armList = const [];
@@ -1356,9 +1361,10 @@ class FactoryFloor implements FactorySim {
   /// Where a handler on [layer] stands to work at [id], cached per layout:
   ///
   /// * walkers and jacks: a placement's [_goalsOf], a pile's own tile;
-  /// * vehicles: drivable tiles beside the footprint, plus drivable tiles
-  ///   ON a pile, staging area or charging bay (a charging bay: on it
-  ///   only) — so a dock with staging laid in front is worked from there;
+  /// * vehicles: the anchors (see [driveAnchors]) whose square covers a
+  ///   drivable tile beside the footprint, or a drivable tile ON a pile,
+  ///   staging area or charging bay (a charging bay: on it only) — so a
+  ///   dock with staging laid in front is worked from there;
   /// * a crane: its bay's tiles over or beside a footprint that lies at
   ///   least partly inside the bay (none otherwise);
   /// * [_kIdleKey]: the layer's home tile.
@@ -1397,15 +1403,38 @@ class FactoryFloor implements FactorySim {
           if (_bp.hall.contains(t) && (f.contains(t) || _beside(f, t))) t,
       ];
     }
-    final out = <TilePos>[];
+    // Work tiles: drivable (coverable) tiles on or beside the footprint.
+    final open = _driveOpen[layer];
+    final hall = _bp.hall;
+    final work = <TilePos>[];
     for (var y = f.y0 - 1; y <= f.y1; y++) {
       for (var x = f.x0 - 1; x <= f.x1; x++) {
         final t = TilePos(x, y);
         final ok = f.contains(t) ? inside : (ring && _beside(f, t));
-        if (ok && _paths.isPassable(layer, t)) out.add(t);
+        if (!ok || !hall.contains(t)) continue;
+        if (open == null
+            ? _paths.isPassable(layer, t)
+            : open[t.y * hall.w + t.x] == 1) {
+          work.add(t);
+        }
       }
     }
-    return out;
+    if (open == null) return work;
+    // A vehicle stands on an anchor (see driveAnchors): it works from any
+    // anchor whose square covers a work tile. Row-major, deduplicated.
+    final width = layer;
+    final seen = <int>{};
+    for (final t in work) {
+      for (var ay = t.y - width + 1; ay <= t.y; ay++) {
+        for (var ax = t.x - width + 1; ax <= t.x; ax++) {
+          if (_paths.isPassable(layer, TilePos(ax, ay))) {
+            seen.add(ay * hall.w + ax);
+          }
+        }
+      }
+    }
+    final idx = seen.toList()..sort();
+    return [for (final i in idx) TilePos(i % hall.w, i ~/ hall.w)];
   }
 
   /// The layer [h] paths on, or null for a crane with no bay.
@@ -1429,13 +1458,14 @@ class FactoryFloor implements FactorySim {
     return f == null ? kUnreachable : _paths.distance(f, h.at);
   }
 
-  /// Whether a handler on [layer] could carry goods from [from] to [to]
-  /// (memoised per sub-step).
-  bool _routableOn(int layer, int from, int to) =>
-      _routeMemo[(layer, from, to)] ??= () {
+  /// Whether a handler on [layer] (in [region] of it, if given) could
+  /// carry goods from [from] to [to] (memoised per sub-step).
+  bool _routableOn(int layer, int from, int to, {int region = -1}) =>
+      _routeMemo[(layer, region, from, to)] ??= () {
         final f = _fieldOn(layer, to);
         if (f == null || !_exists(from)) return false;
         for (final g in _goalsFor(layer, from)) {
+          if (region >= 0 && _paths.regionAt(layer, g) != region) continue;
           if (_paths.distance(f, g) >= 0) return true;
         }
         return false;
@@ -1446,26 +1476,34 @@ class FactoryFloor implements FactorySim {
     return layer != null && _routableOn(layer, from, to);
   }
 
-  /// (layer, heaviest load) of every handler on the floor, deduplicated.
-  List<(int, int)> _fleetLayers() {
-    final out = <(int, int)>[];
+  /// (layer, heaviest load, region) of every handler on the floor,
+  /// deduplicated in handler order. The REGION matters: every 2 x 2 staging
+  /// pad or bay can be its own drivable island, and a layer having a route
+  /// from -> to says nothing about whether any vehicle on it can get to
+  /// `from`. A handler on no passable tile (stranded) serves nothing.
+  List<(int, int, int)> _fleetLayers() {
+    final out = <(int, int, int)>[];
     for (final h in _handlers) {
       final layer = _layerOf(h);
       if (layer == null) continue;
-      final e = (layer, h.spec.maxLoad.index);
+      final region = _paths.regionAt(layer, h.at);
+      if (region < 0) continue;
+      final e = (layer, h.spec.maxLoad.index, region);
       if (!out.contains(e)) out.add(e);
     }
     return out;
   }
 
-  /// Whether some handler on the floor (busy or not) could lift [item]
-  /// and carry it from [from] to [to].
+  /// Whether some handler on the floor (busy or not) could lift [item],
+  /// get to [from] and carry it to [to]. A request no handler can reach is
+  /// unservable, so it never reserves a machine's want ahead of one that
+  /// can be served.
   bool _servable(String item, int from, int to) {
     final def = FactoryItems.byId(item);
     if (def == null) return false;
-    for (final (layer, load) in _fleet) {
+    for (final (layer, load, region) in _fleet) {
       if (def.loadClass.index > load) continue;
-      if (_routableOn(layer, from, to)) return true;
+      if (_routableOn(layer, from, to, region: region)) return true;
     }
     return false;
   }
@@ -1654,9 +1692,9 @@ class FactoryFloor implements FactorySim {
     _addPile(t, item, n);
   }
 
-  /// Puts a new hire on its layer's home tile (a forklift at the charging
-  /// bay, a crane at its bay's corner), where the walkers' muster spot may
-  /// not even be connected to its aisles.
+  /// Puts a new hire on its layer's home tile (a forklift at a charging
+  /// bay on the main aisle network, a crane at its bay's corner), where the
+  /// walkers' muster spot may not even be connected to its aisles.
   void _sendHome(FloorHandler h) {
     final layer = _layerOf(h);
     final home = layer == null ? null : _layerHome[layer];
@@ -2048,6 +2086,7 @@ class FactoryFloor implements FactorySim {
 
     // Cranes bind to bays: crane i (by id) runs in the i-th bay (by id).
     // Extra cranes stand idle; a bay with no crane is inert.
+    final oldBayOf = {..._craneBayOf};
     _craneBayOf.clear();
     var bay = 0;
     for (final h in _handlers) {
@@ -2057,9 +2096,10 @@ class FactoryFloor implements FactorySim {
       }
     }
 
-    // Handlers left standing where their kind can't be step off: to their
-    // layer's home tile, or — with no floor of their kind left at all —
-    // they set their load down and stand idle where they are.
+    // Handlers left standing where their kind can't (or cranes moved to
+    // another bay) set their load down where they are and drop their job;
+    // then, empty-handed, those off their floor step to their layer's home
+    // tile, or, with no floor of their kind left at all, stand idle there.
     for (final h in _handlers) {
       final layer = _layerOf(h);
       final nx = h.next;
@@ -2068,16 +2108,26 @@ class FactoryFloor implements FactorySim {
           ..next = null
           ..prog = 0;
       }
-      if (layer != null && _paths.isPassable(layer, h.at)) continue;
+      // (A crane with no binding before this rebuild was just hired or
+      // loaded: not a move.)
+      final bayMoved = h.kind == HandlerKind.crane &&
+          oldBayOf.containsKey(h.id) &&
+          oldBayOf[h.id] != _craneBayOf[h.id];
+      final standing = layer != null && _paths.isPassable(layer, h.at);
+      if (standing && !bayMoved) continue;
+      // Goods never jump across the hall: whatever it holds is set down
+      // where it stands and its job dropped (a crane re-bound to another
+      // bay starts over there). Only then, empty-handed, does it move to
+      // its layer's home, if it has no floor under it.
+      _strand(h);
+      if (standing) continue;
       final home = layer == null ? null : _layerHome[layer];
       if (home != null) {
         h
           ..at = home
           ..next = null
           ..prog = 0;
-        continue;
       }
-      _strand(h);
     }
     _fleet = _fleetLayers();
 
@@ -2094,7 +2144,8 @@ class FactoryFloor implements FactorySim {
   }
 
   /// Every non-walking layer: one drive layer per vehicle aisle width
-  /// (marked floor opened by the vehicle's square, see [driveMask]) and one
+  /// (anchors of the vehicle's square on marked floor, see [driveAnchors];
+  /// [driveMask] for the tiles it covers) and one
   /// per crane bay (every bay tile, machines and all), with each layer's
   /// home tile.
   void _buildLayers(List<Placement> sorted, Uint8List walk) {
@@ -2126,18 +2177,27 @@ class FactoryFloor implements FactorySim {
           kHandlerSpecs[k]!.aisleTiles,
     }.toList()
       ..sort();
+    _driveOpen.clear();
     for (final w in widths) {
       final layer = driveLayer(w);
-      _paths.setLayer(layer, driveMask(hall, marked, w));
+      _driveOpen[layer] = driveMask(hall, marked, w);
+      _paths.setLayer(layer, driveAnchors(hall, marked, w));
+      // Home is in the layer's LARGEST region (the aisle network), not on a
+      // lone 2 x 2 staging pad or bay islanded off it, where a hire would
+      // be stranded for good: a charging bay there first, then a staging
+      // area there, else that region's first tile.
+      final main = _paths.largestRegion(layer);
       TilePos? home;
-      for (final p in [..._chargeList, ..._stagingList0(sorted)]) {
-        for (final t in p.footprint.tiles) {
-          if (_paths.isPassable(layer, t)) {
-            home = t;
-            break;
+      if (main >= 0) {
+        for (final p in [..._chargeList, ..._stagingList0(sorted)]) {
+          for (final t in p.footprint.tiles) {
+            if (_paths.regionAt(layer, t) == main) {
+              home = t;
+              break;
+            }
           }
+          if (home != null) break;
         }
-        if (home != null) break;
       }
       _layerHome[layer] = home ?? _paths.mainRegionStart(layer: layer);
     }

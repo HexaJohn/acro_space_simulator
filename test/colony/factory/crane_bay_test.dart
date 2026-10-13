@@ -104,4 +104,45 @@ void main() {
     expect(g.handlers.single.y, 3, reason: 'it stays in its own bay');
     expect(conservationError(g), isEmpty);
   });
+
+  test('a crane re-bound to another bay sets its load down first', () {
+    // Crane 1 works the billet bay; crane 2 a spare bay in the corner.
+    // Lift the billet bay mid-carry: crane 1 is re-bound to the spare bay
+    // (crane i runs in the i-th bay), and must leave the billet where it
+    // hung rather than carry it across the hall with no trip.
+    final (f, _) = billetFloor([(2, 0, 8, 3), (0, 3, 2, 1)], 2);
+    final port = InfiniteColonyPort();
+    HandlerView? lifting;
+    for (var i = 0; i < 4 * 120 && lifting == null; i++) {
+      f.step(0.25, port);
+      for (final h in f.handlers) {
+        if (h.carrying == 'steelBillet') lifting = h;
+      }
+    }
+    expect(lifting, isNotNull, reason: 'crane 1 lifts a billet');
+    final metres = f.ledger.itemMetres;
+    final bay = f.blueprint.placements.firstWhere(
+      (p) => p.kind == EntityKind.craneBay && p.footprint.w == 8,
+    );
+    expect(f.remove(bay.id).ok, isTrue);
+    for (final h in f.handlers) {
+      expect(h.carrying, isNull, reason: 'crane ${h.id} carries nothing');
+    }
+    final moved = f.handlers.firstWhere((h) => h.id == lifting!.id);
+    expect(moved.y, 3, reason: 'crane 1 now runs in the spare bay');
+    final billets = [
+      for (final e in f.floorPiles.entries)
+        if (e.value.containsKey('steelBillet')) e.key,
+    ];
+    expect(billets, isNotEmpty);
+    expect(
+      billets.every((t) => t.x >= 2),
+      isTrue,
+      reason: 'set down under the old bay, not carried to the spare one',
+    );
+    expect(f.ledger.itemMetres, metres, reason: 'no free ride');
+    expect(conservationError(f), isEmpty);
+    f.step(60, port);
+    expect(conservationError(f), isEmpty);
+  });
 }

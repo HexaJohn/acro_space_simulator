@@ -13,7 +13,8 @@
 ///
 /// * **Walkers and pallet jacks** go anywhere a person can walk.
 /// * **Forklifts and AGVs** drive only on marked floor (aisle, staging,
-///   charging bay) that is wide enough for them: see [driveMask]. A forklift
+///   charging bay) that is wide enough for them: see [driveMask] for the
+///   tiles they may cover and [driveAnchors] for how they path. A forklift
 ///   with no drivable route to a job is never sent; the job waits, and that
 ///   waiting queue is the "lay an aisle" signal.
 /// * **Cranes** run on a fixed runway (a crane bay) and pass over
@@ -111,6 +112,11 @@ int craneLayer(int bayId) => -bayId;
 /// along its whole length (corners and T-junctions included), a 1-wide
 /// aisle is not drivable anywhere, and a 1-tile spur off a 2-wide aisle is
 /// not drivable either. Width ≤ 1 returns the marked tiles themselves.
+///
+/// This is the set of tiles a vehicle may COVER (what the editor shades as
+/// drivable), not its connectivity: two 2-wide runs offset diagonally by
+/// one tile share a single tile, which joins them in this mask although no
+/// 2 × 2 vehicle could sweep through. Vehicles path on [driveAnchors].
 Uint8List driveMask(HallSize hall, Uint8List marked, int width) {
   final w = hall.w, h = hall.h;
   assert(marked.length == w * h);
@@ -145,6 +151,42 @@ Uint8List driveMask(HallSize hall, Uint8List marked, int width) {
       for (var y = y0; y < y1; y++) {
         out.fillRange(y * w + x0, y * w + x1, 1);
       }
+    }
+  }
+  return out;
+}
+
+/// Where a vehicle needing [width]-wide aisles may STAND, as anchors: tile
+/// (x, y) is 1 iff the [width] × [width] square whose low-x, low-y corner it
+/// is lies wholly on [marked] tiles inside the hall. Vehicles path on this
+/// mask (the configuration space) with 4-neighbour moves, so a step from
+/// one anchor to the next is the whole square sliding one tile — every
+/// tile it sweeps is marked. That is what makes "wide enough" hold for
+/// CONNECTIVITY too: a 1-tile neck between two wide runs ([driveMask]
+/// joins them) has no anchor path through it. A vehicle's `at` tile is its
+/// anchor; it works a target from any anchor whose square touches one of
+/// the target's drivable work tiles. Width ≤ 1 returns [marked] itself.
+Uint8List driveAnchors(HallSize hall, Uint8List marked, int width) {
+  final w = hall.w, h = hall.h;
+  assert(marked.length == w * h);
+  final out = Uint8List(w * h);
+  if (width <= 1) {
+    out.setAll(0, marked);
+    return out;
+  }
+  if (w < width || h < width) return out;
+  for (var y0 = 0; y0 + width <= h; y0++) {
+    for (var x0 = 0; x0 + width <= w; x0++) {
+      var full = true;
+      for (var y = y0; y < y0 + width && full; y++) {
+        for (var x = x0; x < x0 + width; x++) {
+          if (marked[y * w + x] != 1) {
+            full = false;
+            break;
+          }
+        }
+      }
+      if (full) out[y0 * w + x0] = 1;
     }
   }
   return out;

@@ -84,6 +84,7 @@ class FloorPathing {
   void setLayer(int layer, Uint8List mask) {
     assert(layer != 0 && mask.length == walkable.length);
     _layers[layer] = mask;
+    _regions.remove(layer);
   }
 
   /// [layer]'s mask, or null for a layer never set (nothing passable).
@@ -180,21 +181,57 @@ class FloorPathing {
     return null;
   }
 
-  /// The row-major first tile of the LARGEST connected passable region on
-  /// [layer] (ties to the earlier region), or null when nothing is
-  /// passable. Belts walling off a strip by the hall's origin must not
-  /// strand a new hire there.
-  TilePos? mainRegionStart({int layer = 0}) {
-    final walkable = maskOf(layer);
-    if (walkable == null) return null;
-    final n = walkable.length;
-    final seen = Uint8List(n);
+  /// Connected-region labels of [layer] (4-neighbour), cached per layer:
+  /// -1 for an impassable tile, else the region's index in row-major order
+  /// of its first tile. Handlers never leave the region they stand in
+  /// between layout edits, so "which handlers could ever get there" is a
+  /// region question, not a per-trip one.
+  Int32List regionsOf(int layer) => _regions[layer] ??= _label(layer);
+
+  final Map<int, Int32List> _regions = {};
+
+  /// Tile count of each region of [layer], by region index.
+  List<int> regionSizes(int layer) {
+    final labels = regionsOf(layer);
+    final out = <int>[];
+    for (final r in labels) {
+      if (r < 0) continue;
+      while (out.length <= r) {
+        out.add(0);
+      }
+      out[r]++;
+    }
+    return out;
+  }
+
+  /// The region [t] lies in on [layer], or -1 (impassable / outside).
+  int regionAt(int layer, TilePos t) =>
+      hall.contains(t) ? regionsOf(layer)[_index(t)] : -1;
+
+  /// The LARGEST region of [layer] (ties to the earlier one), or -1.
+  int largestRegion(int layer) {
+    final sizes = regionSizes(layer);
+    var best = -1, bestSize = 0;
+    for (var r = 0; r < sizes.length; r++) {
+      if (sizes[r] > bestSize) {
+        best = r;
+        bestSize = sizes[r];
+      }
+    }
+    return best;
+  }
+
+  Int32List _label(int layer) {
+    final mask = maskOf(layer) ?? Uint8List(walkable.length);
+    final n = mask.length;
+    final labels = Int32List(n)..fillRange(0, n, -1);
     final queue = Int32List(n);
-    var bestStart = -1, bestSize = 0;
+    var next = 0;
     for (var s = 0; s < n; s++) {
-      if (walkable[s] != 1 || seen[s] == 1) continue;
+      if (mask[s] != 1 || labels[s] >= 0) continue;
+      final r = next++;
       var head = 0, tail = 0;
-      seen[s] = 1;
+      labels[s] = r;
       queue[tail++] = s;
       while (head < tail) {
         final i = queue[head++];
@@ -203,16 +240,27 @@ class FloorPathing {
           final nx = x + dir.dx, ny = y + dir.dy;
           if (nx < 0 || ny < 0 || nx >= hall.w || ny >= hall.h) continue;
           final j = ny * hall.w + nx;
-          if (walkable[j] != 1 || seen[j] == 1) continue;
-          seen[j] = 1;
+          if (mask[j] != 1 || labels[j] >= 0) continue;
+          labels[j] = r;
           queue[tail++] = j;
         }
       }
-      if (tail > bestSize) {
-        bestSize = tail;
-        bestStart = s;
-      }
     }
-    return bestStart < 0 ? null : TilePos(bestStart % hall.w, bestStart ~/ hall.w);
+    return labels;
+  }
+
+  /// The row-major first tile of the LARGEST connected passable region on
+  /// [layer] (ties to the earlier region), or null when nothing is
+  /// passable. Belts walling off a strip by the hall's origin must not
+  /// strand a new hire there.
+  TilePos? mainRegionStart({int layer = 0}) {
+    if (maskOf(layer) == null) return null;
+    final r = largestRegion(layer);
+    if (r < 0) return null;
+    final labels = regionsOf(layer);
+    for (var i = 0; i < labels.length; i++) {
+      if (labels[i] == r) return TilePos(i % hall.w, i ~/ hall.w);
+    }
+    return null;
   }
 }
