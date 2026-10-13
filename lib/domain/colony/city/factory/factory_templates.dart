@@ -63,7 +63,13 @@ import 'factory_grid.dart';
 import 'factory_handling.dart';
 import 'floor_blueprint.dart';
 import 'template_layout.dart';
+import 'factory_measure.dart';
+import 'templates/electronics_template.dart';
+import 'templates/gunfactory_template.dart';
+import 'templates/missilefactory_template.dart';
+import 'templates/rationsfactory_template.dart';
 import 'templates/refinery_template.dart';
+import 'templates/rocketfactory_template.dart';
 
 /// The plant type the Steel Mill template is for (`CityBuildingSpec.type`).
 const String kSteelMillType = 'steelmill';
@@ -93,9 +99,37 @@ FloorBlueprint? factoryTemplateFor(String plantType) {
   return switch (plantType) {
     kSteelMillType => _steelMill(),
     kRefineryType => refineryTemplate(),
+    kElectronicsType => electronicsTemplate(),
+    kRocketPartsType => rocketfactoryTemplate(),
+    kArmsType => gunfactoryTemplate(),
+    kMissileType => missilefactoryTemplate(),
+    kRationsType => rationsfactoryTemplate(),
     _ => null,
   };
 }
+
+/// Every plant type that ships a factory floor, in build-menu order. The
+/// site menu's "Factory floor" action and the dev entry list these.
+const List<String> kFactoryPlantTypes = [
+  kSteelMillType,
+  kRefineryType,
+  kElectronicsType,
+  kRocketPartsType,
+  kArmsType,
+  kMissileType,
+  kRationsType,
+];
+
+/// How long to run a floor of [plantType] before trusting its rates. Most
+/// plants read true under [MeasureSettings.standard]; a plant whose
+/// slowest station packs big lumps (a 50-round ammo pallet, a 10-board
+/// crate) needs a longer window or one lump either side of the window
+/// reads as a 5-10% swing (see each template's doc).
+MeasureSettings measureSettingsFor(String plantType) => switch (plantType) {
+      kElectronicsType => kElectronicsMeasureSettings,
+      kArmsType => kArmsMeasureSettings,
+      _ => MeasureSettings.standard,
+    };
 
 /// Hands out placement ids in order, so the template is stable across
 /// builds (saves key runtime state by id).

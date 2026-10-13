@@ -161,19 +161,21 @@ void main() {
   });
 
   test(
-    'a fresh worker isolate measures it once given registerArmsChain',
+    'a fresh worker isolate measures it, with or without the chain setup',
     () async {
       // The off-thread runner builds floors in an isolate whose registries
-      // hold only ensureFactoryCatalog's chain. Passing registerArmsChain as
-      // the worker setup is what makes the 'gunfactory:*' recipes known
-      // there; without it the plant measures as making nothing (the trap the
-      // lead must avoid when wiring the runner).
+      // start empty and are filled only by ensureFactoryCatalog. Since the
+      // wiring, that call registers every template chain, so the bare runner
+      // and one given registerArmsChain as setup must both measure it.
       final bare = PlatformFloorMeasureRunner(_build);
       addTearDown(bare.dispose);
       final unset = await bare
           .measure(gunfactoryTemplate(), settings: MeasureSettings.standard)
           .then<MeasuredRates?>((r) => r, onError: (Object _) => null);
-      expect(unset?.outPerS['guns'] ?? 0, 0, reason: 'unregistered recipes');
+      // Wired (wave 2): ensureFactoryCatalog registers every template
+      // chain, so a bare worker already knows the 'gunfactory:*' recipes.
+      expect(unset?.outPerS['guns'] ?? 0, greaterThan(0),
+          reason: 'ensureFactoryCatalog brings every chain to the worker');
 
       final runner = PlatformFloorMeasureRunner(
         _build,
