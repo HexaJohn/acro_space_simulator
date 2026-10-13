@@ -145,6 +145,17 @@ const int _kFloorJsonVersion = 1;
 /// floor piles use [_pileId], below -1).
 const int _kIdleKey = -1;
 
+/// Whether [l] has counted nothing at all (a lifetime with no closed period
+/// is left out of the save).
+bool _isBlank(FactoryLedger l) =>
+    l.seconds == 0 &&
+    l.energyKJ == 0 &&
+    l.itemMetres == 0 &&
+    l.workerSeconds.isEmpty &&
+    l.received.isEmpty &&
+    l.shipped.isEmpty &&
+    l.equipmentSeconds.isEmpty;
+
 /// The pseudo-placement id of the floor pile on tile [t].
 int _pileId(TilePos t) => -2 - t.key;
 
@@ -205,7 +216,8 @@ class FactoryFloor implements FactorySim {
       .._simSeconds = (j['t'] as num?)?.toDouble() ?? 0
       .._carry = (j['cr'] as num?)?.toDouble() ?? 0
       .._nextHandlerId = (j['nh'] as num?)?.toInt() ?? 1
-      .._ledger = FactoryLedger.fromJson(m(j['led']));
+      .._ledger = FactoryLedger.fromJson(m(j['led']))
+      .._lifetime = FactoryLedger.fromJson(m(j['life']));
     for (final h in (j['h'] as List? ?? const [])) {
       f._handlers.add(FloorHandler.fromJson(m(h)));
     }
@@ -281,6 +293,11 @@ class FactoryFloor implements FactorySim {
   final List<FloorHandler> _handlers = [];
   final List<MoveRequest> _queue = [];
   FactoryLedger _ledger = FactoryLedger();
+
+  /// Every period [takeLedger] has closed, folded together (the open
+  /// period is [_ledger]; [lifetime] adds the two). Saved under 'life',
+  /// omitted while nothing has been folded.
+  FactoryLedger _lifetime = FactoryLedger();
 
   // ---- derived from the layout (rebuilt on every edit, never saved) ---------
 
@@ -535,6 +552,20 @@ class FactoryFloor implements FactorySim {
   FactoryLedger get ledger => _ledger;
 
   @override
+  FactoryLedger get lifetime => FactoryLedger()
+    ..absorb(_lifetime)
+    ..absorb(_ledger);
+
+  @override
+  Iterable<PileView> get piles sync* {
+    for (final e in floorPiles.entries) {
+      for (final i in e.value.entries) {
+        yield PileView(e.key, i.key, i.value);
+      }
+    }
+  }
+
+  @override
   double get jobDemand => _bp.jobDemand;
 
   @override
@@ -577,6 +608,7 @@ class FactoryFloor implements FactorySim {
   FactoryLedger takeLedger() {
     final l = _ledger;
     _ledger = FactoryLedger();
+    _lifetime.absorb(l);
     return l;
   }
 
@@ -607,6 +639,7 @@ class FactoryFloor implements FactorySim {
       if (_prepaid.isNotEmpty) 'pp': {..._prepaid},
       if (_owed.isNotEmpty) 'ow': {..._owed},
       'led': _ledger.toJson(),
+      if (!_isBlank(_lifetime)) 'life': _lifetime.toJson(),
     };
   }
 

@@ -90,13 +90,14 @@ void main() {
     expect(sim.placed.single.pos, const TilePos(5, 5));
     expect(sim.placed.single.dir, Dir4.east);
 
-    // A machine is centred on the cursor and carries the station's recipe.
+    // A machine is centred on the cursor and carries the station's first
+    // recipe (the real catalog's, registered by the editor).
     await t.tap(find.byKey(const Key('palette-machine-press')));
     await t.pump();
     await click(t, const TilePos(20, 15));
     final m = sim.placed.last;
     expect(m.kind, EntityKind.machine);
-    expect(m.recipe, 'test:press');
+    expect(m.recipe, FactoryRecipes.forStation(StationKind.press).first.id);
     expect(m.pos, const TilePos(19, 14));
   });
 
@@ -279,7 +280,8 @@ void main() {
   });
 
   /// While open the floor runs: the ticker steps the sim every frame, the
-  /// readout samples the ledger, and pause really stops it.
+  /// readout reads the floor's LIFETIME counters (never taking the period
+  /// ledger, which is the colony's), and pause really stops it.
   testWidgets('the ticker steps the sim; pause stops it', (t) async {
     await open(t, FakeFactorySim(hall()));
     for (var i = 0; i < 70; i++) {
@@ -287,9 +289,9 @@ void main() {
     }
     expect(sim.steps, greaterThan(30));
     expect(sim.stepped, closeTo(70 * 0.016, 0.05));
-    expect(sim.ledgersTaken, greaterThan(0));
+    expect(sim.ledgersTaken, 0, reason: 'the editor never takes the ledger');
     expect(c.ratesOut['steel'], closeTo(2, 1e-9),
-        reason: 'two steel per one-second ledger period');
+        reason: 'the fake ships two steel per sim second');
 
     await t.tap(find.byKey(const Key('speed-0')));
     await t.pump();

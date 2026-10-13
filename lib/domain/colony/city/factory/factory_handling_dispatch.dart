@@ -146,6 +146,7 @@ class FloorHandler {
       state: state,
       carrying: carrying,
       carryingCount: carryingCount,
+      battery: isBattery ? battery / kBatteryRuntimeS[kind]! : null,
     );
   }
 

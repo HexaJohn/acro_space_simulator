@@ -8,7 +8,10 @@
 /// The editor's contract is "every edit goes through the sim's editor
 /// surface"; this fake makes each call observable so a test can assert the
 /// exact placement, removal, recipe, mode or hire the UI produced — without
-/// depending on any real floor's rules.
+/// depending on any real floor's rules. Its [check] answers with the
+/// blueprint's own rules (and counts calls), so a ghost that goes red is
+/// provably the sim's verdict. Its [lifetime] grows 2 steel per stepped
+/// second and is never reset, like the real floor's.
 library;
 
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
@@ -34,6 +37,9 @@ class FakeFactorySim implements FactorySim {
   int steps = 0;
   double stepped = 0;
   int ledgersTaken = 0;
+  int checks = 0;
+  final FactoryLedger life = FactoryLedger();
+  List<PileView> pileList = [];
 
   List<BeltItemView> belt = [];
   List<HandlerView> crew = [];
@@ -57,12 +63,43 @@ class FakeFactorySim implements FactorySim {
   @override
   FactoryLedger get ledger => FactoryLedger();
   @override
+  FactoryLedger get lifetime => FactoryLedger()..absorb(life);
+  @override
+  Iterable<PileView> get piles => pileList;
+  @override
   double get jobDemand => bp.jobDemand;
   @override
   double get powerDemandKw => 0;
 
   @override
-  EditResult check(Placement p) => EditResult.ok(bp.nextId);
+  EditResult check(Placement p) {
+    checks++;
+    final id = bp.nextId;
+    final trial = bp.copy()..placements.add(p.copyWith(id: id));
+    for (final i in trial.validate()) {
+      if (i.placementId != id) continue;
+      return switch (i.kind) {
+        BlueprintIssueKind.outOfHall =>
+          const EditResult.refused(EditRefusal.outOfHall),
+        BlueprintIssueKind.overlap =>
+          EditResult.refused(EditRefusal.overlaps, i.otherId),
+        BlueprintIssueKind.unknownRecipe =>
+          const EditResult.refused(EditRefusal.unknownRecipe),
+        BlueprintIssueKind.missingSpan =>
+          const EditResult.refused(EditRefusal.notAllowed),
+      };
+    }
+    return EditResult.ok(id);
+  }
+
+  /// The colony stepping the floor (not the editor): advances the clock and
+  /// the lifetime counters without counting as an editor step.
+  void colonyStep(double dt) {
+    t += dt;
+    life
+      ..seconds += dt
+      ..addShipped('steel', 2 * dt);
+  }
 
   @override
   EditResult place(Placement p) {
@@ -111,6 +148,9 @@ class FakeFactorySim implements FactorySim {
     steps++;
     stepped += dt;
     t += dt;
+    life
+      ..seconds += dt
+      ..addShipped('steel', 2 * dt);
   }
 
   @override

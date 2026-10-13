@@ -12,10 +12,21 @@
 /// trips — because watching a line jam is how a player learns where the
 /// bottleneck is.
 ///
-/// The screen works against [FactorySim] only. In wave 1 that is a fake or
-/// the demo sim; wave 2 hands it the real `FactoryFloor` and nothing here
-/// changes. The default [FactoryColonyPort] is the sandbox
-/// ([InfiniteColonyPort]) so a floor is playable before colony integration.
+/// The screen works against [FactorySim] only: the real `FactoryFloor` in
+/// the game and the dev entry, a recording fake in the tests. The default
+/// [FactoryColonyPort] is the sandbox ([InfiniteColonyPort]) so a floor is
+/// playable before colony integration.
+///
+/// **Who drives.** With [FactoryFloorScreen.drivesSim] (the sandbox) the
+/// screen steps the floor every frame and shows speed controls. Inside a
+/// colony the colony steps the floor and owns its period ledger, so the
+/// screen is opened with `drivesSim: false`: it never steps, never takes
+/// the ledger, hides the speed controls, and reads its throughput from the
+/// floor's lifetime counters like it always does.
+///
+/// A header strip shows what the layout costs to build (`capexOf`, in ore,
+/// by what it buys) and the hall's size in metres, because hall area and
+/// kit are the price of every design choice on the floor.
 ///
 /// Gesture layout (two real bugs in this repo shaped it): the canvas's
 /// [Listener] wraps ONLY the canvas, beside the panels and never around
@@ -28,12 +39,15 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
+import '../../../../domain/colony/city/factory/factory_capex.dart';
 import '../../../../domain/colony/city/factory/factory_colony_port.dart';
 import '../../../../domain/colony/city/factory/factory_entities.dart';
+import '../../../../domain/colony/city/factory/factory_grid.dart';
 import '../../../../domain/colony/city/factory/factory_handling.dart';
 import '../../../../domain/colony/city/factory/factory_item.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
+import '../../../../domain/colony/city/factory/factory_unlocks.dart';
 import '../../../../domain/colony/city/factory/floor_blueprint.dart';
 import '../app_theme.dart';
 import 'factory_editor_controller.dart';
@@ -52,9 +66,19 @@ class FactoryFloorScreen extends StatefulWidget {
     this.port,
     this.title = 'Factory Floor',
     this.onSaveBlueprint,
+    this.unlocks = FactoryUnlocks.all,
+    this.drivesSim = true,
   });
 
   final FactorySim sim;
+
+  /// What the colony has unlocked, for DISPLAY: locked handler kinds and
+  /// station modes are greyed. The sim enforces its own unlocks.
+  final FactoryUnlocks unlocks;
+
+  /// True (sandbox): the screen steps the floor. False: the colony does,
+  /// and the screen only watches (never `step`, never `takeLedger`).
+  final bool drivesSim;
 
   /// The colony the floor trades with; null = a sandbox
   /// ([InfiniteColonyPort]) created once by the screen's state and kept
@@ -77,8 +101,11 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   FactoryColonyPort get _port =>
       widget.port ?? (_sandbox ??= InfiniteColonyPort());
 
-  late FactoryEditorController controller =
-      FactoryEditorController(widget.sim, _port);
+  late FactoryEditorController controller = _newController();
+
+  FactoryEditorController _newController() => FactoryEditorController(
+      widget.sim, _port,
+      drivesSim: widget.drivesSim, unlocks: widget.unlocks);
   FloorLayerCache _cache = FloorLayerCache();
   final FocusNode _focus = FocusNode(debugLabel: 'factory-floor');
   late final Ticker _ticker;
@@ -99,11 +126,14 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   @override
   void didUpdateWidget(FactoryFloorScreen old) {
     super.didUpdateWidget(old);
-    if (identical(old.sim, widget.sim) && identical(old.port, widget.port)) {
+    if (identical(old.sim, widget.sim) &&
+        identical(old.port, widget.port) &&
+        old.drivesSim == widget.drivesSim &&
+        identical(old.unlocks, widget.unlocks)) {
       return;
     }
     final oldController = controller, oldCache = _cache;
-    controller = FactoryEditorController(widget.sim, _port);
+    controller = _newController();
     _cache = FloorLayerCache();
     // The frame being built may still hold the old painter; release the old
     // controller and pictures once it is out.
@@ -148,6 +178,7 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
                       ? null
                       : () => widget.onSaveBlueprint!(
                           widget.sim.blueprint.copy())),
+              _CostStrip(c: controller),
               Expanded(
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -280,18 +311,26 @@ class _TopBar extends StatelessWidget {
                       .copyWith(color: AppTheme.accent, fontSize: 16)),
             ),
             const SizedBox(width: 16),
-            for (final (s, icon, tip) in const [
-              (0.0, Icons.pause, 'Pause'),
-              (1.0, Icons.play_arrow, '1x'),
-              (4.0, Icons.fast_forward, '4x'),
-            ])
-              IconButton(
-                key: Key('speed-${s.round()}'),
-                tooltip: tip,
-                onPressed: () => c.setSpeed(s),
-                icon: Icon(icon,
-                    color: c.speed == s ? AppTheme.accent : AppTheme.textDim),
-              ),
+            // Speed is the driver's to set: hidden while the colony steps
+            // the floor.
+            if (c.drivesSim)
+              for (final (s, icon, tip) in const [
+                (0.0, Icons.pause, 'Pause'),
+                (1.0, Icons.play_arrow, '1x'),
+                (4.0, Icons.fast_forward, '4x'),
+              ])
+                IconButton(
+                  key: Key('speed-${s.round()}'),
+                  tooltip: tip,
+                  onPressed: () => c.setSpeed(s),
+                  icon: Icon(icon,
+                      color:
+                          c.speed == s ? AppTheme.accent : AppTheme.textDim),
+                )
+            else
+              Text('LIVE · colony time',
+                  key: const Key('colony-driven'),
+                  style: AppTheme.dim.copyWith(color: AppTheme.accent2)),
             const SizedBox(width: 12),
             Expanded(
               child: SingleChildScrollView(
@@ -336,6 +375,8 @@ class _TopBar extends StatelessWidget {
   }
 }
 
+const TilePos _origin = TilePos(0, 0);
+
 class _Palette extends StatelessWidget {
   const _Palette({required this.c});
   final FactoryEditorController c;
@@ -367,8 +408,12 @@ class _Palette extends StatelessWidget {
         child: Text(s, style: AppTheme.heading.copyWith(fontSize: 12)),
       );
 
+  /// A floor kind the colony hasn't unlocked the kit for (a crane bay
+  /// without cranes) is labelled; the sim's ghost check refuses it.
   Widget _kindEntry(EntityKind k, IconData icon) => _entry(
-      _kindLabel(k),
+      c.unlocks.allowsPlacement(Placement(id: 0, kind: k, pos: _origin))
+          ? _kindLabel(k)
+          : '${_kindLabel(k)} (locked)',
       icon,
       c.tool == FactoryTool.place && c.kind == k,
       () => c.choose(k),
@@ -596,9 +641,13 @@ class _Inspector extends StatelessWidget {
             for (final m in MachineMode.values)
               ChoiceChip(
                 key: Key('mode-${m.name}'),
-                label: Text(m.name),
+                label: Text(c.unlocks.allowsMode(m) ? m.name : '${m.name} (locked)'),
                 selected: p.crew == m,
-                onSelected: (_) => c.setMachineMode(p.id, m),
+                // A locked mode is greyed; the station keeps a mode it
+                // already has (unlocks gate new purchases only).
+                onSelected: c.unlocks.allowsMode(m) || p.crew == m
+                    ? (_) => c.setMachineMode(p.id, m)
+                    : null,
               ),
           ]),
           const SizedBox(height: 6),
@@ -666,58 +715,126 @@ class _Roster extends StatelessWidget {
   Widget build(BuildContext context) {
     final roster = c.sim.blueprint.roster;
     final busy = <HandlerKind, int>{};
+    final charging = <HandlerKind, int>{};
     for (final h in c.sim.handlers) {
-      if (h.state != HandlerState.idle) busy[h.kind] = (busy[h.kind] ?? 0) + 1;
+      if (h.state == HandlerState.charging) {
+        charging[h.kind] = (charging[h.kind] ?? 0) + 1;
+      } else if (h.state != HandlerState.idle) {
+        busy[h.kind] = (busy[h.kind] ?? 0) + 1;
+      }
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text('HANDLERS', style: AppTheme.heading),
         const SizedBox(height: 4),
-        for (final k in HandlerKind.values)
-          Row(children: [
-            Container(
-              width: 10,
-              height: 10,
-              decoration: BoxDecoration(
-                  color: kHandlerColor[k], shape: BoxShape.circle),
-            ),
-            const SizedBox(width: 8),
+        for (final k in HandlerKind.values) _row(k, roster, busy, charging),
+      ],
+    );
+  }
+
+  /// One kind's row. A locked kind stays listed (so the player sees what
+  /// research buys) but greyed; its + still asks the sim, whose refusal
+  /// explains it, and letting go is always allowed.
+  Widget _row(HandlerKind k, Map<HandlerKind, int> roster,
+      Map<HandlerKind, int> busy, Map<HandlerKind, int> charging) {
+    final locked = !c.unlocks.allowsHandler(k);
+    final have = roster[k] ?? 0;
+    final spec = kHandlerSpecs[k]!;
+    final dim = locked ? AppTheme.textDim : AppTheme.text;
+    final ch = charging[k] ?? 0;
+    return Opacity(
+      key: Key('roster-${k.name}'),
+      opacity: locked ? 0.5 : 1,
+      child: Row(children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(
+              color: locked ? AppTheme.textDim : kHandlerColor[k],
+              shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(locked ? '${spec.label} · locked' : spec.label,
+                  key: Key('hire-${k.name}-label'),
+                  style: AppTheme.body.copyWith(color: dim)),
+              Text(
+                  '${have * spec.operators} operators · '
+                  '${busy[k] ?? 0} on a job'
+                  '${ch > 0 ? ' · $ch charging' : ''}',
+                  style: AppTheme.dim.copyWith(fontSize: 11)),
+            ],
+          ),
+        ),
+        IconButton(
+          key: Key('hire-${k.name}-minus'),
+          visualDensity: VisualDensity.compact,
+          onPressed: have > 0 ? () => c.hire(k, -1) : null,
+          icon: const Icon(Icons.remove, size: 16),
+          color: dim,
+        ),
+        SizedBox(
+          width: 24,
+          child: Text('$have',
+              key: Key('hire-${k.name}-count'),
+              textAlign: TextAlign.center,
+              style: AppTheme.mono.copyWith(color: dim)),
+        ),
+        IconButton(
+          key: Key('hire-${k.name}-plus'),
+          visualDensity: VisualDensity.compact,
+          onPressed: () => c.hire(k, 1),
+          icon: Icon(locked ? Icons.lock_outline : Icons.add, size: 16),
+          color: dim,
+        ),
+      ]),
+    );
+  }
+}
+
+/// What the layout costs to build and how big the hall is: the price of
+/// every design choice, shown while the player makes them.
+class _CostStrip extends StatelessWidget {
+  const _CostStrip({required this.c});
+  final FactoryEditorController c;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([c, c.live]),
+      builder: (context, _) {
+        final FloorCapex k = c.capex;
+        final hall = c.sim.blueprint.hall;
+        String o(double v) => v.toStringAsFixed(v >= 10 ? 1 : 2);
+        return Container(
+          key: const Key('cost-strip'),
+          height: 28,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          color: AppTheme.panelLight,
+          child: Row(children: [
+            Text(
+                'Hall ${hall.widthM.toStringAsFixed(0)} × '
+                '${hall.depthM.toStringAsFixed(0)} m '
+                '(${hall.areaM2.toStringAsFixed(0)} m²)',
+                key: const Key('cost-hall'),
+                style: AppTheme.mono),
+            const SizedBox(width: 24),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(kHandlerSpecs[k]!.label, style: AppTheme.body),
-                  Text(
-                      '${(roster[k] ?? 0) * kHandlerSpecs[k]!.operators} '
-                      'operators · ${busy[k] ?? 0} on a job',
-                      style: AppTheme.dim.copyWith(fontSize: 11)),
-                ],
-              ),
-            ),
-            IconButton(
-              key: Key('hire-${k.name}-minus'),
-              visualDensity: VisualDensity.compact,
-              onPressed: (roster[k] ?? 0) > 0 ? () => c.hire(k, -1) : null,
-              icon: const Icon(Icons.remove, size: 16),
-              color: AppTheme.text,
-            ),
-            SizedBox(
-              width: 24,
-              child: Text('${roster[k] ?? 0}',
-                  key: Key('hire-${k.name}-count'),
-                  textAlign: TextAlign.center,
+              child: Text(
+                  'Build cost ${o(k.total)} ore  ·  hall ${o(k.hall)}  ·  '
+                  'machines ${o(k.machines)}  ·  conveyors ${o(k.conveyors)}'
+                  '  ·  storage ${o(k.storage)}  ·  vehicles ${o(k.vehicles)}',
+                  key: const Key('cost-capex'),
+                  overflow: TextOverflow.ellipsis,
                   style: AppTheme.mono),
             ),
-            IconButton(
-              key: Key('hire-${k.name}-plus'),
-              visualDensity: VisualDensity.compact,
-              onPressed: () => c.hire(k, 1),
-              icon: const Icon(Icons.add, size: 16),
-              color: AppTheme.text,
-            ),
           ]),
-      ],
+        );
+      },
     );
   }
 }
@@ -738,7 +855,8 @@ class _Readout extends StatelessWidget {
       children: [
         const Text('THROUGHPUT', style: AppTheme.heading),
         const SizedBox(height: 4),
-        Text('over the last ${c.windowSeconds.toStringAsFixed(0)} s',
+        Text('over the last ${c.windowSeconds.toStringAsFixed(0)} s of floor '
+            'time',
             style: AppTheme.dim),
         const SizedBox(height: 4),
         const Text('In', style: AppTheme.body),
@@ -748,7 +866,8 @@ class _Readout extends StatelessWidget {
         const Text('Out', style: AppTheme.body),
         if (outs.isEmpty) const Text('  —', style: AppTheme.dim),
         for (final k in outs)
-          Text('  $k  ${_fmtRate(c.ratesOut[k]!)}/s', style: AppTheme.mono),
+          Text('  $k  ${_fmtRate(c.ratesOut[k]!)}/s',
+              key: Key('readout-out-$k'), style: AppTheme.mono),
         const SizedBox(height: 8),
         Text('Power  ${sim.powerDemandKw.toStringAsFixed(0)} kW',
             style: AppTheme.mono),

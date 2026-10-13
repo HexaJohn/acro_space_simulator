@@ -19,7 +19,17 @@
 ///
 /// Everything the editor does to the floor goes through [FactorySim]'s
 /// editor surface; the controller never edits a blueprint directly, so the
-/// fake in the tests, the demo sim and the real floor are interchangeable.
+/// fake in the tests and the real `FactoryFloor` are interchangeable. The
+/// ghost preview asks the sim too ([FactoryFloorEditor.check], the dry run
+/// of `place`), so the preview and the commit can never disagree.
+///
+/// **Who drives the floor.** In the sandbox the editor is the floor's only
+/// driver and steps it every frame ([drivesSim]). Inside a colony (wave 3)
+/// the colony steps every floor and owns its period ledger; the editor then
+/// only watches. Either way the throughput readout diffs the floor's
+/// never-reset [FactoryFloorView.lifetime] over a rolling wall-clock window
+/// and NEVER calls `takeLedger`, so opening a floor can't steal a period's
+/// counters from the colony's books.
 library;
 
 import 'dart:math' as math;
@@ -28,6 +38,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
+import '../../../../domain/colony/city/factory/factory_capex.dart';
+import '../../../../domain/colony/city/factory/factory_catalog.dart';
 import '../../../../domain/colony/city/factory/factory_colony_port.dart';
 import '../../../../domain/colony/city/factory/factory_entities.dart';
 import '../../../../domain/colony/city/factory/factory_grid.dart';
@@ -36,6 +48,7 @@ import '../../../../domain/colony/city/factory/factory_item.dart';
 import '../../../../domain/colony/city/factory/factory_ledger.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
+import '../../../../domain/colony/city/factory/factory_unlocks.dart';
 import 'floor_layout_index.dart';
 
 /// What a primary click on the floor does.
@@ -59,18 +72,24 @@ const double kMaxFrameDt = 0.1;
 /// frame regardless.
 const double kLiveEveryS = 0.25;
 
-/// The ledger is taken once per this many sim seconds and pushed onto the
-/// rolling rate window.
+/// The floor's lifetime ledger is sampled once per this many WALL seconds
+/// and pushed onto the rolling rate window (wall time, not sim time, so the
+/// readout keeps moving whoever steps the floor and at whatever speed).
 const double kRateSampleS = 1.0;
 
-/// Sim seconds the throughput readout averages over.
+/// Wall seconds the throughput readout looks back over: 30 s is a few of
+/// the template's slowest cycles at 1x, yet short enough that an edit's
+/// effect shows within half a minute.
 const double kRateWindowS = 30.0;
+
+/// Sim seconds between heat-map decays (see [kHeatDecay]).
+const double kHeatSampleS = 1.0;
 
 /// Tiles per side of one traffic heat-map cell (8 m: coarse enough to read
 /// at a glance, fine enough to show which aisle is jammed).
 const int kHeatCellTiles = 4;
 
-/// Per-sample decay of the heat map (per [kRateSampleS]): ~30 s half-life,
+/// Per-sample decay of the heat map (per [kHeatSampleS]): ~30 s half-life,
 /// so the map shows the current pattern, not the whole session.
 const double kHeatDecay = 0.977;
 
@@ -90,22 +109,47 @@ class GhostPiece {
   /// Tiles the piece would cover (for a machine with no recipe yet, the
   /// station's footprint, so the player sees the space it needs).
   final TileRect rect;
-  final LayoutCheck check;
+
+  /// The sim's verdict ([FactoryFloorEditor.check]), or a refusal for a
+  /// tile an earlier piece of the same dragged run already claims.
+  final EditResult check;
 }
 
-/// A rolling-window sample of one ledger period.
-class _RateSample {
-  _RateSample(this.seconds, this.inUnits, this.outUnits);
-  final double seconds;
+/// The floor's lifetime counters at one wall-clock instant.
+class _LifeSample {
+  _LifeSample(this.wall, FactoryLedger l)
+      : simSeconds = l.seconds,
+        inUnits = {...l.received},
+        outUnits = {...l.shipped};
+  final double wall;
+  final double simSeconds;
   final Map<String, double> inUnits;
   final Map<String, double> outUnits;
 }
 
 class FactoryEditorController extends ChangeNotifier {
-  FactoryEditorController(this.sim, this.port);
+  FactoryEditorController(this.sim, this.port,
+      {this.drivesSim = true, this.unlocks = FactoryUnlocks.all}) {
+    // The pickers list the real catalog; make sure it is registered even
+    // when the sim is a fake that never touched it.
+    ensureFactoryCatalog();
+    _lastSim = sim.simSeconds;
+    _window.add(_LifeSample(0, sim.lifetime));
+  }
 
   final FactorySim sim;
   final FactoryColonyPort port;
+
+  /// True: the editor steps the floor every frame (the sandbox). False: the
+  /// colony does, and the editor never calls `step` or `takeLedger`.
+  final bool drivesSim;
+
+  /// What the colony has unlocked, for DISPLAY only (greyed roster rows and
+  /// mode chips). The sim enforces its own unlocks and has the last word.
+  final FactoryUnlocks unlocks;
+
+  /// The layout's build cost in ore (cheap: one walk of the placements).
+  FloorCapex get capex => capexOf(sim.blueprint);
 
   // ---- Camera ----------------------------------------------------------
 
@@ -277,8 +321,17 @@ class FactoryEditorController extends ChangeNotifier {
     message = why == null ? null : refusalText(why);
   }
 
+  /// Hires or lets go through the sim. Buying is the only hire the sim
+  /// refuses for policy ([EditRefusal.notAllowed]: not unlocked), so that
+  /// refusal is worded as "locked".
   void hire(HandlerKind k, int delta) {
-    _report(sim.hire(k, delta));
+    final r = sim.hire(k, delta);
+    if (delta > 0 && r.refusal == EditRefusal.notAllowed) {
+      message = '${kHandlerSpecs[k]!.label} is locked: '
+          'not unlocked by this colony yet';
+    } else {
+      _report(r);
+    }
     notifyListeners();
   }
 
@@ -324,7 +377,13 @@ class FactoryEditorController extends ChangeNotifier {
   }
 
   void setMachineMode(int id, MachineMode mode) {
-    _report(sim.setMode(id, mode));
+    final r = sim.setMode(id, mode);
+    if (r.refusal == EditRefusal.notAllowed) {
+      message = '${mode.name[0].toUpperCase()}${mode.name.substring(1)} '
+          'stations are locked: not unlocked by this colony yet';
+    } else {
+      _report(r);
+    }
     frame.value++;
     notifyListeners();
   }
@@ -404,11 +463,25 @@ class FactoryEditorController extends ChangeNotifier {
 
   bool get ghostValid => ghost.isNotEmpty && ghost.every((g) => g.check.ok);
 
+  /// The sim's dry-run verdict on [p], refused as an overlap when a tile of
+  /// it is already claimed by an earlier piece of the same dragged run
+  /// ([pending], tile keys) — the sim can't know about pieces not yet sent.
+  EditResult _check(Placement p, {Set<int>? pending}) {
+    final r = sim.check(p);
+    if (!r.ok || pending == null || pending.isEmpty) return r;
+    for (final t in p.footprint.tiles) {
+      if (pending.contains(t.key)) {
+        return const EditResult.refused(EditRefusal.overlaps);
+      }
+    }
+    return r;
+  }
+
   /// The single placement [k] would make with its anchor on [t].
   GhostPiece _pieceAt(EntityKind k, TilePos t, Dir4 dir, {Set<int>? pending}) {
     if (kSpannedKinds.contains(k)) {
       final p = Placement(id: 0, kind: k, pos: t, span: kDefaultSpan);
-      return GhostPiece(p, p.footprint, index.check(p));
+      return GhostPiece(p, p.footprint, _check(p));
     }
     if (k == EntityKind.crossing) {
       // A crossing is a walkable belt tile: laid over an existing belt it
@@ -419,7 +492,12 @@ class FactoryEditorController extends ChangeNotifier {
           under.kind == EntityKind.belt &&
           !(pending?.contains(t.key) ?? false)) {
         final p = Placement(id: 0, kind: k, pos: t, dir: under.dir);
-        return GhostPiece(p, p.footprint, const LayoutCheck.ok(),
+        // The sim's only objection may be the belt it replaces.
+        final r = sim.check(p);
+        final swap = !r.ok &&
+            r.refusal == EditRefusal.overlaps &&
+            r.otherId == under.id;
+        return GhostPiece(p, p.footprint, swap ? const EditResult.ok(null) : r,
             replaces: under.id);
       }
     }
@@ -436,13 +514,13 @@ class FactoryEditorController extends ChangeNotifier {
       if (dir.isVertical) (w, h) = (h, w);
       final pos = TilePos(t.x - w ~/ 2, t.y - h ~/ 2);
       final p = Placement(id: 0, kind: k, pos: pos, dir: dir, recipe: r);
-      return GhostPiece(p, TileRect(pos.x, pos.y, w, h), index.check(p));
+      return GhostPiece(p, TileRect(pos.x, pos.y, w, h), _check(p));
     }
     var (w, h) = kEntityFootprint[k] ?? (1, 1);
     if (dir.isVertical) (w, h) = (h, w);
     final pos = TilePos(t.x - (w - 1) ~/ 2, t.y - (h - 1) ~/ 2);
     final p = Placement(id: 0, kind: k, pos: pos, dir: dir, item: item);
-    return GhostPiece(p, p.footprint, index.check(p, pending: pending));
+    return GhostPiece(p, p.footprint, _check(p, pending: pending));
   }
 
   void _refreshGhost() {
@@ -473,7 +551,7 @@ class FactoryEditorController extends ChangeNotifier {
       final x0 = math.min(rs.x, h.x), y0 = math.min(rs.y, h.y);
       final w = (rs.x - h.x).abs() + 1, hh = (rs.y - h.y).abs() + 1;
       final p = Placement(id: 0, kind: k, pos: TilePos(x0, y0), span: (w, hh));
-      ghost = [GhostPiece(p, p.footprint, index.check(p))];
+      ghost = [GhostPiece(p, p.footprint, _check(p))];
       return;
     }
     final at = rs ?? h;
@@ -690,11 +768,19 @@ class FactoryEditorController extends ChangeNotifier {
 
   double _liveAcc = 0;
   double _sampleAcc = 0;
-  final List<_RateSample> _window = [];
+  double _heatAcc = 0;
+  double _wall = 0;
+
+  /// The floor's sim clock at the last frame (heat accrues by sim time
+  /// passed, whoever stepped it).
+  double _lastSim = 0;
+  final List<_LifeSample> _window = [];
 
   /// Commodity units per sim second over the rolling window.
   Map<String, double> ratesIn = const {};
   Map<String, double> ratesOut = const {};
+
+  /// Sim seconds the current rates span.
   double windowSeconds = 0;
 
   /// Handler-time per heat cell (sim seconds, decaying).
@@ -705,15 +791,27 @@ class FactoryEditorController extends ChangeNotifier {
 
   /// One animation frame: [wallDt] real seconds since the last.
   void tick(double wallDt) {
-    final dt = wallDt.clamp(0.0, kMaxFrameDt) * speed;
-    if (dt > 0) {
-      sim.step(dt, port);
-      _accumulateHeat(dt);
-      _sampleAcc += dt;
+    if (drivesSim) {
+      final dt = wallDt.clamp(0.0, kMaxFrameDt) * speed;
+      if (dt > 0) sim.step(dt, port);
+    }
+    final now = sim.simSeconds;
+    final simDt = now - _lastSim;
+    _lastSim = now;
+    if (simDt > 0) {
+      _accumulateHeat(simDt);
+      _heatAcc += simDt;
+      if (_heatAcc >= kHeatSampleS) {
+        _heatAcc = 0;
+        _decayHeat();
+      }
+    }
+    if (wallDt > 0) {
+      _wall += wallDt;
+      _sampleAcc += wallDt;
       if (_sampleAcc >= kRateSampleS) {
         _sampleAcc = 0;
         _sampleRates();
-        _decayHeat();
       }
     }
     _liveAcc += wallDt;
@@ -756,28 +854,30 @@ class FactoryEditorController extends ChangeNotifier {
     heatMax = m;
   }
 
+  /// Samples the floor's lifetime counters and re-derives the rates as
+  /// (newest - oldest) / sim seconds between them, over the last
+  /// [kRateWindowS] wall seconds. While the floor is paused the rates hold
+  /// their last value rather than dropping to nothing.
   void _sampleRates() {
-    final FactoryLedger l = sim.takeLedger();
-    _window.add(_RateSample(l.seconds, {...l.received}, {...l.shipped}));
-    var total = 0.0;
-    for (final s in _window) {
-      total += s.seconds;
+    _window.add(_LifeSample(_wall, sim.lifetime));
+    while (_window.length > 2 && _wall - _window[1].wall >= kRateWindowS) {
+      _window.removeAt(0);
     }
-    while (_window.length > 1 && total - _window.first.seconds >= kRateWindowS) {
-      total -= _window.removeAt(0).seconds;
+    final a = _window.first, b = _window.last;
+    final ds = b.simSeconds - a.simSeconds;
+    if (ds <= 0) return;
+    Map<String, double> per(Map<String, double> hi, Map<String, double> lo) {
+      final out = <String, double>{};
+      hi.forEach((k, v) {
+        final d = v - (lo[k] ?? 0);
+        if (d > 0) out[k] = d / ds;
+      });
+      return out;
     }
-    windowSeconds = total;
-    final inn = <String, double>{}, out = <String, double>{};
-    for (final s in _window) {
-      s.inUnits.forEach((k, v) => inn[k] = (inn[k] ?? 0) + v);
-      s.outUnits.forEach((k, v) => out[k] = (out[k] ?? 0) + v);
-    }
-    if (total > 0) {
-      inn.updateAll((_, v) => v / total);
-      out.updateAll((_, v) => v / total);
-    }
-    ratesIn = inn;
-    ratesOut = out;
+
+    windowSeconds = ds;
+    ratesIn = per(b.inUnits, a.inUnits);
+    ratesOut = per(b.outUnits, a.outUnits);
   }
 
   @override

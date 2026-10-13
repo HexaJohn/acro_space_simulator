@@ -22,6 +22,14 @@
 /// Tile space is y-up (north is up the screen) to match the floor's +y
 /// running away from the yard; labels are drawn after the transform is
 /// popped, in screen pixels, so text never mirrors.
+///
+/// **Handlers are drawn where they really are.** A [HandlerView]'s (x, y)
+/// is the ANCHOR — the low corner of the square it covers — so every kind
+/// is centred on [handlerSquare]: one tile for a walker, jack or crane
+/// hook, a 2 × 2 square for a forklift or AGV (its aisle width). Each kind
+/// has its own glyph (a dot, a diamond, a body with forks, a robot, a
+/// bridge across the crane's bay), battery vehicles carry a charge bar, and
+/// goods set down on the floor are drawn as piles.
 library;
 
 import 'dart:math' as math;
@@ -104,6 +112,35 @@ Color itemColor(String id) {
   }
   return HSVColor.fromAHSV(1, (h % 360).toDouble(), 0.55, 0.95).toColor();
 }
+
+/// Tiles a side of the square a handler of [k] covers: its aisle width for
+/// a drive-layer vehicle, else one tile (`HandlerView`'s anchor rule).
+int handlerSquareTiles(HandlerKind k) {
+  final w = kHandlerSpecs[k]!.aisleTiles;
+  return w < 1 ? 1 : w;
+}
+
+/// The square [h] covers, in tile units: anchored at (x, y), so its centre
+/// is where the handler is drawn.
+Rect handlerSquare(HandlerView h) {
+  final w = handlerSquareTiles(h.kind).toDouble();
+  return Rect.fromLTWH(h.x, h.y, w, w);
+}
+
+/// A crane's bridge: the full width of its [bay] across the runway, one
+/// tile thick, at the hook's place along it. The runway runs along the
+/// bay's long side (matching the rails the floor layer draws).
+Rect craneBridge(HandlerView h, TileRect bay) {
+  if (bay.w >= bay.h) {
+    return Rect.fromLTWH(h.x, bay.y0.toDouble(), 1, bay.h.toDouble());
+  }
+  return Rect.fromLTWH(bay.x0.toDouble(), h.y, bay.w.toDouble(), 1);
+}
+
+/// Battery bar colour: green when full fading to red when flat.
+Color batteryColor(double frac) =>
+    Color.lerp(const Color(0xFFFF5252), const Color(0xFF69F0AE),
+        frac.clamp(0.0, 1.0))!;
 
 Paint _fill(Color c) => Paint()..color = c;
 Paint _stroke(Color c, double w) => Paint()
@@ -309,12 +346,28 @@ class FactoryFloorPainter extends CustomPainter {
   final FactoryEditorController c;
   final FloorLayerCache cache;
 
+  /// Each handler's body as last painted, by handler id, in tile units
+  /// (the square it covers; a crane's is its hook tile). Tests read it to
+  /// pin where vehicles are drawn without a golden image.
+  final Map<int, Rect> handlerRects = {};
+
+  /// Each crane's bridge as last painted, by handler id, in tile units.
+  final Map<int, Rect> bridgeRects = {};
+
   static final Paint _bg = _fill(kFactoryBg);
   static final Paint _grid = _stroke(const Color(0xFFFFFFFF), 0);
   static final Paint _tint = Paint();
   static final Paint _lamp = Paint();
   static final Paint _dot = Paint();
   static final Paint _handlerRing = _stroke(const Color(0xFF05080F), 0.08);
+  static final Paint _glyph = _stroke(const Color(0xFF05080F), 0.1);
+  static final Paint _bridge = _fill(const Color(0xA0B388FF));
+  static final Paint _bridgeEdge = _stroke(const Color(0xFFE0D0FF), 0.06);
+  static final Paint _barBack = _fill(const Color(0xC0101820));
+  static final Paint _bar = Paint();
+  static final Paint _chargeRing = _stroke(const Color(0xFF4FC3F7), 0.12);
+  static final Paint _pileEdge = _stroke(const Color(0xFFE8EEF4), 0.05);
+  static final Paint _broken = _stroke(const Color(0xFFE53935), 0.18);
   static final Paint _select = _stroke(const Color(0xFF4FC3F7), 0.15);
   static final Paint _hover = _stroke(const Color(0x60FFFFFF), 0.06);
   static final Paint _ghostOk = _fill(_okGhost);
@@ -358,8 +411,9 @@ class FactoryFloorPainter extends CustomPainter {
     _paintMachines(canvas, ix, vis);
     if (c.overlays.contains(FactoryOverlay.traffic)) _paintHeat(canvas, vis);
     if (px >= kDynamicMinPx) {
+      _paintPiles(canvas, vis);
       _paintBeltItems(canvas, ix, vis);
-      _paintHandlers(canvas, vis);
+      _paintHandlers(canvas, ix, vis);
     }
     _paintSelection(canvas, ix);
     _paintGhost(canvas);
@@ -405,6 +459,7 @@ class FactoryFloorPainter extends CustomPainter {
         tint = switch (s) {
           MachineStatus.starved => const Color(0x80FFD54F),
           MachineStatus.blocked => const Color(0x90FF6B6B),
+          MachineStatus.broken => const Color(0xA0E53935),
           MachineStatus.working => const Color(0x307FE0A0),
           _ => null,
         };
@@ -434,6 +489,12 @@ class FactoryFloorPainter extends CustomPainter {
       }
       _lamp.color = kStatusColor[s]!;
       canvas.drawCircle(Offset(f.x0 + 0.5, f.y1 - 0.5), 0.28, _lamp);
+      // A broken-down station is crossed out whatever the overlay: it
+      // needs a technician, and that should read from across the hall.
+      if (s == MachineStatus.broken) {
+        canvas.drawLine(rect.topLeft, rect.bottomRight, _broken);
+        canvas.drawLine(rect.bottomLeft, rect.topRight, _broken);
+      }
     }
   }
 
@@ -470,25 +531,108 @@ class FactoryFloorPainter extends CustomPainter {
     }
   }
 
-  void _paintHandlers(Canvas canvas, TileRect vis) {
+  /// Goods on the open floor: a stack in the item's colour per (tile,
+  /// item), several items on one tile side by side.
+  void _paintPiles(Canvas canvas, TileRect vis) {
+    TilePos? at;
+    var n = 0;
+    for (final p in c.sim.piles) {
+      if (!vis.contains(p.tile)) continue;
+      n = p.tile == at ? n + 1 : 0;
+      at = p.tile;
+      final o = (n % 3) * 0.28;
+      final r = Rect.fromLTWH(p.tile.x + 0.1 + o, p.tile.y + 0.1, 0.5, 0.5);
+      canvas.drawRect(r, _itemPaint(p.item));
+      canvas.drawRect(r, _pileEdge);
+    }
+  }
+
+  void _paintHandlers(Canvas canvas, FloorLayoutIndex ix, TileRect vis) {
+    handlerRects.clear();
+    bridgeRects.clear();
     for (final h in c.sim.handlers) {
-      if (h.x < vis.x0 - 1 || h.x > vis.x1 + 1) continue;
-      if (h.y < vis.y0 - 1 || h.y > vis.y1 + 1) continue;
-      final r = h.kind == HandlerKind.crane
-          ? 0.6
-          : h.kind == HandlerKind.forklift
-              ? 0.5
-              : 0.36;
-      _dot.color = kHandlerColor[h.kind]!;
-      final at = Offset(h.x, h.y);
-      canvas.drawCircle(at, r, _dot);
-      canvas.drawCircle(at, r, _handlerRing);
+      final sq = handlerSquare(h);
+      if (sq.right < vis.x0 - 1 || sq.left > vis.x1 + 1) continue;
+      if (sq.bottom < vis.y0 - 1 || sq.top > vis.y1 + 1) continue;
+      handlerRects[h.id] = sq;
+      final col = kHandlerColor[h.kind]!;
+      _dot.color = col;
+      final at = sq.center;
+      switch (h.kind) {
+        case HandlerKind.onFoot:
+          // A person: a dot a little smaller than the tile.
+          canvas.drawCircle(at, 0.34, _dot);
+          canvas.drawCircle(at, 0.34, _handlerRing);
+        case HandlerKind.palletJack:
+          // A jack: a diamond (its tiller and tines read as a point).
+          final d = Path()
+            ..moveTo(at.dx, at.dy + 0.42)
+            ..lineTo(at.dx + 0.42, at.dy)
+            ..lineTo(at.dx, at.dy - 0.42)
+            ..lineTo(at.dx - 0.42, at.dy)
+            ..close();
+          canvas.drawPath(d, _dot);
+          canvas.drawPath(d, _handlerRing);
+        case HandlerKind.forklift:
+          // A forklift: a body filling most of its square, a mast bar and
+          // two forks out the front (+x).
+          final body = Rect.fromCenter(
+              center: at - Offset(sq.width * 0.1, 0),
+              width: sq.width * 0.62,
+              height: sq.height * 0.7);
+          canvas.drawRRect(
+              RRect.fromRectAndRadius(body, const Radius.circular(0.15)),
+              _dot);
+          canvas.drawRRect(
+              RRect.fromRectAndRadius(body, const Radius.circular(0.15)),
+              _handlerRing);
+          final fx = body.right;
+          canvas.drawLine(Offset(fx, body.top), Offset(fx, body.bottom), _glyph);
+          for (final fy in [at.dy - sq.height * 0.18, at.dy + sq.height * 0.18]) {
+            canvas.drawLine(
+                Offset(fx, fy), Offset(sq.right - 0.08, fy), _glyph);
+          }
+        case HandlerKind.agv:
+          // An AGV: a low square deck with a sensor ring.
+          final body = sq.deflate(sq.width * 0.16);
+          canvas.drawRect(body, _dot);
+          canvas.drawRect(body, _handlerRing);
+          canvas.drawCircle(at, body.width * 0.22, _glyph);
+        case HandlerKind.crane:
+          // A crane: its bridge spans the bay at the hook's place, the hook
+          // a square under it.
+          final bay = ix.craneBayAt(
+              TilePos((h.x + 0.5).floor(), (h.y + 0.5).floor()));
+          if (bay != null) {
+            final br = craneBridge(h, bay.footprint);
+            bridgeRects[h.id] = br;
+            canvas.drawRect(br.deflate(0.08), _bridge);
+            canvas.drawRect(br.deflate(0.08), _bridgeEdge);
+          }
+          final hook = sq.deflate(0.22);
+          canvas.drawRect(hook, _dot);
+          canvas.drawRect(hook, _handlerRing);
+      }
       final item = h.carrying;
       if (item != null) {
         canvas.drawRect(
-            Rect.fromCenter(center: at + const Offset(0, 0.45), width: 0.5,
-                height: 0.4),
+            Rect.fromCenter(center: at, width: 0.42, height: 0.36),
             _itemPaint(item));
+      }
+      final b = h.battery;
+      if (b != null) {
+        // The charge bar under the vehicle; a ring while it charges.
+        final bar = Rect.fromLTWH(sq.left + 0.15, sq.top + 0.05,
+            sq.width - 0.3, 0.18);
+        canvas.drawRect(bar, _barBack);
+        _bar.color = batteryColor(b);
+        canvas.drawRect(
+            Rect.fromLTWH(bar.left, bar.top, bar.width * b.clamp(0.0, 1.0),
+                bar.height),
+            _bar);
+        if (h.state == HandlerState.charging) {
+          canvas.drawRect(sq.deflate(0.04), _chargeRing);
+        }
       }
     }
   }

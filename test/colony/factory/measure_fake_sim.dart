@@ -53,6 +53,7 @@ class FakeSim implements FactorySim {
   double _owed = 0; // output share accrued toward the next lump
   int _rev = 0;
   FactoryLedger _ledger = FactoryLedger();
+  final FactoryLedger _lifetime = FactoryLedger();
 
   @override
   void step(double dt, FactoryColonyPort port) {
@@ -93,6 +94,7 @@ class FakeSim implements FactorySim {
   FactoryLedger takeLedger() {
     final l = _ledger;
     _ledger = FactoryLedger();
+    _lifetime.absorb(l);
     return l;
   }
 
@@ -117,6 +119,12 @@ class FakeSim implements FactorySim {
   int get pendingRequests => 0;
   @override
   FactoryLedger get ledger => _ledger;
+  @override
+  FactoryLedger get lifetime => FactoryLedger()
+    ..absorb(_lifetime)
+    ..absorb(_ledger);
+  @override
+  Iterable<PileView> get piles => const [];
   @override
   double get jobDemand => jobs;
   @override

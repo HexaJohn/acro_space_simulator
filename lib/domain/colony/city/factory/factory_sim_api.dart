@@ -59,6 +59,15 @@ class BeltItemView {
 enum HandlerState { idle, toPickup, carrying, charging }
 
 /// One handler, for drawing. [x], [y] in TILES (fractional while moving).
+///
+/// **Anchor convention.** ([x], [y]) is the ANCHOR: the low-x, low-y corner
+/// tile of the square the handler covers, never its centre. A walker,
+/// pallet jack or crane hook covers that one tile; a vehicle on a drive
+/// layer (forklift, AGV: `HandlerSpec.aisleTiles` = w ≥ 2) covers the
+/// w × w square `[x, x + w) × [y, y + w)` — the same square
+/// `factory_vehicles.dart`'s `driveAnchors` path on. So a drawer centres a
+/// handler at `(x + w / 2, y + w / 2)` with `w = max(1, aisleTiles)`;
+/// drawing at (x, y) itself puts a forklift a tile off its aisle.
 class HandlerView {
   const HandlerView({
     required this.id,
@@ -68,6 +77,7 @@ class HandlerView {
     required this.state,
     this.carrying,
     this.carryingCount = 0,
+    this.battery,
   });
   final int id;
   final HandlerKind kind;
@@ -75,6 +85,20 @@ class HandlerView {
   final HandlerState state;
   final String? carrying;
   final int carryingCount;
+
+  /// Charge left, 0..1 of a full battery, for battery vehicles (forklift,
+  /// AGV); null for everything that runs on muscle or mains.
+  final double? battery;
+}
+
+/// Goods set down on the open floor (a removed station's buffers, a
+/// load whose target vanished): [count] of [item] on [tile]. One view per
+/// (tile, item).
+class PileView {
+  const PileView(this.tile, this.item, this.count);
+  final TilePos tile;
+  final String item;
+  final int count;
 }
 
 /// Why an edit was refused (null result reason = accepted).
@@ -174,6 +198,17 @@ abstract interface class FactoryFloorView {
   /// Counters since the last [FactorySim.takeLedger].
   FactoryLedger get ledger;
 
+  /// Counters since the floor was BUILT: every period folded together,
+  /// never reset by [FactorySim.takeLedger] (and saved with the floor). A
+  /// viewer that is not the floor's driver — the editor opened on a floor
+  /// the colony steps — reads rates by diffing this over time, so it never
+  /// takes the period ledger out from under the colony.
+  FactoryLedger get lifetime;
+
+  /// Goods lying on the open floor, by tile then item (row-major, sorted:
+  /// the same order every frame).
+  Iterable<PileView> get piles;
+
   /// Staffing need of the layout (stations + maintenance + operators).
   double get jobDemand;
 
@@ -203,7 +238,8 @@ abstract interface class FactorySim
   /// Runs whole [kFactoryStepS] sub-steps covering [dt] against [port].
   void step(double dt, FactoryColonyPort port);
 
-  /// Returns the counters since the last call and starts a fresh period.
+  /// Returns the counters since the last call and starts a fresh period
+  /// (the closed one is folded into [FactoryFloorView.lifetime]).
   FactoryLedger takeLedger();
 
   /// Full runtime state (layout + buffers + belt items + handlers).
