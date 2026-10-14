@@ -60,8 +60,8 @@
 /// offers, a few local prices):
 ///
 ///   factory=place:TYPE   a TYPE plant (kFactoryPlantTypes: steelmill,
-///                        refinery, …) on the first free served lot, else
-///                        a site claimed near the origin; free of ore
+///                        refinery, …) staked where the build ghost would
+///                        snap it, nearest the origin first; free of ore
 ///   factory=open:SITE    open SITE's floor over the view, as its site
 ///                        menu's "Factory floor" does
 ///   factory=close:SITE   close it, as its back arrow does (the edit's
@@ -453,27 +453,32 @@ Object? factoryHook(CitySim c, String spec) {
   return {'error': 'unknown factory verb: $verb'};
 }
 
-/// Places [plant] as a player would, minus the ore: the first free served
-/// street lot that takes it, else a site claimed on a widening ring around
-/// the origin (a plant that brings its own plot). The site, or null.
+/// Places [plant] as a player would, minus the ore. A plant that brings
+/// its own plot is staked where the build ghost would snap it
+/// ([CitySim.snapSiteCentre]) on a widening ring around the origin; the
+/// rest take the first free served street lot. The site, or null.
 String? _placePlant(CitySim c, CityBuildingSpec plant) {
-  final net = c.parcelNetwork();
-  for (final lot in c.layout.autoParcels) {
-    if (c.parcelBuildings.containsKey(lot.id) || !net.lotServed(lot.id)) {
-      continue;
+  if (!plant.claimsOwnSite) {
+    final net = c.parcelNetwork();
+    for (final lot in c.layout.autoParcels) {
+      if (c.parcelBuildings.containsKey(lot.id) || !net.lotServed(lot.id)) {
+        continue;
+      }
+      if (c.placeOnParcel(lot.id, plant)) return lot.id;
     }
-    if (c.placeOnParcel(lot.id, plant)) return lot.id;
+    return null;
   }
   // claimSite charges the build cost; the hook is free, so the ore is lent
   // and, when no site was claimed (nothing spent it), taken back.
   final cost = c.buildCostOf(plant);
   c.stock['ore'] = c.stockOf('ore') + cost;
-  for (var ring = 1; ring <= 8; ring++) {
-    final r = ring * 400.0; // metres: a plant site is a few hundred across
-    for (var k = 0; k < 8; k++) {
+  for (var ring = 0; ring <= 8; ring++) {
+    final r = ring * 300.0;
+    for (var k = 0; k < (ring == 0 ? 1 : 8); k++) {
       final a = k * math.pi / 4; // eight bearings a ring
-      final claimed =
-          c.claimSite(plant, Vec2(r * math.cos(a), r * math.sin(a)));
+      final at = c.snapSiteCentre(plant, Vec2(r * math.cos(a), r * math.sin(a)));
+      if (at == null) continue;
+      final claimed = c.claimSite(plant, at);
       if (claimed != null) return claimed.id;
     }
   }

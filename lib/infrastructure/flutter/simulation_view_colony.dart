@@ -160,9 +160,17 @@ extension _SimulationViewColony on _SimulationViewState {
       // building"): the ghost is red on every lot, and the toolbar says why
       // before the click — said once, not on every mouse move.
       final misfit = city.floorBlueprintRefusal(held);
+      // A plot hundreds of metres across snaps its edge to a nearby curb
+      // (CitySim.snapSiteCentre): the ghost stands where the click will
+      // stake it, not centred on the cursor where it would cross the road.
+      final raw = Vec2(hit.east, hit.north);
+      final at = held.claimsOwnSite ? city.snapSiteCentre(held, raw) : raw;
+      if (held.claimsOwnSite && at != null && at != raw) {
+        CityNodes.cursorBF = _padPointBF(city, at);
+      }
       CityNodes.cursorBad = misfit != null ||
           (held.claimsOwnSite &&
-              _siteStatusAt(city, held, Vec2(hit.east, hit.north)) != 0);
+              (at == null || _siteStatusAt(city, held, at) != 0));
       final next = misfitRefusal(
           misfit: misfit, blocked: _cityEdit.blocked, shown: _shownMisfit);
       _shownMisfit = next.shown;
@@ -665,8 +673,10 @@ extension _SimulationViewColony on _SimulationViewState {
     final held = _cityEdit.selectedUtil;
     if (_cityEdit.tool == CityEditTool.utility && held.claimsOwnSite) {
       // Behind the control gate (secession §5), inside the controller.
-      rebuild(() =>
-          _cityEdit.claimOwnSite(city, Vec2(hit.east, hit.north)));
+      // The same snap the ghost showed: the plot lands where it was drawn.
+      final raw = Vec2(hit.east, hit.north);
+      rebuild(() => _cityEdit.claimOwnSite(
+          city, city.snapSiteCentre(held, raw) ?? raw));
       return;
     }
 

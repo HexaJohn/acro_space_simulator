@@ -6167,7 +6167,7 @@ class CitySim {
     if (corridor != null) return corridor;
     if (layout.roads.isEmpty) return 'No road to serve it.';
     var best = double.infinity;
-    for (final v in [...poly, centre]) {
+    for (final v in siteServeProbes(poly)) {
       final d = layout.distanceToCurb(v);
       if (d < best) best = d;
     }
@@ -6176,6 +6176,124 @@ class CitySim {
           '${siteAccessReachM.round()} m.';
     }
     return null;
+  }
+
+  /// The points of a site [poly] its access reach is measured from: centre,
+  /// corners and EDGE MIDPOINTS — the same probes `ParcelNetwork` serves a
+  /// manual plot by. The claim used corners and centre only, so a 1100 m
+  /// mill whose long edge lay along a street read "too far from a road"
+  /// (every corner hundreds of metres from the road's ends) although the
+  /// network would have served it; in a starter town that refused a big
+  /// plant everywhere.
+  static List<Vec2> siteServeProbes(List<Vec2> poly) {
+    var e = 0.0, n = 0.0;
+    for (final v in poly) {
+      e += v.e;
+      n += v.n;
+    }
+    return [
+      Vec2(e / poly.length, n / poly.length),
+      ...poly,
+      for (var i = 0; i < poly.length; i++)
+        Vec2((poly[i].e + poly[(i + 1) % poly.length].e) / 2,
+            (poly[i].n + poly[(i + 1) % poly.length].n) / 2),
+    ];
+  }
+
+  /// Gap a snapped site keeps between its edge and the curb, metres: room
+  /// for a verge and the gate's apron, well inside [siteAccessReachM].
+  static const double siteSnapSetbackM = 8;
+
+  /// Road samples further than this from the cursor, beyond the site's own
+  /// half-diagonal, are not snap anchors: the ghost should land near where
+  /// the player points, not leap to a street across town.
+  static const double siteSnapRangeM = 160;
+
+  /// Candidates tried per call; each runs the full [siteBlockedReason].
+  /// The ghost asks on every mouse move.
+  static const int siteSnapMaxChecks = 24;
+
+  /// Where a site for [spec] should stand when the player points at
+  /// [cursor]: the cursor itself if it is placeable there, else the nearest
+  /// placeable spot with one of the site's edges set back
+  /// [siteSnapSetbackM] from a nearby curb — beside a street or off its
+  /// end, never across it. Null when nothing near [cursor] fits.
+  ///
+  /// A site hundreds of metres across, centred on the cursor, almost never
+  /// lands both clear of every road and within reach of one; snapping its
+  /// edge to the street is how a player actually places a mill.
+  Vec2? snapSiteCentre(CityBuildingSpec spec, Vec2 cursor) {
+    if (siteBlockedReason(spec, cursor) == null) return cursor;
+    if (floorBlueprintRefusal(spec) != null) return null;
+    final s = spec.siteMetres(cellM: cellM);
+    final hw = s.width / 2, hd = s.depth / 2;
+    final range = math.sqrt(hw * hw + hd * hd) + siteSnapRangeM;
+    final candidates = <(double, Vec2)>[];
+    for (final road in layout.roads) {
+      var near = false;
+      for (final c in road.controls) {
+        if ((c - cursor).length <= range + 400) {
+          near = true;
+          break;
+        }
+      }
+      if (!near) continue;
+      final gap = road.halfWidth + siteSnapSetbackM;
+      for (final p in road.sample(stepM: 24)) {
+        if ((p - cursor).length > range) continue;
+        // The site beside the road on each axis side, its facing edge [gap]
+        // off the centreline sample — centred on the sample, or slid along
+        // the road so the edge's END is there (a starter town's plots sit
+        // right up to the junction; the free frontage is past them).
+        for (final c in [
+          for (final along in [0.0, hd, -hd]) ...[
+            Vec2(p.e + gap + hw, p.n + along),
+            Vec2(p.e - gap - hw, p.n + along),
+          ],
+          for (final along in [0.0, hw, -hw]) ...[
+            Vec2(p.e + along, p.n + gap + hd),
+            Vec2(p.e + along, p.n - gap - hd),
+          ],
+        ]) {
+          if (_overlapsManualBox(c, hw, hd)) continue;
+          candidates.add(((c - cursor).length, c));
+        }
+      }
+    }
+    candidates.sort((a, b) {
+      final d = a.$1.compareTo(b.$1);
+      if (d != 0) return d;
+      final e = a.$2.e.compareTo(b.$2.e);
+      return e != 0 ? e : a.$2.n.compareTo(b.$2.n);
+    });
+    var checks = 0;
+    for (final (_, c) in candidates) {
+      if (checks++ >= siteSnapMaxChecks) break;
+      if (siteBlockedReason(spec, c) == null) return c;
+    }
+    return null;
+  }
+
+  /// A cheap pre-test for [snapSiteCentre]: whether an axis-aligned site
+  /// [hw] x [hd] either side of [c] overlaps any staked plot's bounding box.
+  /// Most snap candidates in a built-up town fail here, before the full
+  /// [siteBlockedReason] is paid for.
+  bool _overlapsManualBox(Vec2 c, double hw, double hd) {
+    for (final p in layout.manualParcels) {
+      var minE = double.infinity, maxE = -double.infinity;
+      var minN = double.infinity, maxN = -double.infinity;
+      for (final v in p.polygon) {
+        if (v.e < minE) minE = v.e;
+        if (v.e > maxE) maxE = v.e;
+        if (v.n < minN) minN = v.n;
+        if (v.n > maxN) maxN = v.n;
+      }
+      if (c.e - hw < maxE && c.e + hw > minE &&
+          c.n - hd < maxN && c.n + hd > minN) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Why a new plot [polygon] may not be staked: it overlaps a live access
