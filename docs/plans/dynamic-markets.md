@@ -99,14 +99,20 @@ against the skilled jobs posted, priced like any other good.
    smoothed flows, and saving. Revenue only on sales. Earth as a market seeded from today's prices
    once, then free to move. Replace the tax cap with a soft safety ceiling. Retune the plant
    health tests to the new dynamics.
-2. **Learning curves and invention.** Track Q per scope. Unit cost follows Wright's law, and Earth
-   prices move with world learning. Add invention points and the first-unit premium.
-3. **Skilled labour market.** Skill tiers per recipe, a skilled supply from education, and a
-   priced premium.
-4. **Inter-colony trade.** Each player colony is a source and destination for the others, linked
+2. **Learning curves and invention.** Track Q per colony and for the world, with world knowledge
+   slowly spilling over to colonies. Unit cost follows Wright's law, and Earth prices move with
+   world learning. Invention points come from Earth's timeline, and colony research can invent a
+   good early.
+3. **Labour market.** Skill tiers per recipe, and skilled supply from population and education
+   coverage. Wages for each tier are priced by supply and demand like any good; a shortage raises
+   wages and starves low-paying plants of staff.
+4. **Entrepreneurs.** When a good's local margin stays high, an AI firm founds a plant for it on
+   a site the build snap finds (`CitySim.snapSiteCentre`), within the colony's rules (economy
+   type, ore, unlocks).
+5. **Inter-colony trade.** Each player colony is a source and destination for the others, linked
    by transport cost.
-5. **UI.** A price chart per good ("why this price": supply, demand, cover, curve position,
-   bounds), invention news, and a plant's margin trend.
+6. **UI.** A price chart per good ("why this price"), the labour market, invention news, and firm
+   founding notices.
 
 ## 5. Invariants
 
@@ -125,17 +131,13 @@ against the skilled jobs posted, priced like any other good.
 - **Tuning load.** Mitigation: per-good-class parameters (bulk, life support, industrial,
   advanced), not per good.
 
-## 7. Decisions for the user
+## 7. Decisions (user, 2026-10-14)
 
-1. **What triggers an invention?** *Rec:* Earth's world timeline sets when a good first appears.
-   Colony research (the unused `research` accumulator) can let a colony invent it EARLIER for
-   itself, which makes being first a real strategy.
-2. **Who learns?** *Rec:* both. Colony production builds local experience, which lowers that
-   colony's unit cost. World experience lowers Earth's price and so the import ceiling. Knowledge
-   spills over slowly, so local experience gets a fraction of world progress.
-3. **Do new firms appear on their own when margins are high?** *Rec:* not yet. In phase 1 only
-   your existing plants expand or contract. AI entrepreneurs founding plants is a later phase.
-4. **Skilled labour:** a fixed premium per skill tier now, and a full labour market in phase 3
-   (rec)?
-5. **Price speed:** the default is about a week of game days for most goods to cover half the gap
-   to equilibrium. Faster feels lively but swings; slower feels stable but sluggish.
+1. **Invention:** Earth's world timeline sets when a good first appears. Colony research can let a
+   colony invent it earlier for itself.
+2. **Learning:** both. Colony production builds local experience; world output drives Earth's
+   price; world knowledge spills over to colonies slowly.
+3. **Entrepreneurs:** yes. AI firms found plants when margins stay high (phase 4).
+4. **Labour:** a full labour market now (phase 3), not a fixed premium.
+5. **Price speed:** most goods close half the gap to equilibrium in about one in-game month (30
+   colony days).
