@@ -192,7 +192,7 @@ class FloorLayerCache {
     final c = Canvas(rec);
     final hall = ix.hall;
     final hallRect = Rect.fromLTWH(0, 0, hall.w.toDouble(), hall.h.toDouble());
-    c.drawRect(hallRect, _fill(_hallFloor));
+    _T.rect(c, hallRect, _fill(_hallFloor));
     final aisle = Path(), staging = Path(), bay = Path(), rails = Path();
     for (final p in ix.overlays) {
       final r = _r(p.footprint);
@@ -226,7 +226,7 @@ class FloorLayerCache {
     c.drawPath(staging, _stroke(const Color(0x704FC3F7), 0.08));
     c.drawPath(bay, _fill(const Color(0x22FF8C66)));
     c.drawPath(rails, _stroke(const Color(0xB0FF8C66), 0.18));
-    c.drawRect(hallRect.inflate(0.25), _stroke(_hallWall, 0.5));
+    _T.rect(c, hallRect.inflate(0.25), _stroke(_hallWall, 0.5));
     return rec.endRecording();
   }
 
@@ -356,6 +356,7 @@ class FactoryFloorPainter extends CustomPainter {
 
   static final Paint _bg = _fill(kFactoryBg);
   static final Paint _grid = _stroke(const Color(0xFFFFFFFF), 0);
+  static final Paint _gridFill = Paint();
   static final Paint _tint = Paint();
   static final Paint _lamp = Paint();
   static final Paint _dot = Paint();
@@ -401,7 +402,7 @@ class FactoryFloorPainter extends CustomPainter {
     final px = c.pxPerTile;
     final vis = c.visibleTiles;
     canvas.clipRect(Offset.zero & size);
-    canvas.drawRect(Offset.zero & size, _bg);
+    _T.rect(canvas, Offset.zero & size, _bg);
     canvas.save();
     canvas.translate(c.origin.dx, c.origin.dy);
     canvas.scale(px, -px);
@@ -425,14 +426,19 @@ class FactoryFloorPainter extends CustomPainter {
     final a = ((px - kGridMinPx) / kGridFadePx).clamp(0.0, 1.0) * kGridAlpha;
     if (a <= 0 || vis.w <= 0 || vis.h <= 0) return;
     _grid.color = Color.fromRGBO(255, 255, 255, a);
+    // One filled path of hairline strips (one screen pixel wide), not a
+    // stroke per line: see [_T].
+    final w = 1 / px, h = w / 2;
+    final path = Path();
     for (var x = vis.x0; x <= vis.x1; x++) {
-      canvas.drawLine(Offset(x.toDouble(), vis.y0.toDouble()),
-          Offset(x.toDouble(), vis.y1.toDouble()), _grid);
+      path.addRect(Rect.fromLTRB(x - h, vis.y0.toDouble(), x + h,
+          vis.y1.toDouble()));
     }
     for (var y = vis.y0; y <= vis.y1; y++) {
-      canvas.drawLine(Offset(vis.x0.toDouble(), y.toDouble()),
-          Offset(vis.x1.toDouble(), y.toDouble()), _grid);
+      path.addRect(Rect.fromLTRB(vis.x0.toDouble(), y - h,
+          vis.x1.toDouble(), y + h));
     }
+    canvas.drawPath(path, _gridFill..color = _grid.color);
   }
 
   /// Status lamp on every machine; with an overlay on, the whole body is
@@ -485,15 +491,15 @@ class FactoryFloorPainter extends CustomPainter {
       }
       if (tint != null) {
         _tint.color = tint;
-        canvas.drawRect(rect, _tint);
+        _T.rect(canvas, rect, _tint);
       }
       _lamp.color = kStatusColor[s]!;
-      canvas.drawCircle(Offset(f.x0 + 0.5, f.y1 - 0.5), 0.28, _lamp);
+      _T.circle(canvas, Offset(f.x0 + 0.5, f.y1 - 0.5), 0.28, _lamp);
       // A broken-down station is crossed out whatever the overlay: it
       // needs a technician, and that should read from across the hall.
       if (s == MachineStatus.broken) {
-        canvas.drawLine(rect.topLeft, rect.bottomRight, _broken);
-        canvas.drawLine(rect.bottomLeft, rect.topRight, _broken);
+        _T.line(canvas, rect.topLeft, rect.bottomRight, _broken);
+        _T.line(canvas, rect.bottomLeft, rect.topRight, _broken);
       }
     }
   }
@@ -511,7 +517,7 @@ class FactoryFloorPainter extends CustomPainter {
         if (v <= 0) continue;
         final t = math.sqrt(v / max);
         _tint.color = Color.fromRGBO(255, (200 * (1 - t)).round(), 40, 0.15 + 0.5 * t);
-        canvas.drawRect(
+        _T.rect(canvas, 
             Rect.fromLTWH((cx * k).toDouble(), (cy * k).toDouble(),
                 k.toDouble(), k.toDouble()),
             _tint);
@@ -524,7 +530,7 @@ class FactoryFloorPainter extends CustomPainter {
       if (!vis.contains(b.tile)) continue;
       final d = ix.beltDirAt(b.tile) ?? Dir4.east;
       final t = b.progress - 0.5;
-      canvas.drawCircle(
+      _T.circle(canvas, 
           Offset(b.tile.x + 0.5 + d.dx * t, b.tile.y + 0.5 + d.dy * t),
           0.2,
           _itemPaint(b.item));
@@ -542,8 +548,8 @@ class FactoryFloorPainter extends CustomPainter {
       at = p.tile;
       final o = (n % 3) * 0.28;
       final r = Rect.fromLTWH(p.tile.x + 0.1 + o, p.tile.y + 0.1, 0.5, 0.5);
-      canvas.drawRect(r, _itemPaint(p.item));
-      canvas.drawRect(r, _pileEdge);
+      _T.rect(canvas, r, _itemPaint(p.item));
+      _T.rect(canvas, r, _pileEdge);
     }
   }
 
@@ -561,8 +567,8 @@ class FactoryFloorPainter extends CustomPainter {
       switch (h.kind) {
         case HandlerKind.onFoot:
           // A person: a dot a little smaller than the tile.
-          canvas.drawCircle(at, 0.34, _dot);
-          canvas.drawCircle(at, 0.34, _handlerRing);
+          _T.circle(canvas, at, 0.34, _dot);
+          _T.circle(canvas, at, 0.34, _handlerRing);
         case HandlerKind.palletJack:
           // A jack: a diamond (its tiller and tines read as a point).
           final d = Path()
@@ -580,24 +586,24 @@ class FactoryFloorPainter extends CustomPainter {
               center: at - Offset(sq.width * 0.1, 0),
               width: sq.width * 0.62,
               height: sq.height * 0.7);
-          canvas.drawRRect(
+          _T.rrect(canvas, 
               RRect.fromRectAndRadius(body, const Radius.circular(0.15)),
               _dot);
-          canvas.drawRRect(
+          _T.rrect(canvas, 
               RRect.fromRectAndRadius(body, const Radius.circular(0.15)),
               _handlerRing);
           final fx = body.right;
-          canvas.drawLine(Offset(fx, body.top), Offset(fx, body.bottom), _glyph);
+          _T.line(canvas, Offset(fx, body.top), Offset(fx, body.bottom), _glyph);
           for (final fy in [at.dy - sq.height * 0.18, at.dy + sq.height * 0.18]) {
-            canvas.drawLine(
+            _T.line(canvas, 
                 Offset(fx, fy), Offset(sq.right - 0.08, fy), _glyph);
           }
         case HandlerKind.agv:
           // An AGV: a low square deck with a sensor ring.
           final body = sq.deflate(sq.width * 0.16);
-          canvas.drawRect(body, _dot);
-          canvas.drawRect(body, _handlerRing);
-          canvas.drawCircle(at, body.width * 0.22, _glyph);
+          _T.rect(canvas, body, _dot);
+          _T.rect(canvas, body, _handlerRing);
+          _T.circle(canvas, at, body.width * 0.22, _glyph);
         case HandlerKind.crane:
           // A crane: its bridge spans the bay at the hook's place, the hook
           // a square under it.
@@ -606,16 +612,16 @@ class FactoryFloorPainter extends CustomPainter {
           if (bay != null) {
             final br = craneBridge(h, bay.footprint);
             bridgeRects[h.id] = br;
-            canvas.drawRect(br.deflate(0.08), _bridge);
-            canvas.drawRect(br.deflate(0.08), _bridgeEdge);
+            _T.rect(canvas, br.deflate(0.08), _bridge);
+            _T.rect(canvas, br.deflate(0.08), _bridgeEdge);
           }
           final hook = sq.deflate(0.22);
-          canvas.drawRect(hook, _dot);
-          canvas.drawRect(hook, _handlerRing);
+          _T.rect(canvas, hook, _dot);
+          _T.rect(canvas, hook, _handlerRing);
       }
       final item = h.carrying;
       if (item != null) {
-        canvas.drawRect(
+        _T.rect(canvas, 
             Rect.fromCenter(center: at, width: 0.42, height: 0.36),
             _itemPaint(item));
       }
@@ -624,14 +630,14 @@ class FactoryFloorPainter extends CustomPainter {
         // The charge bar under the vehicle; a ring while it charges.
         final bar = Rect.fromLTWH(sq.left + 0.15, sq.top + 0.05,
             sq.width - 0.3, 0.18);
-        canvas.drawRect(bar, _barBack);
+        _T.rect(canvas, bar, _barBack);
         _bar.color = batteryColor(b);
-        canvas.drawRect(
+        _T.rect(canvas, 
             Rect.fromLTWH(bar.left, bar.top, bar.width * b.clamp(0.0, 1.0),
                 bar.height),
             _bar);
         if (h.state == HandlerState.charging) {
-          canvas.drawRect(sq.deflate(0.04), _chargeRing);
+          _T.rect(canvas, sq.deflate(0.04), _chargeRing);
         }
       }
     }
@@ -640,7 +646,7 @@ class FactoryFloorPainter extends CustomPainter {
   void _paintSelection(Canvas canvas, FloorLayoutIndex ix) {
     final h = c.hover;
     if (h != null && c.tool != FactoryTool.place) {
-      canvas.drawRect(
+      _T.rect(canvas, 
           Rect.fromLTWH(h.x.toDouble(), h.y.toDouble(), 1, 1), _hover);
     }
     final id = c.selectedId;
@@ -648,7 +654,7 @@ class FactoryFloorPainter extends CustomPainter {
     final p = ix.byId(id);
     if (p == null) return;
     final f = p.footprint;
-    canvas.drawRect(
+    _T.rect(canvas, 
         Rect.fromLTWH(f.x0.toDouble(), f.y0.toDouble(), f.w.toDouble(),
                 f.h.toDouble())
             .inflate(0.1),
@@ -660,13 +666,13 @@ class FactoryFloorPainter extends CustomPainter {
       final f = g.rect;
       final r = Rect.fromLTWH(f.x0.toDouble(), f.y0.toDouble(), f.w.toDouble(),
           f.h.toDouble());
-      canvas.drawRect(r, g.check.ok ? _ghostOk : _ghostBad);
-      canvas.drawRect(r, _ghostEdge);
+      _T.rect(canvas, r, g.check.ok ? _ghostOk : _ghostBad);
+      _T.rect(canvas, r, _ghostEdge);
       final p = g.placement;
       if (kSpannedKinds.contains(p.kind)) continue;
       final cx = r.center.dx, cy = r.center.dy;
       final fx = p.dir.dx.toDouble(), fy = p.dir.dy.toDouble();
-      canvas.drawLine(Offset(cx, cy),
+      _T.line(canvas, Offset(cx, cy),
           Offset(cx + fx * (f.w / 2), cy + fy * (f.h / 2)), _ghostEdge);
     }
   }
@@ -696,4 +702,90 @@ class FactoryFloorPainter extends CustomPainter {
   @override
   bool shouldRepaint(FactoryFloorPainter old) =>
       old.c != c || old.cache != cache;
+}
+
+/// Draws rects, rounded rects, circles, ovals and lines as TESSELLATED
+/// filled paths.
+///
+/// On Windows the engine runs Impeller on GLES with its SDF shape renderer
+/// ("OpenGLESSDF"), which anti-aliases those primitives with `fwidth`, and
+/// `fwidth` overestimates ~10x there (memory: gles-fwidth-unusable). At a
+/// floor's tile-unit scale every thin stroke smeared into a wide blur: the
+/// grid turned the dark floor white, the hall wall drew a halo, and a
+/// forklift's outlined body became a black blob. Filled paths are
+/// tessellated, not SDF-shaded, so they draw true. A stroke becomes an
+/// even-odd ring of its outer and inner outline; a line, a quad its width.
+abstract final class _T {
+  static bool _stroked(Paint p) => p.style == PaintingStyle.stroke;
+
+  /// Half a stroke's width; a hairline (0) is drawn at a 20th of a tile.
+  static double _half(Paint p) =>
+      (p.strokeWidth <= 0 ? 0.05 : p.strokeWidth) / 2;
+
+  static Paint _asFill(Paint p) => Paint()
+    ..color = p.color
+    ..shader = p.shader
+    ..blendMode = p.blendMode
+    ..isAntiAlias = p.isAntiAlias;
+
+  static void rect(Canvas c, Rect r, Paint p) {
+    if (!_stroked(p)) {
+      c.drawPath(Path()..addRect(r), p);
+      return;
+    }
+    final h = _half(p);
+    c.drawPath(
+        Path()
+          ..fillType = PathFillType.evenOdd
+          ..addRect(r.inflate(h))
+          ..addRect(r.deflate(h)),
+        _asFill(p));
+  }
+
+  static void rrect(Canvas c, RRect r, Paint p) {
+    if (!_stroked(p)) {
+      c.drawPath(Path()..addRRect(r), p);
+      return;
+    }
+    final h = _half(p);
+    c.drawPath(
+        Path()
+          ..fillType = PathFillType.evenOdd
+          ..addRRect(r.inflate(h))
+          ..addRRect(r.deflate(h)),
+        _asFill(p));
+  }
+
+  static void oval(Canvas c, Rect r, Paint p) {
+    if (!_stroked(p)) {
+      c.drawPath(Path()..addOval(r), p);
+      return;
+    }
+    final h = _half(p);
+    c.drawPath(
+        Path()
+          ..fillType = PathFillType.evenOdd
+          ..addOval(r.inflate(h))
+          ..addOval(r.deflate(h)),
+        _asFill(p));
+  }
+
+  static void circle(Canvas c, Offset at, double radius, Paint p) =>
+      oval(c, Rect.fromCircle(center: at, radius: radius), p);
+
+  static void line(Canvas c, Offset a, Offset b, Paint p) {
+    final d = b - a;
+    final len = d.distance;
+    if (len <= 0) return;
+    final h = _half(p);
+    final n = Offset(-d.dy / len * h, d.dx / len * h);
+    c.drawPath(
+        Path()
+          ..moveTo(a.dx + n.dx, a.dy + n.dy)
+          ..lineTo(b.dx + n.dx, b.dy + n.dy)
+          ..lineTo(b.dx - n.dx, b.dy - n.dy)
+          ..lineTo(a.dx - n.dx, a.dy - n.dy)
+          ..close(),
+        _asFill(p));
+  }
 }
