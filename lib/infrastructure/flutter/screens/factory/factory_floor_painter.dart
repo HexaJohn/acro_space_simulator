@@ -371,6 +371,9 @@ class FactoryFloorPainter extends CustomPainter {
   static final Paint _broken = _stroke(const Color(0xFFE53935), 0.18);
   static final Paint _select = _stroke(const Color(0xFF4FC3F7), 0.15);
   static final Paint _hover = _stroke(const Color(0x60FFFFFF), 0.06);
+  /// The product tree's highlighted recipe: amber, thicker than the
+  /// selection (0.15) so the two read apart when they land on one machine.
+  static final Paint _highlight = _stroke(const Color(0xFFFFC107), 0.22);
   static final Paint _ghostOk = _fill(_okGhost);
   static final Paint _ghostBad = _fill(_badGhost);
   static final Paint _ghostEdge = _stroke(const Color(0xC0FFFFFF), 0.06);
@@ -648,6 +651,20 @@ class FactoryFloorPainter extends CustomPainter {
     if (h != null && c.tool != FactoryTool.place) {
       _T.rect(canvas, 
           Rect.fromLTWH(h.x.toDouble(), h.y.toDouble(), 1, 1), _hover);
+    }
+    final hr = c.highlightRecipe;
+    if (hr != null) {
+      for (final m in ix.machines) {
+        if (m.recipe != hr) continue;
+        final f = m.footprint;
+        // Outset past the selection ring (0.1) so both stay visible.
+        _T.rect(
+            canvas,
+            Rect.fromLTWH(f.x0.toDouble(), f.y0.toDouble(), f.w.toDouble(),
+                    f.h.toDouble())
+                .inflate(0.3),
+            _highlight);
+      }
     }
     final id = c.selectedId;
     if (id == null) return;

@@ -33,11 +33,19 @@
 /// them, so a drag on the floor can't swallow a click on a panel; and it
 /// filters buttons itself — primary edits (or pans empty floor with the
 /// Select tool), middle pans, and the right button does nothing at all.
+///
+/// "Product tree" in the header opens [ProductTreePanel] over the right of
+/// the body: the full flow from raw material to any good, across plants.
+/// It is stacked as a SIBLING above the canvas row (never inside the
+/// canvas [Listener]) for the same reason, and owns the keyboard while it
+/// has focus, so typing in its search never rotates or deletes on the
+/// floor.
 library;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:flutter/services.dart';
 
 import '../../../../domain/colony/city/factory/factory_capex.dart';
 import '../../../../domain/colony/city/factory/factory_colony_port.dart';
@@ -52,6 +60,7 @@ import '../../../../domain/colony/city/factory/floor_blueprint.dart';
 import '../app_theme.dart';
 import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
+import 'product_tree_panel.dart';
 
 /// Width of the palette column, logical px.
 const double kPaletteWidth = 212;
@@ -121,6 +130,33 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   /// Static-layer builds so far (a test checks the cache holds).
   int get layerBuilds => _cache.builds;
 
+  /// The product tree panel is showing.
+  bool treeOpen = false;
+
+  void openProductTree() => setState(() => treeOpen = true);
+
+  /// Closes the panel, drops its floor highlight, and hands the keyboard
+  /// back to the editor (the panel held it).
+  void closeProductTree() {
+    if (!treeOpen) return;
+    setState(() => treeOpen = false);
+    controller.setHighlightRecipe(null);
+    _focus.requestFocus();
+  }
+
+  KeyEventResult _onKey(KeyEvent e) {
+    // Esc closes the topmost thing first: an open panel, then the tool.
+    if (treeOpen &&
+        e is KeyDownEvent &&
+        e.logicalKey == LogicalKeyboardKey.escape) {
+      closeProductTree();
+      return KeyEventResult.handled;
+    }
+    return controller.handleKey(e)
+        ? KeyEventResult.handled
+        : KeyEventResult.ignored;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -183,30 +219,48 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
         child: Focus(
           focusNode: _focus,
           autofocus: true,
-          onKeyEvent: (_, e) => controller.handleKey(e)
-              ? KeyEventResult.handled
-              : KeyEventResult.ignored,
+          onKeyEvent: (_, e) => _onKey(e),
           child: Column(
             children: [
               _TopBar(
                   c: controller,
                   title: widget.title,
                   onBack: widget.onClose,
+                  treeOpen: treeOpen,
+                  onProductTree: () =>
+                      treeOpen ? closeProductTree() : openProductTree(),
                   onSave: widget.onSaveBlueprint == null
                       ? null
                       : () => widget.onSaveBlueprint!(
                           widget.sim.blueprint.copy())),
               _CostStrip(c: controller),
               Expanded(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    SizedBox(
-                        width: kPaletteWidth, child: _Palette(c: controller)),
-                    Expanded(child: _canvas()),
-                    SizedBox(
-                        width: kSidePanelWidth,
-                        child: _SidePanel(c: controller)),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SizedBox(
+                            width: kPaletteWidth,
+                            child: _Palette(c: controller)),
+                        Expanded(child: _canvas()),
+                        SizedBox(
+                            width: kSidePanelWidth,
+                            child: _SidePanel(c: controller)),
+                      ],
+                    ),
+                    // Above the canvas row, beside its Listener: see the
+                    // library doc.
+                    if (treeOpen)
+                      Positioned(
+                        top: 0,
+                        bottom: 0,
+                        right: 0,
+                        width: kProductTreeWidth,
+                        child: ProductTreePanel(
+                            c: controller, onClose: closeProductTree),
+                      ),
                   ],
                 ),
               ),
@@ -303,10 +357,16 @@ class _TopBar extends StatelessWidget {
       {required this.c,
       required this.title,
       required this.onSave,
+      required this.treeOpen,
+      required this.onProductTree,
       this.onBack});
   final FactoryEditorController c;
   final String title;
   final VoidCallback? onSave;
+
+  /// The product tree panel is open (its button shows pressed).
+  final bool treeOpen;
+  final VoidCallback onProductTree;
 
   /// The host's close; null pops the route.
   final VoidCallback? onBack;
@@ -379,6 +439,15 @@ class _TopBar extends StatelessWidget {
                     ),
                 ]),
               ),
+            ),
+            TextButton.icon(
+              key: const Key('product-tree-button'),
+              onPressed: onProductTree,
+              icon: Icon(Icons.account_tree,
+                  color: treeOpen ? AppTheme.accent : AppTheme.text),
+              label: Text('Product tree',
+                  style: TextStyle(
+                      color: treeOpen ? AppTheme.accent : AppTheme.text)),
             ),
             IconButton(
               key: const Key('fit-hall'),

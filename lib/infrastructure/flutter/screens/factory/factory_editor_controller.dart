@@ -359,6 +359,28 @@ class FactoryEditorController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// A recipe id the product tree is pointing at (docs/plans/
+  /// factory-floors.md §4): the painter outlines every machine on this floor
+  /// running it, so "where does this step happen here?" is answered on the
+  /// floor itself. Null = nothing highlighted.
+  String? highlightRecipe;
+
+  void setHighlightRecipe(String? id) {
+    if (highlightRecipe == id) return;
+    highlightRecipe = id;
+    frame.value++;
+    notifyListeners();
+  }
+
+  /// Machines on this floor running [recipeId] (the tree's "N here" hint).
+  int machinesRunning(String recipeId) {
+    var n = 0;
+    for (final m in index.machines) {
+      if (m.recipe == recipeId) n++;
+    }
+    return n;
+  }
+
   // ---- Edits through the sim -------------------------------------------
 
   void _report(EditResult r) {
