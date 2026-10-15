@@ -70,8 +70,10 @@ void main() {
 
   /// A missile is the deepest chain in the game: it must pull in the Rocket
   /// Parts Factory, the Electronics Plant and the Steel Mill, label each,
-  /// end at ore, and spot that the slag one smelter throws off is eaten by
-  /// the tube press feeding another branch of the same tree.
+  /// end at ore, and spot that the smelts the tube branches run for their
+  /// slag throw off the pig iron the electronics branches cast, so those
+  /// branches stop at "from byproduct of steel:smelt" instead of smelting
+  /// again.
   test('missiles span several plants down to ore', () {
     final t = buildProductTree('missiles', ratePerS: 0.15);
     final s = summarizeProductTree(t);
@@ -91,10 +93,92 @@ void main() {
     final consumed = [
       for (final n in t.walk())
         for (final b in n.byproducts)
-          if (b.item == 'slag' && b.consumedInTree) b
+          if (b.item == 'pigIron' && b.consumedInTree) b
     ];
     expect(consumed, isNotEmpty,
-        reason: 'the electronics branch smelts slag the tube branch needs');
+        reason: 'the tube branch smelts pig iron the electronics casts');
+    final pigLeaves = [
+      for (final n in t.walk())
+        if (n.item == 'pigIron') n
+    ];
+    expect(pigLeaves, isNotEmpty);
+    for (final n in pigLeaves) {
+      expect(n.leaf, ProductLeaf.byproduct);
+      expect(n.byproductOf, 'steel:smelt');
+    }
+  });
+
+  /// The summary is the "machines by station kind" overview, so it must
+  /// count the stations a plant would actually build. A missile tree rolls
+  /// steel at two nodes (0.042 + 0.056 crafts/s, 2 s each: 0.39 mill-seconds
+  /// a second at manual speed 0.6 = 0.65 mills) — ONE mill serves both,
+  /// where rounding each node up first said two. The smelter runs at the
+  /// tube branches only (0.5 + 0.3125 crafts/s × 4 s / 0.6 = 5.4 → 6); the
+  /// pig iron the electronics branches need comes off those same smelts as a
+  /// byproduct, so it adds no smelters of its own.
+  test('summary shares stations between nodes running one recipe', () {
+    final t = buildProductTree('missiles', ratePerS: 0.15);
+    final rolls = [
+      for (final n in t.walk())
+        if (n.recipe?.id == 'steel:roll') n
+    ];
+    expect(rolls.length, greaterThan(1),
+        reason: 'the test only means something if the recipe repeats');
+    final s = summarizeProductTree(t);
+    expect(s.machines[StationKind.mill]![MachineMode.manual], 1);
+    expect(s.machines[StationKind.furnace]![MachineMode.manual], 1);
+    expect(s.machines[StationKind.smelter]![MachineMode.manual], 6);
+  });
+
+  /// Same rule on a synthetic graph, so it does not hang on catalog tuning:
+  /// two nodes each needing 0.3 of a press share one, while a DIFFERENT
+  /// recipe on the same kind of station still needs its own.
+  test('summary rounds per recipe, then adds recipes per station kind', () {
+    const top = FactoryRecipe(
+        id: 'x:top', label: 'Top', station: StationKind.assembler,
+        inputs: [ItemQty('a', 1), ItemQty('b', 1)],
+        outputs: [ItemQty('top', 1)], seconds: 1, powerKw: 1);
+    const mkA = FactoryRecipe(
+        id: 'x:a', label: 'A', station: StationKind.press,
+        inputs: [ItemQty('p', 1)], outputs: [ItemQty('a', 1)],
+        seconds: 1, powerKw: 1);
+    const mkB = FactoryRecipe(
+        id: 'x:b', label: 'B', station: StationKind.press,
+        inputs: [ItemQty('p', 1)], outputs: [ItemQty('b', 1)],
+        seconds: 1, powerKw: 1);
+    const mkP = FactoryRecipe(
+        id: 'x:p', label: 'P', station: StationKind.press,
+        inputs: [ItemQty('ore', 1)], outputs: [ItemQty('p', 1)],
+        seconds: 1, powerKw: 1);
+    // 0.18 top/s: x:p runs twice at 0.18 crafts/s → 0.36/0.6 = 0.6 of a
+    // manual press together (one), plus one each for x:a and x:b.
+    final t = buildProductTree('top',
+        ratePerS: 0.18, graph: RecipeGraph([top, mkA, mkB, mkP]));
+    final s = summarizeProductTree(t);
+    expect(s.machines[StationKind.press]![MachineMode.manual], 3);
+  });
+
+  /// A co-product the tree already makes must not be budgeted twice. The
+  /// stamping press throws off one offcut per six chassis, exactly what
+  /// the shield press needs; building a SECOND stamp node (and its whole
+  /// steel → ore chain) for the offcut overstated ore and stations.
+  test('a need met by an earlier byproduct is a leaf, not a second chain',
+      () {
+    final t = buildProductTree('electronics', ratePerS: 0.6);
+    final offcut =
+        t.walk().singleWhere((n) => n.item == 'electronics:offcut');
+    expect(offcut.leaf, ProductLeaf.byproduct);
+    expect(offcut.byproductOf, 'electronics:stamp');
+    expect(offcut.children, isEmpty);
+    final stamps = [
+      for (final n in t.walk())
+        if (n.recipe?.id == 'electronics:stamp') n
+    ];
+    expect(stamps.length, 1, reason: 'one stamping chain, not two');
+    // Ore is then just the chassis steel's: 0.6 units/s takes 0.6
+    // chassis/s → 0.1 stamp crafts/s → 0.5 steel/s → 2/3 ore/s at the
+    // mill's 2 : 1.5 balance (the redundant offcut chain made it more).
+    expect(summarizeProductTree(t).rawPerS['ore'], closeTo(2 / 3, 1e-9));
   });
 
   /// A raw leaf says where the colony gets it: ore from a Mine or Quarry.

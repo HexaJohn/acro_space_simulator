@@ -55,6 +55,14 @@ enum ProductLeaf {
   /// loops, e.g. unpacking a crate the same plant packed). Recursing would
   /// never end, so the branch stops and says so.
   cycle,
+
+  /// An earlier step of this tree already throws the item off as a
+  /// byproduct, at least as fast as this step needs it (the stamping press's
+  /// offcut covers the shield press). Recursing would budget a second,
+  /// redundant chain (another press, mill, furnace, smelter and its ore) for
+  /// something the tree makes anyway, so the branch stops and names the
+  /// recipe that supplies it ([ProductNode.byproductOf]).
+  byproduct,
 }
 
 /// A colony building type that runs a factory chain: the recipe id prefix
@@ -117,8 +125,9 @@ class ProductByproduct {
   final List<String> consumers;
 
   /// True when some step of THIS tree takes it as an input, so a plant
-  /// running the whole tree could feed it back instead of buying it in
-  /// (the raw totals stay GROSS: crediting it is a layout's choice).
+  /// running the whole tree could feed it back instead of buying it in.
+  /// Where it covers a later step's whole need, that step is a
+  /// [ProductLeaf.byproduct] leaf and is not budgeted twice.
   final bool consumedInTree;
 
   ProductByproduct _withConsumed(bool v) => ProductByproduct(
@@ -140,6 +149,7 @@ class ProductNode {
     this.alternatives = const [],
     this.children = const [],
     this.colonySources = const [],
+    this.byproductOf,
   });
 
   /// Where the node sits: item ids from the root joined by '>' (unique in a
@@ -173,6 +183,10 @@ class ProductNode {
   /// For a [ProductLeaf.raw] leaf: labels of the colony buildings whose flat
   /// outputs supply [item]'s commodity, catalog order (e.g. Mine, Quarry).
   final List<String> colonySources;
+
+  /// For a [ProductLeaf.byproduct] leaf: the id of the recipe (at an
+  /// earlier node) whose byproduct covers this need.
+  final String? byproductOf;
 
   FactoryItem? get def => FactoryItems.byId(item);
   String get label => def?.label ?? Commodity.name(item);
@@ -213,7 +227,8 @@ class ProductNode {
           byproducts: byproducts ?? this.byproducts,
           alternatives: alternatives,
           children: children ?? this.children,
-          colonySources: colonySources);
+          colonySources: colonySources,
+          byproductOf: byproductOf);
 
   /// Every node, depth first, parents before children.
   Iterable<ProductNode> walk() sync* {
@@ -393,10 +408,34 @@ ProductNode buildProductTree(String itemId,
   final g = graph ?? RecipeGraph.catalog();
   final onPath = <String>{};
 
+  // Byproduct not yet spoken for: item → (items/s, recipe id that throws it
+  // off). Filled as each making node is built (depth first, so only steps
+  // built EARLIER can cover a later need) and drawn down when a need is
+  // met from it. Only a need the pool covers IN FULL becomes a byproduct
+  // leaf: a partial credit would leave a node whose rate is not what its
+  // parent asked for, which the rows and the mass balance would have to
+  // explain; a short pool is left for the next need instead.
+  final pool = <String, (double, String)>{};
+
+  /// Relative slack on "covers in full": the stamp's 0.025 offcut/s against
+  /// the shield press's 0.025 arrive through different multiply/divide
+  /// orders and can differ in the last bit.
+  const coverEps = 1e-9;
+
   ProductNode build(String item, double rate, String path, String? parent) {
     if (onPath.contains(item)) {
       return ProductNode(
           path: path, item: item, ratePerS: rate, leaf: ProductLeaf.cycle);
+    }
+    final avail = pool[item];
+    if (avail != null && avail.$1 >= rate * (1 - coverEps)) {
+      pool[item] = (avail.$1 - rate, avail.$2);
+      return ProductNode(
+          path: path,
+          item: item,
+          ratePerS: rate,
+          leaf: ProductLeaf.byproduct,
+          byproductOf: avail.$2);
     }
     final producers = g.producersOf(item);
     if (producers.isEmpty) {
@@ -430,6 +469,8 @@ ProductNode buildProductTree(String itemId,
           ratePerS: crafts * o.count,
           consumers: [for (final r in g.usedIn(o.item)) r.id],
           consumedInTree: false));
+      final had = pool[o.item];
+      pool[o.item] = ((had?.$1 ?? 0) + crafts * o.count, had?.$2 ?? chosen.id);
     }
     final plant = plantOfRecipe(chosen.id);
     onPath.add(item);
@@ -481,11 +522,18 @@ class ProductTreeSummary {
   });
 
   /// Raw and import-only leaf items/s, summed over the tree, by item id.
-  /// GROSS: byproducts the tree could recycle are not credited.
+  /// A need an earlier step's byproduct covers in full is a
+  /// [ProductLeaf.byproduct] leaf and adds nothing here; a byproduct that
+  /// only partly covers a need is not credited.
   final Map<String, double> rawPerS;
 
-  /// Whole stations per station kind and mode (each node's own ceiling,
-  /// summed: two recipes never share a machine), station enum order.
+  /// Whole stations per station kind and mode, station enum order. Nodes
+  /// running the SAME recipe share stations (a missile tree rolls steel at
+  /// four nodes, and one mill keeps up with all four), so demand is summed
+  /// per recipe before rounding up; two DIFFERENT recipes never share a
+  /// machine (a station runs one recipe), so each recipe's ceiling is then
+  /// added per kind. Rounding per node instead overstated the stations by
+  /// up to 4x.
   final Map<StationKind, Map<MachineMode, int>> machines;
 
   /// Plants involved, by first appearance (depth first from the root).
@@ -499,6 +547,8 @@ class ProductTreeSummary {
 ProductTreeSummary summarizeProductTree(ProductNode root) {
   final raw = <String, double>{};
   final machines = <StationKind, Map<MachineMode, int>>{};
+  // Recipe id → (recipe, total crafts/s over every node running it).
+  final demand = <String, (FactoryRecipe, double)>{};
   final plants = <ProductPlant>[];
   var cycles = 0;
   for (final n in root.walk()) {
@@ -508,14 +558,26 @@ ProductTreeSummary summarizeProductTree(ProductNode root) {
         raw[n.item] = (raw[n.item] ?? 0) + n.ratePerS;
       case ProductLeaf.cycle:
         cycles++;
+      case ProductLeaf.byproduct:
+        break;
       case ProductLeaf.none:
         final r = n.recipe!;
-        final m = machines.putIfAbsent(r.station, () => {});
-        for (final mode in MachineMode.values) {
-          m[mode] = (m[mode] ?? 0) + n.machinesCeil(mode);
-        }
+        final had = demand[r.id];
+        demand[r.id] = (r, (had?.$2 ?? 0) + n.craftsPerS);
         final p = n.plant;
         if (p != null && !plants.contains(p)) plants.add(p);
+    }
+  }
+  final recipeIds = demand.keys.toList()..sort();
+  for (final id in recipeIds) {
+    final (r, crafts) = demand[id]!;
+    final m = machines.putIfAbsent(r.station, () => {});
+    for (final mode in MachineMode.values) {
+      final need = crafts * r.seconds / mode.speedMult;
+      // Same epsilon as ProductNode.machinesCeil: an exact 2.0000000001
+      // must not become 3.
+      final whole = need <= 0 ? 0 : (need - 1e-9).ceil();
+      m[mode] = (m[mode] ?? 0) + whole;
     }
   }
   final rawKeys = raw.keys.toList()..sort();

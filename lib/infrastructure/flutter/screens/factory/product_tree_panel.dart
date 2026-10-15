@@ -69,6 +69,10 @@ String _fmt(double v) => v >= 100
 
 String _itemLabel(String id) => FactoryItems.byId(id)?.label ?? id;
 
+/// A recipe's display name, falling back to its id for one the table no
+/// longer holds (a synthetic graph in a test).
+String _recipeLabel(String id) => FactoryRecipes.byId(id)?.label ?? id;
+
 String _stationLabel(StationKind s) =>
     s.name[0].toUpperCase() + s.name.substring(1);
 
@@ -516,6 +520,13 @@ class ProductTreePanelState extends State<ProductTreePanel> {
       case ProductLeaf.cycle:
         details.add(_chip('↻ cycle: made further up this branch',
             AppTheme.warn, key: Key('ptree-cycle-${n.path}')));
+      case ProductLeaf.byproduct:
+        details.add(_chip(
+            '↻ from byproduct of ${_recipeLabel(n.byproductOf!)}',
+            AppTheme.accent2,
+            key: Key('ptree-fromby-${n.path}'),
+            tooltip: 'An earlier step already throws this off fast enough; '
+                'no extra machines needed'));
       case ProductLeaf.none:
         details.add(Text(
             '${r!.label} · ${_stationLabel(r.station)} · ${machinesText(n)}',
