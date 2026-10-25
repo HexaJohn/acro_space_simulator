@@ -47,28 +47,39 @@ FloorBlueprint _withRoster(Map<HandlerKind, int> roster) {
       roster: roster);
 }
 
-/// A designer's take on the template: the case carriers replaced by a dock
-/// conveyor and a short belt with an arm into each kettle. Same stations,
-/// same modes, same forklift — only the receiving labour is engineered
-/// away (and paid for in conveyor capex).
+/// A designer's take on the template, laid for ports: the case carriers
+/// replaced by a dock conveyor into a chest, and two arms splitting the
+/// chest onto two short belts into the kettles' INPUT ports (floors have
+/// no splitter, and arms may work chests and belts but never machines).
+/// Both kettles face east so their input ports face the door; their pans
+/// still merge into the filling table's input port. Same stations, same
+/// modes, same forklift — only the receiving labour is engineered away
+/// (and paid for in conveyor capex).
 FloorBlueprint _improved() {
   final t = rationsfactoryTemplate();
   final l = TemplateLayout();
-  // The dock unloads onto a belt along the kettles' north side.
-  l.add(EntityKind.receivingDock, 0, 11, item: 'food');
-  l.beltEast(2, 4, 11);
-  l.arm(2, 10, Dir4.south); // into kettle A
-  l.machine(1, 6, RationsRecipes.cook);
-  l.arm(5, 7, Dir4.east);
-  l.machine(6, 10, RationsRecipes.cook);
-  l.arm(5, 11, Dir4.east); // belt end into kettle B
-  l.arm(7, 9, Dir4.south);
-  l.machine(6, 6, RationsRecipes.fill);
-  l.add(EntityKind.aisle, 9, 2, span: (2, 7));
-  l.add(EntityKind.chargingBay, 11, 6);
-  l.machine(11, 2, RationsRecipes.retort);
-  l.arm(12, 1, Dir4.south);
-  l.add(EntityKind.shippingDock, 12, 0, item: 'rations');
+  // Door (1,6) sets cases straight into the chest (3,6); arms south and
+  // north of it.
+  l.add(EntityKind.receivingDock, 1, 6, item: 'food');
+  l.add(EntityKind.chest, 3, 6);
+  l.arm(3, 5, Dir4.south);
+  l.beltRun(4, 4, 3, Dir4.south);
+  l.add(EntityKind.belt, 3, 3); // into kettle A's input port (4,3)
+  l.arm(3, 7, Dir4.north);
+  l.beltRun(8, 8, 3, Dir4.north);
+  l.add(EntityKind.belt, 3, 9); // into kettle B's input port (4,9)
+  l.machine(4, 2, RationsRecipes.cook);
+  l.machine(4, 8, RationsRecipes.cook);
+  // Pans: kettle B's down column 8, kettle A's out (8,3), both east into
+  // the table's input port.
+  l.beltRun(9, 4, 8, Dir4.south);
+  l.beltEast(8, 9, 3);
+  l.machine(10, 2, RationsRecipes.fill);
+  l.add(EntityKind.aisle, 11, 0, span: (8, 2));
+  l.add(EntityKind.chargingBay, 19, 0);
+  l.machine(16, 2, RationsRecipes.retort);
+  l.add(EntityKind.belt, 20, 3);
+  l.add(EntityKind.shippingDock, 21, 3, item: 'rations');
   return FloorBlueprint(
     name: 'Rations Plant (designed)',
     plantType: kRationsType,
@@ -85,7 +96,7 @@ void main() {
     base = _measure(rationsfactoryTemplate());
   });
 
-  test('steady state is the spec rate within 5%, in commodity units', skip: 'awaiting port redraw (#19)', () {
+  test('steady state is the spec rate within 5%, in commodity units', () {
     // Spec: 1.0 food → 0.8 rations per second, over the spec's ≥ 300 s
     // warm-up and ≥ 1200 s window.
     expect(_spec.inputs, {'food': 1.0});
@@ -97,7 +108,7 @@ void main() {
     expect(base.outPerS['rations']!, closeTo(0.8, 0.04));
   });
 
-  test('the colony\'s own measurement reads the spec rate too', skip: 'awaiting port redraw (#19)', () {
+  test('the colony\'s own measurement reads the spec rate too', () {
     // The colony measures every assigned floor with
     // MeasureSettings.standard (one minute of warm-up from an empty floor,
     // at most five minutes measured). A template that is only on spec over
@@ -152,7 +163,7 @@ void main() {
         identical(FactoryItems.byId('rations'), FactoryItems.rations), isTrue);
   });
 
-  test('realistic: people and vehicles move the freight, not lights-out', skip: 'awaiting port redraw (#19)', () {
+  test('realistic: people and vehicles move the freight, not lights-out', () {
     // The user's brief: workers and vehicles move freight; very few plants
     // run from unloading to loading without anyone lifting a finger. So
     // every station is crewed, people carry the cases in, and the forklift
@@ -202,7 +213,7 @@ void main() {
     }
   });
 
-  test('no padded headcount: one carrier fewer falls short', skip: 'awaiting port redraw (#19)', () {
+  test('no padded headcount: one carrier fewer falls short', () {
     // Every carrier is needed: the walk from the cold store is tuned so
     // eight carry ~0.94 food/s and only nine hold the spec's 1.0. A
     // template that held the rate with fewer would be padding its jobs.
@@ -215,7 +226,7 @@ void main() {
     expect(base.inPerS['food']!, greaterThan(0.99));
   });
 
-  test('fine, not great: a designed floor beats it on labour', skip: 'awaiting port redraw (#19)', () {
+  test('fine, not great: a designed floor beats it on labour', () {
     // The Reward lever (§3): replace the case carriers with a dock
     // conveyor and arms, and the same rations come out with half the
     // workforce freed for the rest of the colony.
@@ -231,7 +242,7 @@ void main() {
         reason: '${r.jobs} jobs against the template\'s ${base.jobs}');
   });
 
-  test('deterministic, and save/load mid-run continues identically', skip: 'awaiting port redraw (#19)', () {
+  test('deterministic, and save/load mid-run continues identically', () {
     // Two builds must measure the same (aggregate mode caches the
     // measurement), and a mid-run save — cases in carriers' hands, a cart
     // on the forklift — must resume bit for bit.
@@ -256,7 +267,7 @@ void main() {
     expect(pb.given, isNotEmpty);
   });
 
-  test('conserves every commodity unit over its own run', skip: 'awaiting port redraw (#19)', () {
+  test('conserves every commodity unit over its own run', () {
     // Cases carried, food cooked, steam vented: held + shipped − received
     // − what crafts made must stay zero, checked as it runs.
     final f = FactoryFloor.fromBlueprint(rationsfactoryTemplate());

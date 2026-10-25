@@ -36,34 +36,42 @@
 ///
 /// Mass balance per second at the spec rate:
 ///
-///     1.0 food (cases) ──walkers──► 2 kettles
+///     1.0 food (cases) ──walkers──► 2 kettles' hand ports
 ///         ──cook──► 0.2 pans of stew (4 portions each)
 ///         │         └─► 0.2 food/s boiled off as steam (no item)
-///         ──arms──► filling table ──fill & seal──► 0.1 retort carts (8)
-///         ──forklift──► retort ──retort & case──► 0.8 rations
-///         ──arm──► shipping door
+///         ──belts──► filling table's input port
+///         ──fill & seal──► 0.1 retort carts (8 pouches each)
+///         ──forklift, hand port to hand port──► retort
+///         ──retort & case──► 0.8 rations ──belt──► shipping door
 ///
 /// The 20% the plant "loses" is moisture boiled off in the kettles, not a
 /// byproduct item, so the plant takes nothing but food and ships nothing
-/// but rations.
+/// but rations. Measured over the long window: 1.00 food in, 0.79 rations
+/// out (the last 1% is the line's fill, still being topped up).
 ///
 /// ## The hall: 104 × 124 m, the line in the south-west corner
 ///
-/// A food plant's realistic mix (§3 "Template plants", the user's brief:
-/// people and vehicles move freight, very few plants are lights-out):
+/// Laid for EXPLICIT PORTS (docs/plans/factory-floors.md §10 item 19,
+/// `station_ports.dart`): belts connect at a station's input and output
+/// ports, handlers work it at its hand port only, and no arm touches a
+/// machine. A food plant's realistic mix (§3 "Template plants", the user's
+/// brief: people and vehicles move freight, very few plants are
+/// lights-out):
 ///
 /// * **Receiving is people.** Cases come through the west door into a
 ///   small cold-store bay; a crew of nine carries them, one at a time, to
-///   whichever kettle calls for food. That is the template's real handling
-///   work and it is all needed: measured, eight carriers bring 0.94
-///   food/s, nine the full 1.0 (see [kRationsWalkers]).
-/// * **Arms where the flow is steady and short.** Each kettle tips its
-///   pans straight onto the filling table between them by arm; nobody
-///   carries hot stew.
+///   whichever kettle's hand port calls for food. The two kettles face
+///   each other across the bay so both ports are two tiles from it (see
+///   [rationsfactoryTemplate]). That is the template's real handling work
+///   and it is all needed: measured, eight carriers bring 0.94 food/s,
+///   nine the full 1.0 (see [kRationsWalkers]).
+/// * **Belts where the flow is steady.** Each kettle pushes its pans out
+///   of its front port onto a belt, and the two runs merge into the
+///   filling table's input port; nobody carries hot stew.
 /// * **A forklift for the carts.** The filling table racks sealed pouches
-///   on wheeled retort carts; a forklift runs each cart down the aisle
-///   beside the table to the retort, a few tiles south (one every 10 s,
-///   ~30% of the forklift's time), and charges at a bay beside the aisle.
+///   on wheeled retort carts and offers them at its hand port; a forklift
+///   on the aisle below runs each cart to the retort's hand port (one
+///   every 10 s), and charges at a bay at the aisle's end.
 /// * **Manual stations.** Kettles, filling table and retort are hand work,
 ///   two people each.
 ///
@@ -76,8 +84,8 @@
 /// washable food-grade hall (~32 ore): the line itself is small, the rest
 /// is the dry store, packaging store, washdown and staff areas a food
 /// plant needs but the floor sim doesn't model as entities. Then the
-/// stations (5.5), the forklift and its charger (1.2), arms, doors and
-/// aisle (~1.1): ~40 ore against the spec's default 40.
+/// stations, the forklift and its charger, the 20 belt tiles, the doors
+/// and the aisle: 40.4 ore against the spec's default 40.
 library;
 
 import '../factory_catalog.dart';
@@ -182,46 +190,83 @@ void registerRationsChain() {
 /// areas any food plant has.
 const HallSize kRationsHall = HallSize(52, 62);
 
-/// Workers carrying food cases from the cold-store bay to the kettles,
-/// 1.0 cases/s in all. Measured: eight bring 0.94 food/s (6% short), nine
-/// the full rate — every one of them is working, none is padding.
+/// Workers carrying food cases from the cold-store bay to the kettles'
+/// hand ports, 1.0 cases/s in all. Measured (long window): eight bring
+/// 0.94 food/s (6% short), nine the full rate — every one of them is
+/// working, none is padding.
 const int kRationsWalkers = 9;
 
-/// One forklift runs retort carts from the filling table to the retort:
-/// one every 10 s, a few tiles down the aisle, ~30% of its time.
+/// One forklift runs retort carts from the filling table's hand port to
+/// the retort's, five tiles along the aisle: one cart every 10 s.
 const int kRationsForklifts = 1;
 
-/// Row of the cold-store bay and the receiving door. Its distance from the
-/// kettles is the carriers' walk: one row nearer and seven carriers do it,
-/// two rows further and nine manage only 0.67 food/s.
-const int _recvY = 12;
+/// Row of the receiving door and the cold-store bay: the gap row between
+/// the two kettles, where both open their hand ports. The bay's reach to
+/// those two tiles is the carriers' walk (see [rationsfactoryTemplate]).
+const int _recvY = 6;
 
 /// A fresh Rations Plant template (the caller may edit it).
+///
+/// The tiles (x east, y north; every connection a port of
+/// `station_ports.dart`, the hall's south-west corner):
+///
+///     y 8..11  kettle B (east-facing): hand port (5,8) below it, trays
+///              out its front port (7,9) onto the collector at (8,9)
+///     y 6..7   door (0,6) > bay (2..4,6); carriers stand at (5,7) for
+///              kettle B and at (6,6) for kettle A
+///     y 2..5   kettle A (WEST-facing, so its hand port (6,5) opens UP
+///              into the gap): trays out its front port (4,4) onto (3,4)
+///     y 2..4   filling table (10..12, 2..4), retort (16..19, 2..4)
+///     y 0..1   tray belt from kettle A along row 1; the forklift aisle
+///              (11..18, 0..1) under both hand ports, charger (19..20)
+///
+/// * **The kettles face each other across a two-row gap.** A kettle's
+///   hand port is on its belly, so kettle B (facing east) opens it down
+///   onto row 7 and kettle A, turned to face WEST, opens it up onto row
+///   6. The cold-store bay sits in that gap inside the west door, one
+///   case per tile row: two tiles from both ports. The bay's span is the
+///   tuning knob: a 2-tile bay starves nine carriers at 0.78 food/s, a
+///   3 x 2 one lets eight carry it all.
+/// * **Trays ride belts to the filling table.** Kettle A's front port
+///   faces west, so its pans go down column 3, east along row 1 and up
+///   column 9; kettle B's go down column 8 and turn east on row 3. The
+///   two meet at (9,3), the table's input port (10,3): a side merge, no
+///   arm (arms no longer touch machines).
+/// * **The forklift works hand ports.** The table has no belt at its
+///   output port, so its carts wait at its hand port (12,2) and the
+///   forklift, standing on the aisle at (12,1), takes them to the
+///   retort's hand port (17,2), outside tile (17,1).
+/// * **Rations leave by the retort's output port** (19,3) onto a belt
+///   into the shipping door at (21,3). The retort's byproduct port (18,4)
+///   is unused: steam is no item.
 FloorBlueprint rationsfactoryTemplate() {
   ensureFactoryCatalog();
   registerRationsChain();
   final l = TemplateLayout();
-  // Receiving: the cold-store bay inside the west door (2 × 2 tiles, eight
+  // Receiving: the cold-store bay inside the west door (3 × 1 tiles, six
   // cases). It is also the first staging by id, so it is where idle
   // carriers wait and new hires start.
-  l.add(EntityKind.staging, 2, _recvY, span: (2, 2));
+  l.add(EntityKind.staging, 2, _recvY, span: (3, 1));
   l.add(EntityKind.receivingDock, 0, _recvY, item: 'food');
-  // The kitchen: kettle A west of the filling table, kettle B north of it,
-  // each tipping its pans onto the table by arm.
-  l.machine(1, 6, RationsRecipes.cook);
-  l.arm(5, 7, Dir4.east);
-  l.machine(6, 10, RationsRecipes.cook);
-  l.arm(7, 9, Dir4.south);
-  l.machine(6, 6, RationsRecipes.fill);
-  // The forklift aisle from beside the filling table down to the retort,
-  // with the charger beside it.
-  l.add(EntityKind.aisle, 9, 2, span: (2, 7));
-  l.add(EntityKind.chargingBay, 11, 6);
-  // The retort against the south wall; an arm hands its cased rations
-  // straight to the shipping door.
-  l.machine(11, 2, RationsRecipes.retort);
-  l.arm(12, 1, Dir4.south);
-  l.add(EntityKind.shippingDock, 12, 0, item: 'rations');
+  // Kettle A faces west, kettle B east: both hand ports open on the gap.
+  l.machine(4, 2, RationsRecipes.cook, dir: Dir4.west);
+  l.machine(4, 8, RationsRecipes.cook);
+  // Kettle A's pans: (3,4) down to (3,2), east along row 1, up to (9,2).
+  l.beltRun(4, 2, 3, Dir4.south);
+  l.beltEast(3, 8, 1);
+  l.beltRun(1, 2, 9, Dir4.north);
+  // Kettle B's pans: (8,9) down to (8,4), then east over (8,3) and into
+  // the table's input port from (9,3), where kettle A's run joins.
+  l.beltRun(9, 4, 8, Dir4.south);
+  l.beltEast(8, 9, 3);
+  l.machine(10, 2, RationsRecipes.fill);
+  // The forklift aisle under the table's and the retort's hand ports, the
+  // charger at its east end.
+  l.add(EntityKind.aisle, 11, 0, span: (8, 2));
+  l.add(EntityKind.chargingBay, 19, 0);
+  l.machine(16, 2, RationsRecipes.retort);
+  l.add(EntityKind.belt, 20, 3);
+  l.add(EntityKind.shippingDock, 21, 3, item: 'rations');
   return FloorBlueprint(
     name: 'Rations Plant',
     plantType: kRationsType,
