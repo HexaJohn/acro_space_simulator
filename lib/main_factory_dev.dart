@@ -25,11 +25,13 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
+import 'domain/colony/city/factory/dock_logistics.dart';
 import 'domain/colony/city/factory/factory_floor.dart';
 import 'domain/colony/city/factory/factory_grid.dart';
 import 'domain/colony/city/factory/factory_scenario.dart';
 import 'domain/colony/city/factory/factory_templates.dart';
 import 'domain/colony/city/factory/floor_blueprint.dart';
+import 'domain/colony/city/factory/supply_world.dart';
 import 'infrastructure/flutter/screens/factory/factory_floor_screen.dart';
 
 /// Placed-plant types that may get a floor (docs/plans/factory-floors.md
@@ -97,7 +99,14 @@ class FactoryDevAppState extends State<FactoryDevApp> {
                 name: 'Blank hall ${blankSize.w}×${blankSize.h}',
                 hall: blankSize)
             : factoryTemplateFor(choice)!;
-    return FactoryFloor.fromBlueprint(bp);
+    // On orders (§10 items 4, 11). A template starts on unlimited supply,
+    // the harness's job being to measure it (Orders ▸ "Stock every dock"
+    // then the switch off runs it on trucks); a blank hall and the
+    // tutorial start the way a player does, on finite suppliers.
+    final template = sc == null && choice != kBlankHall;
+    return FactoryFloor.fromBlueprint(bp)
+      ..logistics = FloorLogistics(
+          world: SupplyWorld.sandbox(unlimited: template));
   }
 
   void pick(String c, [HallSize? size]) => setState(() {

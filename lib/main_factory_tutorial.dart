@@ -21,9 +21,11 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'domain/colony/city/factory/dock_logistics.dart';
 import 'domain/colony/city/factory/factory_floor.dart';
 import 'domain/colony/city/factory/factory_scenario.dart';
 import 'domain/colony/city/factory/factory_unlocks.dart';
+import 'domain/colony/city/factory/supply_world.dart';
 import 'infrastructure/flutter/screens/factory/factory_floor_screen.dart';
 
 void main() {
@@ -41,7 +43,10 @@ class _FactoryTutorialAppState extends State<FactoryTutorialApp> {
   final FactoryScenario scenario = rocketPartsScenario();
   late final FactoryFloor floor = FactoryFloor.fromBlueprint(
       scenario.blueprint(),
-      unlocks: FactoryUnlocks.all);
+      unlocks: FactoryUnlocks.all)
+    // Goods come by truck from finite suppliers (§10 items 4, 11); the
+    // Orders panel's switch brings back the old unlimited feed.
+    ..logistics = FloorLogistics(world: SupplyWorld.sandbox());
 
   @override
   Widget build(BuildContext context) {

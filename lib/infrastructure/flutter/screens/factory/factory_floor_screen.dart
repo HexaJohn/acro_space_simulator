@@ -82,6 +82,7 @@ import '../app_theme.dart';
 import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
 import 'floor_item_overlays.dart';
+import 'orders_panel.dart';
 import 'floor_layout_index.dart';
 import 'product_tree_panel.dart';
 import 'recipe_info_panel.dart';
@@ -189,6 +190,17 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   /// the body, so opening one closes the other.
   bool infoOpen = false;
 
+  /// The Orders panel is showing (§10 item 4; only for a floor on orders).
+  bool ordersOpen = false;
+
+  void toggleOrders() => setState(() {
+        ordersOpen = !ordersOpen;
+        if (ordersOpen) {
+          infoOpen = false;
+          if (treeOpen) closeProductTree();
+        }
+      });
+
   void openProductTree() {
     if (!widget.debugTools) return;
     setState(() {
@@ -202,6 +214,7 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
     setState(() {
       infoOpen = true;
       treeOpen = false;
+      ordersOpen = false;
     });
   }
 
@@ -333,6 +346,9 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
                       : null,
                   onRecipeInfo: () =>
                       infoOpen ? closeRecipeInfo() : openRecipeInfo(),
+                  ordersOpen: ordersOpen,
+                  onOrders:
+                      logisticsOf(controller) == null ? null : toggleOrders,
                   onSave: widget.onSaveBlueprint == null
                       ? null
                       : () => widget.onSaveBlueprint!(
@@ -377,6 +393,19 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
                             c: controller,
                             onClose: closeRecipeInfo,
                             onItem: runner?.noteRecipeInfo),
+                      ),
+                    if (ordersOpen)
+                      Positioned(
+                        top: 0,
+                        bottom: 0,
+                        right: 0,
+                        width: kOrdersPanelWidth,
+                        child: OrdersPanel(
+                            c: controller,
+                            onClose: () {
+                              setState(() => ordersOpen = false);
+                              _focus.requestFocus();
+                            }),
                       ),
                   ],
                 ),
@@ -586,6 +615,8 @@ class _TopBar extends StatelessWidget {
       required this.infoOpen,
       required this.onProductTree,
       required this.onRecipeInfo,
+      this.ordersOpen = false,
+      this.onOrders,
       this.onBack});
   final FactoryEditorController c;
   final String title;
@@ -600,6 +631,10 @@ class _TopBar extends StatelessWidget {
   /// The Recipe info panel is open (its button shows pressed).
   final bool infoOpen;
   final VoidCallback onRecipeInfo;
+
+  /// The Orders panel (null hides the button: the floor is not on orders).
+  final bool ordersOpen;
+  final VoidCallback? onOrders;
 
   /// The host's close; null pops the route.
   final VoidCallback? onBack;
@@ -689,6 +724,16 @@ class _TopBar extends StatelessWidget {
                         color: infoOpen ? AppTheme.accent : AppTheme.text)),
               ),
             ),
+            if (onOrders case final orders?)
+              TextButton.icon(
+                key: const Key('orders-button'),
+                onPressed: orders,
+                icon: Icon(Icons.local_shipping,
+                    color: ordersOpen ? AppTheme.accent : AppTheme.text),
+                label: Text('Orders',
+                    style: TextStyle(
+                        color: ordersOpen ? AppTheme.accent : AppTheme.text)),
+              ),
             if (onProductTree case final open?)
               HintPulse(
                 on: c.hinted(ScenarioHintTarget.productTree),
@@ -1101,6 +1146,9 @@ class _Inspector extends StatelessWidget {
           const Text('Picks', style: AppTheme.body),
           _ArmFilter(c: c, arm: p),
         ],
+        if (p.kind == EntityKind.receivingDock ||
+            p.kind == EntityKind.shippingDock)
+          DockLogisticsCard(c: c, dock: p),
         const SizedBox(height: 6),
         if (keys.isEmpty)
           const Text('Empty', style: AppTheme.dim)

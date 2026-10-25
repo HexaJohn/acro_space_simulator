@@ -674,9 +674,12 @@ FactoryScenario rocketPartsScenario() {
         title: 'Bring tubes in',
         body: 'Pick Receiving Dock, set its item to '
             '${FactoryItems.tubes.pickerLabel}, and place it '
-            'against a wall of the hall, facing in (R rotates it). A dock '
-            'unloads only onto something in front of its open end, so '
-            'nothing arrives yet.',
+            'on a wall of the hall (it snaps to the nearest one). Goods come '
+            'by truck: open Orders in the header and order a truck of Tubes '
+            'to this dock, and tick Dock conveyor in the Inspector so the '
+            'truck unloads itself (or hire a Pallet Jack to unload it). A '
+            'dock sets goods down only onto something in front of its '
+            'loading area, so nothing arrives yet.',
         hint: ScenarioHint(
             'DOCKS ▸ Receiving Dock, item: ${FactoryItems.tubes.pickerLabel}',
             {ScenarioHintTarget.receivingDock}),
