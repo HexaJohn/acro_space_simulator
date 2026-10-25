@@ -163,7 +163,12 @@ extension CityFactories on CitySim {
       handlers.add(HandlerKind.agv);
       modes.add(MachineMode.automated);
     }
-    return FactoryUnlocks(handlers: handlers, modes: modes);
+    return FactoryUnlocks(
+        handlers: handlers,
+        modes: modes,
+        // Goods not invented here yet: no recipe may make or use one
+        // (docs/plans/dynamic-markets.md phase 2).
+        uninvented: colonyEconomy.tech.unavailableHere);
   }
 
   // ---- blueprint choice and cost -----------------------------------------

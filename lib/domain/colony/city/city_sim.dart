@@ -55,7 +55,7 @@ import 'site_access/site_access_book.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
 import 'economy/colony_economy.dart';
-import 'economy/local_prices.dart' show kKjPerPowerUnitS;
+import 'economy/local_prices.dart' show kKjPerPowerUnitS, kNonRecipeTypes;
 import 'factory/factory_floors.dart';
 import 'traffic/city_agents.dart';
 import '../../terrain/terrain_field.dart';
@@ -1396,7 +1396,13 @@ class CitySim {
     return cap == null ? 0.5 : math.min(0.5, cap);
   }
 
-  bool unlocked(CityBuildingSpec s) => ignoreUnlocks || population >= s.unlockPop;
+  /// Whether [s] may be built: its population milestone is reached and
+  /// every good it makes or uses has been invented for this colony
+  /// (docs/plans/dynamic-markets.md phase 2; [inventionRefusal] says why
+  /// not). The unlock cheat waives both.
+  bool unlocked(CityBuildingSpec s) =>
+      ignoreUnlocks ||
+      (population >= s.unlockPop && inventionRefusal(s) == null);
 
   // --- Difficulty-derived modifiers ---
   /// Bounty: production rate multiplier. 0 -> 0.5×, 1 -> 2×.
@@ -1690,10 +1696,15 @@ class CitySim {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
         flow(k, -v * run);
       });
+      final recipe = !kNonRecipeTypes.contains(s.type);
       s.outputs.forEach((k, v) {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
         flow(k, made, isLifeSupport(s));
+        // What the colony itself made is its learning-curve experience
+        // (`economy/learning.dart`); a spaceport's landings and a
+        // terraformer's sky are not.
+        if (recipe) colonyEconomy.addMade(k, made, dt);
         if (s.type == 'o2harvester' && k == Commodity.oxygen) {
           harvested += made;
           harvestedRaw += v * run;
@@ -1724,10 +1735,15 @@ class CitySim {
         stock[k] = (stockOf(k) - v * run * dt).clamp(0, 1e12);
         flow(k, -v * run);
       });
+      final recipe = !kNonRecipeTypes.contains(s.type);
       s.outputs.forEach((k, v) {
         final made = v * run * biomeMult(k) * bountyMult * eventProductionMult;
         stock[k] = stockOf(k) + made * dt;
         flow(k, made, isLifeSupport(s));
+        // What the colony itself made is its learning-curve experience
+        // (`economy/learning.dart`); a spaceport's landings and a
+        // terraformer's sky are not.
+        if (recipe) colonyEconomy.addMade(k, made, dt);
         if (s.type == 'o2harvester' && k == Commodity.oxygen) {
           harvested += made;
           harvestedRaw += v * run;
@@ -1754,10 +1770,11 @@ class CitySim {
             powerShare: plantPower * atWork,
             staffingShare: restStaff * atWork);
         r.taken.forEach((k, u) => flow(k, -u / dt));
-        r.given.forEach((k, u) => flow(
-            k,
-            u * biomeMult(k) * bountyMult * eventProductionMult / dt,
-            isLifeSupport(s)));
+        r.given.forEach((k, u) {
+          final made = u * biomeMult(k) * bountyMult * eventProductionMult / dt;
+          flow(k, made, isLifeSupport(s));
+          colonyEconomy.addMade(k, made, dt);
+        });
         // A live floor reports no share: it smokes at the colony's throttle,
         // times the firm's own (an idled or closed plant makes less smoke).
         final run = r.live
@@ -5376,6 +5393,11 @@ class CitySim {
     if (parcelBuildings.containsKey(parcelId)) return false;
     if (layout.parcelById(parcelId) == null) return false;
     if (layout.easementOf?.call(parcelId) != null) return false;
+    // A plant for a good nobody has invented yet cannot be built at all
+    // (docs/plans/dynamic-markets.md phase 2; [inventionRefusal] says why).
+    // Unlike the population milestone this is no UI courtesy: there is no
+    // such thing to make. The unlock cheat waives it.
+    if (!ignoreUnlocks && inventionRefusal(spec) != null) return false;
     parcelBuildings[parcelId] = spec;
     assignFloorFor(parcelId, spec); // a floor plant's floor
     return true;
@@ -5630,6 +5652,13 @@ class CitySim {
         // 'economy': that key is the [Economy] enum's index.
         if (!factoryFloors.isEmpty || colonyEconomy.hasState)
           'plantEconomy': colonyEconomy.toJson(),
+        // Learning curves and invention (`economy/learning.dart`): their own
+        // key, kept even with no plant, since the world clock and Earth's
+        // curves must survive a load (with Earth's market, when nothing
+        // else saves it). An old save has none and loads at day 0 with
+        // every curve at its seed.
+        'tech': ?colonyEconomy.techJson(
+            withEarth: factoryFloors.isEmpty && !colonyEconomy.hasState),
       };
 
   /// [fineCorridors] as saved: those of roads still in the layout.
@@ -5919,6 +5948,8 @@ class CitySim {
     });
     sim.colonyEconomy
         .restore((j['plantEconomy'] as Map?)?.cast<String, Object?>());
+    sim.colonyEconomy
+        .restoreTech((j['tech'] as Map?)?.cast<String, Object?>());
     sim.reconcileFactoryFloors();
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and

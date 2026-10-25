@@ -66,6 +66,12 @@
 /// and the price a colony's market is seeded at on its first day
 /// (`markets.dart`).
 ///
+/// Since learning curves (phase 2) a recipe's cost is the MATURE cost, and
+/// each good's unit cost is that times the colony's learning multiplier
+/// ([MarketFacts.learningMult], `learning.dart`); goods not yet invented
+/// for the colony have no recipe and no import source
+/// ([MarketFacts.unavailable], [MarketFacts.noEarthSource]).
+///
 /// Pure and deterministic: no RNG, maps iterated in fixed list order.
 library;
 
@@ -298,7 +304,10 @@ LocalMarket solveLocalMarket(
       if (outT.isFinite) lo = math.max(lo, price - outT * kg);
     }
 
-    source('earth', earthPrices?[c] ?? earthPrice(c));
+    // A good Earth hasn't invented has no source there (`learning.dart`).
+    if (!facts.noEarthSource.contains(c)) {
+      source('earth', earthPrices?[c] ?? earthPrice(c));
+    }
     for (final id in marketIds) {
       final p = markets[id]!.prices[c];
       if (p != null && p > 0) source(id, p);
@@ -387,7 +396,12 @@ LocalMarket solveLocalMarket(
         final share = weightSum > 0
             ? e.value * earthPrice(e.key) / weightSum
             : 1 / s.outputs.length;
-        final unit = c * share / rate;
+        // The recipe gives the MATURE cost; the colony's learning curve
+        // puts the premium its inexperience still carries on top
+        // (`learning.dart`). A constant factor ≥ 1, so the map stays
+        // monotone and the fixed point still converges from below.
+        final unit =
+            c * share / rate * (facts.learningMult[e.key] ?? 1.0);
         final had = cost[e.key];
         if (had == null || unit < had) {
           cost[e.key] = unit;
@@ -564,7 +578,10 @@ List<CityBuildingSpec> _eligible(
       !kNonRecipeGroups.contains(s.group) &&
       s.unlockPop <= f.population &&
       !(s.type == 'o2harvester' && !air.harvestable) &&
-      !(s.powerOutput > 0 && _powerFactor(s, f, air) <= 0);
+      !(s.powerOutput > 0 && _powerFactor(s, f, air) <= 0) &&
+      // Nothing that makes or uses a good not invented here yet.
+      !s.outputs.keys.any(f.unavailable.contains) &&
+      !s.inputs.keys.any(f.unavailable.contains);
   final base = all.where(usable).toList();
   final computeSource = base.any((s) => s.computeOutput > 0);
   return [

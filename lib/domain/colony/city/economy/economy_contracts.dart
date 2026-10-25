@@ -68,6 +68,9 @@ class MarketFacts {
     this.o2Harvestable,
     this.powerFactors = const {},
     this.canExport = false,
+    this.learningMult = const {},
+    this.unavailable = const {},
+    this.noEarthSource = const {},
   });
 
   /// `CelestialBody.id` the colony stands on ('earth', 'mars', 'moon' …).
@@ -123,6 +126,19 @@ class MarketFacts {
   /// it no export floor holds a price up: a colony that cannot ship to
   /// Earth cannot get Earth's price for anything.
   final bool canExport;
+
+  /// Multiplier on each good's recipe (mature) cost from the colony's
+  /// learning curve, 1 + P·(Qeff/Q0)^(−b) (`learning.dart`); a good not
+  /// listed costs its recipe. Empty in a bare solve.
+  final Map<String, double> learningMult;
+
+  /// Goods not invented for this colony (`learning.dart`): no recipe that
+  /// makes or uses one is eligible, and it has no import source.
+  final Set<String> unavailable;
+
+  /// Goods Earth doesn't trade yet (not invented on its timeline, though the
+  /// colony may have invented one early): no import source from Earth.
+  final Set<String> noEarthSource;
 }
 
 /// A colony's local prices: credits per commodity unit, plus the wage and

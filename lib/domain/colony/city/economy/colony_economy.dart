@@ -41,6 +41,7 @@ import '../factory/factory_sim_api.dart';
 import '../factory/floor_blueprint.dart';
 import 'economy_contracts.dart';
 import 'firm_policy.dart';
+import 'learning.dart';
 import 'local_prices.dart';
 import 'markets.dart';
 
@@ -198,6 +199,20 @@ class ColonyEconomy {
   /// demand; never the colony's to re-export).
   final SplayTreeMap<String, double> importUnits = SplayTreeMap();
 
+  /// Units of each commodity the colony's own plants MADE this day so far
+  /// (flat recipes and factory floors; never freight, a spaceport's landings
+  /// or a terraformer's sky): the day's addition to its learning-curve
+  /// experience ([TechState.localQ]).
+  final SplayTreeMap<String, double> madeUnits = SplayTreeMap();
+
+  /// What the colony knows how to make, and the world's learning and
+  /// invention timeline as this colony carries it (docs/plans/
+  /// dynamic-markets.md phase 2, `learning.dart`). Saved by `CitySim` under
+  /// its own key ('tech'), not here: a colony with no plant saves no plant
+  /// economy, but its world clock must survive a load. Reassignable so a
+  /// test can give a colony a synthetic catalog.
+  TechState tech = TechState();
+
   /// The colony's own market: every traded good's price, stock and smoothed
   /// flows (docs/plans/dynamic-markets.md phase 1). Empty until the first
   /// day close seeds it from today's solve; saved with the rest.
@@ -252,6 +267,13 @@ class ColonyEconomy {
   void addImport(String commodity, double perSec, double dt) {
     if (perSec > 0) {
       importUnits[commodity] = (importUnits[commodity] ?? 0) + perSec * dt;
+    }
+  }
+
+  /// Adds [perSec] units/s the colony's own plants made over [dt] seconds.
+  void addMade(String commodity, double perSec, double dt) {
+    if (perSec > 0) {
+      madeUnits[commodity] = (madeUnits[commodity] ?? 0) + perSec * dt;
     }
   }
 
@@ -327,6 +349,7 @@ class ColonyEconomy {
         if (demandUnits.isNotEmpty) 'dem': {...demandUnits},
         if (supplyUnits.isNotEmpty) 'sup': {...supplyUnits},
         if (importUnits.isNotEmpty) 'imp': {...importUnits},
+        if (madeUnits.isNotEmpty) 'made': {...madeUnits},
         if (!colonyMarket.isEmpty) 'mkt': colonyMarket.toJson(),
         if (!earthMarket.isEmpty) 'earthMkt': earthMarket.toJson(),
         if (sellThrough.isNotEmpty) 'sell': {...sellThrough},
@@ -335,6 +358,32 @@ class ColonyEconomy {
         if (lastIndustrialSubsidy != 0) 'subLast': lastIndustrialSubsidy,
         if (industrialSubsidyTotal != 0) 'subTotal': industrialSubsidyTotal,
       };
+
+  /// The learning state as `CitySim` saves it (its own 'tech' key), or null
+  /// while it is fresh (an old save's shape). With [withEarth] — a colony
+  /// whose plant economy isn't saved ([hasState] false and no floor) — it
+  /// carries Earth's market too: its prices lag their falling anchors by a
+  /// few percent (the advanced class's 40-day half-life against a curve
+  /// sliding ~15% a year), and re-seeding them at the anchor on every load
+  /// would make them jump.
+  Map<String, Object?>? techJson({required bool withEarth}) {
+    if (tech.isFresh) return null;
+    return {
+      ...tech.toJson(),
+      if (withEarth && !earthMarket.isEmpty) 'earthMkt': earthMarket.toJson(),
+    };
+  }
+
+  /// Restores [techJson]'s state; null (an old save) leaves it fresh. Earth's
+  /// market comes from it only when the plant economy brought none.
+  void restoreTech(Map<String, Object?>? j) {
+    if (j == null) return;
+    tech.restore(j);
+    final earth = j['earthMkt'];
+    if (earthMarket.isEmpty && earth is Map) {
+      earthMarket = Market.fromJson(earth.cast<String, Object?>());
+    }
+  }
 
   /// Restores a saved state into this (empty) one; null leaves it fresh.
   void restore(Map<String, Object?>? j) {
@@ -363,6 +412,7 @@ class ColonyEconomy {
     m(j['dem']).forEach((k, v) => demandUnits[k] = d(v));
     m(j['sup']).forEach((k, v) => supplyUnits[k] = d(v));
     m(j['imp']).forEach((k, v) => importUnits[k] = d(v));
+    m(j['made']).forEach((k, v) => madeUnits[k] = d(v));
     // An old save has neither market: both stay empty and the next day
     // close seeds them from today's model.
     colonyMarket = Market.fromJson(m(j['mkt']));

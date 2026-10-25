@@ -102,7 +102,10 @@ against the skilled jobs posted, priced like any other good.
 2. **Learning curves and invention.** Track Q per colony and for the world, with world knowledge
    slowly spilling over to colonies. Unit cost follows Wright's law, and Earth prices move with
    world learning. Invention points come from Earth's timeline, and colony research can invent a
-   good early.
+   good early. *Built* (`economy/learning.dart`). Every existing good is invented by day 0 (the
+   milestone unlocks are population gates, not dates); the mechanism is proven on synthetic goods.
+   Rocket Parts and Missile plants still saturate the 30× tax ceiling over a decade (rent 188× and
+   705× at year 10): the flat recipes' value added, not the ceiling, is what's left.
 3. **Labour market.** Skill tiers per recipe, and skilled supply from population and education
    coverage. Wages for each tier are priced by supply and demand like any good; a shortage raises
    wages and starves low-paying plants of staff.

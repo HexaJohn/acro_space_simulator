@@ -166,7 +166,10 @@ void main() {
       ..remove('mkt')
       ..remove('earthMkt')
       ..remove('sell')
-      ..remove('imp');
+      ..remove('imp')
+      ..remove('made');
+    // Older than learning curves too (docs/plans/dynamic-markets.md phase 2).
+    json.remove('tech');
     final loaded = reload(json);
     expect(loaded.colonyEconomy.colonyMarket.isEmpty, isTrue);
     expect(loaded.colonyEconomy.earthMarket.isEmpty, isTrue);

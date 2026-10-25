@@ -48,6 +48,7 @@ import 'economy/colony_economy.dart';
 import 'economy/economy_clock.dart';
 import 'economy/economy_contracts.dart';
 import 'economy/firm_policy.dart';
+import 'economy/learning.dart';
 import 'economy/local_prices.dart';
 import 'economy/markets.dart';
 import 'economy/plant_pnl.dart';
@@ -97,6 +98,16 @@ const List<HandlerKind> kLayoffOrder = [
 /// ~28%. Only a scarce-good rent like Rocket Parts' (~380×) or the Missile
 /// Plant's (~1,600×) at Earth's price reaches it, and those are the rents
 /// the market is meant to erode.
+///
+/// Measured under learning curves (docs/plans/dynamic-markets.md phase 2,
+/// learning_tax_test.dart: an Earth colony's private plant, its output
+/// sold to Earth, the world fast-forwarded): Rocket Parts' raw tax falls
+/// 391× → 290× → 258× → 216× → 188× its workers' over years 0/1/2/5/10,
+/// the Missile Plant's 1,707× → 1,011× → 920× → 795× → 705×. Both still
+/// saturate the ceiling throughout. Not retuned: unpinning them would take
+/// a ceiling of ~200× and ~700×, which guards nothing; the rent left is the
+/// flat recipes' value added (rocket parts' MATURE price is still ~8× their
+/// inputs), for phase 4's entrepreneurs, or a recipe retune, to close.
 const double kCorporateTaxSafetyMultiple = 30;
 
 /// The happiness the tax ceiling's reference colony has: the "typical" 60%
@@ -165,6 +176,9 @@ extension CityEconomy on CitySim {
       demandPerS: demandPerS ?? perS(colonyEconomy.demandUnits),
       supplyPerS: supplyPerS ?? perS(colonyEconomy.supplyUnits),
       canExport: hasSpaceport && !loyalty.portClosedToPlayer,
+      learningMult: colonyEconomy.tech.localCostMultipliers(),
+      unavailable: colonyEconomy.tech.unavailableHere,
+      noEarthSource: colonyEconomy.tech.missingOnEarth,
     );
   }
 
@@ -186,7 +200,7 @@ extension CityEconomy on CitySim {
   /// price.
   LocalMarket _solveCosts() {
     final e = colonyEconomy;
-    if (e.earthMarket.isEmpty) e.earthMarket = seedEarthMarket();
+    if (e.earthMarket.isEmpty) e.earthMarket = seedEarthMarketFor(e.tech);
     final propellant = earthPropellantPerKgIn(e.earthMarket);
     return solveLocalMarket(
       marketFacts(),
@@ -225,6 +239,61 @@ extension CityEconomy on CitySim {
         CitySim.taxPerWorkerPerSec *
         economy.fundsMult *
         kCorporateTaxSafetyMultiple;
+  }
+
+  // ---- invention -----------------------------------------------------------
+
+  /// Whether this colony may make and use [good] (docs/plans/
+  /// dynamic-markets.md phase 2): Earth's industry has invented it, or this
+  /// colony invented it first ([inventEarly]). A good with no learning seed
+  /// always exists.
+  bool goodInvented(String good) => colonyEconomy.tech.availableHere(good);
+
+  /// Why [spec] can't be built yet for want of an invention, or null: the
+  /// first good it makes or uses that doesn't exist here, with when Earth
+  /// expects it and what inventing it early costs. `unlocked` refuses the
+  /// building on it; the UI shows the text.
+  String? inventionRefusal(CityBuildingSpec spec) {
+    final tech = colonyEconomy.tech;
+    for (final g in [...spec.outputs.keys, ...spec.inputs.keys]) {
+      if (tech.availableHere(g)) continue;
+      final days = tech.daysUntilInvented(g).ceil();
+      final cost = tech.inventEarlyCost(g);
+      final early = cost == null
+          ? ''
+          : ' Research can invent it early for ${cost.toStringAsFixed(0)} '
+              'points.';
+      return "${Commodity.name(g)} is not invented yet: Earth's industry "
+          'expects it in $days days.$early';
+    }
+    return null;
+  }
+
+  /// Research it costs to invent [good] here now, ahead of Earth; null when
+  /// it can't be (already exists here, or has no invention point).
+  double? inventEarlyCost(String good) =>
+      colonyEconomy.tech.inventEarlyCost(good);
+
+  /// Whether the colony can invent [good] early right now: it doesn't exist
+  /// here yet and [research] covers [inventEarlyCost].
+  bool canInventEarly(String good) {
+    final cost = inventEarlyCost(good);
+    return cost != null && research >= cost;
+  }
+
+  /// Spends research to invent [good] for this colony before Earth does
+  /// (user decision §7.1). From the next day close the colony may build
+  /// what makes it, at its own first-lot premium, with no import source and
+  /// no export floor: whatever it charges is the first mover's rent. False
+  /// (nothing spent) when [canInventEarly] is.
+  bool inventEarly(String good) {
+    final cost = inventEarlyCost(good);
+    if (cost == null || research < cost) return false;
+    research -= cost;
+    colonyEconomy.tech.markInventedEarly(good);
+    pushEconomyNotice('${Commodity.name(good)} invented here, ahead of '
+        'Earth: the colony is its only maker.');
+    return true;
   }
 
   // ---- ownership ----------------------------------------------------------
@@ -393,6 +462,22 @@ extension CityEconomy on CitySim {
     };
     final close = closeColonyMarket(e.colonyMarket, solved, facts,
         localImportsPerS: imports);
+    // Learning (docs/plans/dynamic-markets.md phase 2): the day's own
+    // production becomes the colony's experience, the world makes a day of
+    // everything it has invented (plus what this colony sold it), and
+    // Earth's anchors move down their curves before its market steps.
+    // Tomorrow's cost solve reads both.
+    final tech = e.tech;
+    tech.recordLocal(e.madeUnits);
+    final daySec = daySoFar > 0 ? daySoFar : kColonyDaySec;
+    final invented = tech.advanceWorldDay(exportsUnits: {
+      for (final x in close.exportsPerS.entries) x.key: x.value * daySec,
+    });
+    for (final g in invented) {
+      pushEconomyNotice("Earth's industry has begun making "
+          '${Commodity.name(g)}: dear at first, cheaper with every doubling.');
+    }
+    applyWorldTech(e.earthMarket, tech);
     closeEarthDay(e.earthMarket,
         importsPerS: imports, exportsPerS: close.exportsPerS);
     e.market = _withBook(solved, (_) => close.book);
@@ -466,6 +551,7 @@ extension CityEconomy on CitySim {
     e.demandUnits.clear();
     e.supplyUnits.clear();
     e.importUnits.clear();
+    e.madeUnits.clear();
   }
 
   /// The handler a layoff lets go: the cheapest kind with more than one on

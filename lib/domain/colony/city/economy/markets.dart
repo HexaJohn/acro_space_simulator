@@ -310,7 +310,8 @@ class GoodMarket {
 
   /// The cost anchor the elasticities are measured from, credits per unit:
   /// the local unit cost (held into the trade band where trade works) for a
-  /// colony; for Earth its seed, which phase 2's learning curves move.
+  /// colony; for Earth its point on the world's learning curve
+  /// (`learning.dart` [applyWorldTech]), the seed on day 0.
   double anchor;
 
   /// Units held at the last close (a colony's `CitySim.stock`).
@@ -544,8 +545,9 @@ Market seedEarthMarket() {
 /// depth plus what they sold it ([exportsPerS]). No stock term (Earth's
 /// stocks sit at target) and no trade band (Earth IS the band); the
 /// elasticities around the anchor make it revert to its cost anchor at the
-/// class half-life once the colony trade stops. Phase 2 moves the anchor
-/// down Wright's learning curve.
+/// class half-life once the colony trade stops. The anchors themselves move
+/// down Wright's learning curve as the world makes more (`learning.dart`
+/// [applyWorldTech], called first by the daily close).
 void closeEarthDay(
   Market earth, {
   Map<String, double> importsPerS = const {},

@@ -2417,6 +2417,11 @@ class FactoryFloor implements FactorySim {
     if (FactoryRecipes.byId(recipeId) == null) {
       return const EditResult.refused(EditRefusal.unknownRecipe);
     }
+    // A recipe making or using a good not yet invented here
+    // (`FactoryUnlocks.recipeRefusal` says which).
+    if (!unlocks.allowsRecipe(recipeId)) {
+      return const EditResult.refused(EditRefusal.notAllowed);
+    }
     final q = p.copyWith(recipe: recipeId);
     final bad = _check(q, ignoreId: p.id);
     if (bad != null) return bad;
