@@ -78,12 +78,14 @@ import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/factory_unlocks.dart';
 import '../../../../domain/colony/city/factory/floor_blueprint.dart';
 import '../../../../domain/colony/city/factory/product_tree.dart';
+import '../../../../domain/colony/city/factory/station_ports.dart';
 import '../app_theme.dart';
 import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
 import 'floor_item_overlays.dart';
 import 'orders_panel.dart';
 import 'floor_layout_index.dart';
+import 'machine_ports_view.dart';
 import 'product_tree_panel.dart';
 import 'recipe_info_panel.dart';
 import 'searchable_picker.dart';
@@ -479,6 +481,9 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
           // inside its gesture layer (floor_item_overlays.dart).
           FloorHoverTip(c: c),
           FloorLegend(c: c),
+          // Hovering a machine's port names it (§10 item 19); never takes a
+          // click.
+          Positioned.fill(child: PortHoverTip(c: c)),
           // Above the canvas Listener as a sibling, never inside it: see
           // tutorial_panel.dart. Only its own box takes clicks.
           if (run != null)
@@ -1142,6 +1147,15 @@ class _Inspector extends StatelessWidget {
                 style: AppTheme.dim),
         ],
         if (p.kind == EntityKind.arm) ...[
+          // Arms load and unload chests, docks, belts and staging only: one
+          // pointed at a machine does nothing, and says why (§10 item 19).
+          if (armMachineNote(p, c.index.solidAt) case final note?)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(note,
+                  key: const Key('arm-machine-note'),
+                  style: AppTheme.dim.copyWith(color: AppTheme.warn)),
+            ),
           const SizedBox(height: 8),
           const Text('Picks', style: AppTheme.body),
           _ArmFilter(c: c, arm: p),

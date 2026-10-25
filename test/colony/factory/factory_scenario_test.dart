@@ -6,7 +6,6 @@
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
-import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_recipe.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_scenario.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/templates/rocketfactory_template.dart';
@@ -102,10 +101,11 @@ void main() {
     runUntil(() => stepId() != 'move', limit: 10, what: 'tubes on the belt');
 
     // d. Make: placed with the palette default recipe, it is not a welding
-    // cell until the recipe is switched.
+    // cell until the recipe is switched. The cell sits just past the belt's
+    // end, one tile short: its Input 1 port is (21, 2), fed from (20, 2).
     expect(stepId(), 'make');
     final first = FactoryRecipes.forStation(StationKind.assembler).first.id;
-    final cell = place(EntityKind.machine, 6, 4, recipe: first);
+    final cell = place(EntityKind.machine, 21, 1, recipe: first);
     runFor(2);
     if (first != RocketPartsRecipes.weldFrame.id) {
       expect(stepId(), 'make', reason: 'wrong recipe still');
@@ -113,57 +113,65 @@ void main() {
     }
     runFor(1);
 
-    // e. Feed: the cell starves until an arm lifts tubes into it.
+    // e. Feed: the cell starves until the belt's last tile points into its
+    // Input 1 port.
     expect(stepId(), 'feed');
     runFor(5);
-    expect(stepId(), 'feed', reason: 'no arm, no tubes in the cell');
-    place(EntityKind.arm, 7, 3, dir: Dir4.north);
+    expect(stepId(), 'feed', reason: 'the belt stops a tile short');
+    place(EntityKind.belt, 20, 2);
     runUntil(() => stepId() != 'feed', limit: 10, what: 'the cell fed');
 
-    // f. Ship, as the step now spells it out: an arm on the cell's far side
-    // pointing away from it, a belt from its drop tile, a shipping dock at
-    // the belt's end. A dock alone ships nothing (frames are pallet loads
-    // and nobody on the floor can lift them); the arm-and-belt line does,
-    // with no handler hired at all.
+    // f. Ship: frames leave only by the output port (23, 2), onto (24, 2).
+    // A dock alone ships nothing (nothing carries the frames to it); a belt
+    // from the output port into it does, with no handler hired at all.
     expect(stepId(), 'ship');
-    place(EntityKind.shippingDock, 22, 8);
+    place(EntityKind.shippingDock, 30, 2);
     runFor(90);
     expect(stepId(), 'ship', reason: 'nothing carries a frame to the dock');
-    place(EntityKind.arm, 7, 7, dir: Dir4.north); // cell (7, 6) -> (7, 8)
-    runFor(20);
-    expect(stepId(), 'ship', reason: 'the arm has nowhere to drop yet');
-    belt(7, 21, 8, Dir4.east); // drop tile -> the dock at (22, 8)
+    expect(f.contentsOf(cell)[RocketPartsItems.frame.id] ?? 0, greaterThan(0),
+        reason: 'frames wait inside: its output port has no belt');
+    belt(24, 29, 2, Dir4.east); // output port -> the dock at (30, 2)
     runUntil(() => stepId() != 'ship', limit: 120, what: 'a frame shipped');
     expect(f.handlers, isEmpty, reason: 'no handler was needed');
 
-    // g. Second line: an electronics dock pointed straight into a wiring
-    // bench (dock on the north wall facing south into the bench's top row).
+    // g. Second line: an electronics dock on the north wall, its belt into
+    // a wiring bench's Input 1 port (6, 36) from (5, 36).
     expect(stepId(), 'secondLine');
     final bench = assembler(6, 35, RocketPartsRecipes.wireAvionics.id);
     runFor(3);
     expect(stepId(), 'secondLine', reason: 'bench has no electronics yet');
     expect(f.contentsOf(bench), isEmpty);
-    place(EntityKind.receivingDock, 7, 38, dir: Dir4.south,
+    place(EntityKind.receivingDock, 5, 38, dir: Dir4.south,
         item: 'electronics');
-    f.hire(HandlerKind.onFoot, 2);
+    runFor(5);
+    expect(stepId(), 'secondLine', reason: 'no belt into the port yet');
+    place(EntityKind.belt, 5, 37, dir: Dir4.south);
+    place(EntityKind.belt, 5, 36);
     runUntil(() => stepId() != 'secondLine', limit: 10, what: 'bench fed');
 
-    // h. Assemble: a bay one tile off the frame belt, an arm in the gap
-    // lifting the frames it needs as they ride past (the rest still ship),
-    // and the walkers bringing harnesses; rocket parts are HEAVY, so an arm
-    // lifts them out into a shipping dock.
+    // h. Assemble, the two-input puzzle: the bay replaces the frame dock so
+    // the frame belt runs into its Input 1 (30, 2); the bench's harnesses
+    // leave its output port (8, 36) onto (9, 36) and ride round into Input
+    // 2 (31, 3) from (31, 4). Rocket parts are HEAVY: the bay blocks until
+    // a belt leaves its output port (32, 2) for a shipping dock.
     expect(stepId(), 'assemble');
-    final bay = assembler(14, 10, RocketPartsRecipes.assemble.id);
-    place(EntityKind.arm, 15, 9, dir: Dir4.north); // belt (15, 8) -> bay
+    final frameDock = f.blueprint.placements.firstWhere(
+        (p) => p.kind == EntityKind.shippingDock && p.pos == const TilePos(30, 2));
+    expect(f.remove(frameDock.id).ok, isTrue);
+    final bay = assembler(30, 1, RocketPartsRecipes.assemble.id);
+    belt(9, 30, 36, Dir4.east);
+    for (var y = 36; y >= 4; y--) {
+      place(EntityKind.belt, 31, y, dir: Dir4.south);
+    }
     runUntil(() => (f.contentsOf(bay)['rocketParts'] ?? 0) > 0,
         limit: 600, what: 'the bay to make parts');
     runFor(10);
     expect(stepId(), 'assemble',
-        reason: 'heavy parts: no worker or jack can ship them');
+        reason: 'heavy parts: nothing carries them out yet');
     expect(f.contentsOf(bay)['rocketParts'] ?? 0, greaterThan(0),
         reason: 'the bay made parts, they are just stuck');
-    place(EntityKind.arm, 17, 11, dir: Dir4.east);
-    place(EntityKind.shippingDock, 18, 11);
+    belt(33, 37, 2, Dir4.east);
+    place(EntityKind.shippingDock, 38, 2);
     runUntil(() => stepId() != 'assemble', limit: 30, what: 'a part shipped');
 
     // i. Read: both UI flags, in either order.
@@ -252,56 +260,34 @@ void main() {
   });
 
   /// The doc's reference plant, built on top of the tutorial line: four
-  /// welding cells and four wiring benches feeding one bay by belts and
-  /// arms. Assisted stations (the palette's default crew) and no handlers
-  /// in the loop.
+  /// welding cells and five wiring benches feeding one bay, all by belts
+  /// into and out of ports (§10 item 19). A port takes one belt, so each
+  /// new cell and bench gets its own receiving dock, and their outputs
+  /// side-merge into the frame belt and the harness belt. Assisted
+  /// stations (the palette's default crew) and no handlers at all.
   ({double to20, double rate, double jobs, Map<String, double> goals})
       buildReference() {
     boot();
     playTutorial();
-    // Cells 2-4 on the tube belt, each with an input arm.
-    for (final x in [10, 14, 18]) {
-      assembler(x, 4, RocketPartsRecipes.weldFrame.id);
-      place(EntityKind.arm, x + 1, 3, dir: Dir4.north);
+    // Cells 2-4 stacked up column x = 21..23, each fed from its own tube
+    // dock at x = 18; their frames leave the output ports onto a belt down
+    // column 24 that side-loads into the frame belt at (24, 2).
+    for (final y in [5, 9, 13]) {
+      place(EntityKind.receivingDock, 18, y + 1, item: 'tubes');
+      place(EntityKind.belt, 20, y + 1);
+      assembler(21, y, RocketPartsRecipes.weldFrame.id);
     }
-    // Every cell's frames go up by arm onto the frame belt along y = 8 (the
-    // tutorial's, which already carries cell 1's), now run east to the bay
-    // instead of the frame dock, and a last arm lifts them in. The bay
-    // moves to where the belts meet: the tutorial bay, its arms and its
-    // parts dock are replaced (as a player would) by one at (24, 8).
-    Placement at(EntityKind k, int x, int y) => f.blueprint.placements
-        .firstWhere((p) => p.kind == k && p.pos == TilePos(x, y));
-    for (final p in [
-      at(EntityKind.arm, 15, 9),
-      at(EntityKind.arm, 17, 11),
-      at(EntityKind.shippingDock, 18, 11),
-      at(EntityKind.machine, 14, 10),
-      at(EntityKind.shippingDock, 22, 8),
-    ]) {
-      expect(f.remove(p.id).ok, isTrue);
+    for (var y = 14; y >= 3; y--) {
+      place(EntityKind.belt, 24, y, dir: Dir4.south);
     }
-    for (final x in [10, 14, 18]) {
-      place(EntityKind.arm, x + 1, 7, dir: Dir4.north);
+    // Benches 2-5 stacked at x = 28..30, each fed from its own electronics
+    // dock at x = 25; their harnesses leave onto the harness belt down
+    // column 31 into the bay's Input 2.
+    for (final y in [5, 9, 13, 17]) {
+      place(EntityKind.receivingDock, 25, y + 1, item: 'electronics');
+      place(EntityKind.belt, 27, y + 1);
+      assembler(28, y, RocketPartsRecipes.wireAvionics.id);
     }
-    belt(22, 22, 8, Dir4.east);
-    assembler(24, 8, RocketPartsRecipes.assemble.id);
-    place(EntityKind.arm, 23, 8); // frame belt end -> bay
-    // Benches 1-4 along y = 14..16, fed straight from north-wall docks at
-    // y = 17..18; their harnesses go down by arm onto an avionics belt at
-    // y = 12 and the bay lifts them in from it. The tutorial bench and its
-    // dock at the north wall stay as they are (still fed, now idle-ish).
-    for (final x in [6, 10, 14, 18]) {
-      assembler(x, 14, RocketPartsRecipes.wireAvionics.id);
-      place(EntityKind.receivingDock, x + 1, 17,
-          dir: Dir4.south, item: 'electronics');
-      place(EntityKind.arm, x + 1, 13, dir: Dir4.south);
-    }
-    belt(7, 25, 12, Dir4.east);
-    place(EntityKind.arm, 25, 11, dir: Dir4.south); // avionics belt -> bay
-    // Parts out: an arm onto a belt to a shipping dock on the east wall.
-    place(EntityKind.arm, 27, 9);
-    belt(28, 57, 9, Dir4.east);
-    place(EntityKind.shippingDock, 58, 9);
 
     final t0 = f.simSeconds;
     final to20 = runUntil(() => run.progress.goalMetAt.containsKey('ship20'),

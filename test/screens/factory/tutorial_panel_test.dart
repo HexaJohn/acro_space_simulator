@@ -149,7 +149,9 @@ void main() {
     put(Placement(id: 0, kind: EntityKind.receivingDock,
         pos: const TilePos(11, 13), dir: Dir4.south,
         item: RocketPartsItems.avionics.id));
-    put(const Placement(id: 0, kind: EntityKind.arm, pos: TilePos(13, 11)));
+    // Parts leave by the output port (12, 11) onto a belt into the dock
+    // (arms never unload a machine, §10 item 19).
+    put(const Placement(id: 0, kind: EntityKind.belt, pos: TilePos(13, 11)));
     put(const Placement(
         id: 0, kind: EntityKind.shippingDock, pos: TilePos(14, 11)));
     floor.step(20, run.port);

@@ -23,8 +23,10 @@ void main() {
   setUpAll(ensureFactoryCatalog);
 
   /// A billet dock fills a chest; a belt wall (x 3-4) stands between it
-  /// and a hand-fed rolling mill whose bars go by arm to shipping. [bays]
-  /// lays the crane bays; [cranes] cranes.
+  /// and a hand-fed rolling mill whose bars leave by a belt on its output
+  /// port to shipping. The mill (5×3 at (5, 0)) has its hand port at
+  /// (7, 0), which a crane works with its hook over it (the outside tile is
+  /// off the hall). [bays] lays the crane bays; [cranes] cranes.
   (FactoryFloor, int) billetFloor(List<(int, int, int, int)> bays, int cranes) {
     final l = Lay();
     l.add(EntityKind.receivingDock, 0, 1, item: 'steelBillet');
@@ -40,7 +42,7 @@ void main() {
       recipe: SteelRecipes.roll.id,
       mode: MachineMode.assisted,
     );
-    l.add(EntityKind.arm, 10, 1);
+    l.add(EntityKind.belt, 10, 1); // on output port (9, 1)'s outside tile
     l.add(EntityKind.shippingDock, 11, 1);
     for (final (x, y, w, h) in bays) {
       l.add(EntityKind.craneBay, x, y, span: (w, h));

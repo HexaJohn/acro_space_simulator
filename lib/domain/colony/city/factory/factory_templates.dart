@@ -21,40 +21,44 @@
 /// never get one (user decision, 2026-10-12), so the site menu's "Factory
 /// floor" action can key off `factoryTemplateFor(type) != null`.
 ///
-/// ## The Steel Mill (spec: 2 ore â†’ 1.5 steel + 0.4 tubes /s, 35 jobs)
+/// ## The Steel Mill (spec: 2 ore -> 1.5 steel + 0.4 tubes /s, 35 jobs)
 ///
-/// A 66 Ã— 56 m hall, two identical lines, a shared tube corner and a
-/// forklift aisle down the shipping wall â€” the plan's realistic mix (Â§3
-/// "Template plants"): conveyors where freight is steady, people where it
-/// is fiddly, a forklift for pallets and a crane over the heavy line.
+/// An 84 x 64 m hall, two identical lines and a shared tube corner, laid for
+/// EXPLICIT PORTS (docs/plans/factory-floors.md section 10 item 19,
+/// `station_ports.dart`): belts connect at a station's input and output
+/// ports, handlers work it at its hand port, and no arm touches a machine.
+/// The plan's realistic mix (section 3 "Template plants"): conveyors where
+/// freight is steady, people where it is fiddly, a crane for the heavy
+/// billets and forklifts for the tube pallets.
 ///
-/// * **Ore comes in on a DOCK CONVEYOR.** Each line's receiving dock emits
-///   1 ore/s straight onto a belt. Two pallets a second unloaded by hand
-///   and forklift into staging would take ~16 forklifts of trips and
-///   swamp the 35 jobs, so the template uses the expensive automated dock
-///   (Â§3 "Docks are manual by default â€¦ dock conveyors are the upgrade")
-///   and `capexOf` charges it as one. A designer who unloads by hand saves
-///   that capex and pays in jobs: a real trade, not a free win.
-/// * Arms feed two smelters (ore â†’ pig iron + slag) and drop pig iron onto
-///   a belt to the furnace. Slag never leaves: an arm from each smelter
-///   feeds the press between them, which makes tubes from it.
-/// * **Billets are heavy, so a crane moves them.** The furnace and the
-///   rolling mill stand end to end under a crane bay; the crane lifts each
-///   billet from the furnace to the mill without travelling (its hook sits
-///   over the seam). Both stations are ASSISTED: one operator each beside
-///   the crane driver.
-/// * The mill's bars go by arm to a packer; its steel crates (pallets) wait
-///   for a FORKLIFT, which drives them along the aisle to the shipping
-///   dock. The forklifts charge at a bay at the aisle's head.
-/// * **Tubes are hand work.** Nine workers walk tubes from both presses to
-///   the shared tube packer between the lines, crossing belts at
-///   crossings. That walk is the template's real handling work, and its
-///   slack is a lever. The tube crates ride a belt to their own dock (a
-///   forklift fetching them from the middle of the hall would be a full
-///   forklift's work), crossing the aisle on crossings.
+/// * **Ore comes in on a DOCK CONVEYOR.** Each line's receiving dock on the
+///   west wall drops 1 ore/s onto a two-tile belt straight into the
+///   smelter's input port (the expensive automated dock, charged as one by
+///   `capexOf`; unloading by hand saves capex and costs jobs).
+/// * **One lights-out smelter per line.** A port belt feeds one machine and
+///   floors have no splitter, so two manual smelters could not share a
+///   dock's belt: each line runs one AUTOMATED smelter (1.3 ore/s of
+///   capacity against the dock's 1.0). Pig iron leaves its front port by
+///   belt into the furnace; slag leaves its top port by belt.
+/// * **Billets are heavy, so a crane moves them** without travelling: the
+///   furnace (facing east) and the rolling mill (facing west, below it)
+///   open their HAND PORTS onto the same floor tile, and the crane over
+///   the heavy line hangs its hook there.
+/// * The mill's bars leave its west port on a belt into a packer, whose
+///   steel crates ride a belt onto a shipping dock on the west wall.
+/// * **One slag press for both lines.** The two slag belts merge into the
+///   press's input port between the lines (0.5 slag/s against a manual
+///   press's 0.6). Its tubes wait at its hand port, and workers carry them
+///   ONE tile to the tube packer's hand port: one consumer, so no worker
+///   ever walks tubes across the hall to the other line's packer (which
+///   two packers did, and which halved the rate). The tube crates wait
+///   there on a forklift aisle, and the forklifts drive them to the east
+///   wall and charge at a bay off the aisle.
 ///
-/// Jobs: 9 manual stations Ã— 2 + 4 assisted Ã— 1 + 9 walkers + 2 forklift
-/// drivers + 2 crane drivers = 35, the spec's count.
+/// Jobs: 2 automated smelters x 0.25 + 7 manual stations x 2 + 14 walkers
+/// + 2 forklift drivers + 2 crane drivers = 34.5, the spec's 35. The tube
+/// walk needs three of the walkers: the rest is the headcount a designer
+/// trims (`improved_layout_test.dart`), the template's "fine, not great".
 library;
 
 import 'factory_catalog.dart';
@@ -74,19 +78,21 @@ import 'templates/rocketfactory_template.dart';
 /// The plant type the Steel Mill template is for (`CityBuildingSpec.type`).
 const String kSteelMillType = 'steelmill';
 
-/// Steel Mill hall: 33 Ã— 28 tiles = 66 Ã— 56 m â€” the two lines, the tube
-/// corner and a 4 m forklift aisle along the shipping wall, no more (hall
-/// area is build cost).
-const HallSize kSteelMillHall = HallSize(33, 28);
+/// Steel Mill hall: 42 x 32 tiles = 84 x 64 m: the two lines, the tube
+/// corner and its forklift aisle to the east wall, plus open floor east of
+/// the tube corner and above the upper line for a designer to grow into.
+/// Hall area is build cost, and it is sized so the template's capex is the
+/// spec's 40 ore (`capex_test.dart`): the port layout needs fewer stations
+/// and no arms, so the old 66 x 56 m shed came to ~33.
+const HallSize kSteelMillHall = HallSize(42, 32);
 
-/// Workers on foot carrying tubes, one at a time, 0.4 tubes/s in all.
-/// Measured: eight hold the spec rate, seven fall ~5% short; nine keeps
-/// one spare so a busy moment never starves the packer.
-const int kSteelMillWalkers = 9;
+/// Workers on foot carrying tubes from the press's hand port to the tube
+/// packer's, a one-tile hop: 0.4 tubes/s is three workers' work. The rest
+/// is the spec's headcount on the floor, a designer's lever.
+const int kSteelMillWalkers = 14;
 
-/// Forklifts clearing steel crates to shipping: 0.15 crates/s, each a
-/// one-tile hop from packer to dock, is light work for one, and the second
-/// covers the other line and the first one's charging.
+/// Forklifts clearing tube crates to shipping: 0.04 crates/s is light work
+/// for one; the second covers the other line and the first one's charging.
 const int kSteelMillForklifts = 2;
 
 /// One crane per line's billet bay.
@@ -147,59 +153,70 @@ const MeasureSettings kSlowLineMeasureSettings = MeasureSettings(
   earlyStop: false,
 );
 
-/// Hands out placement ids in order, so the template is stable across
-/// builds (saves key runtime state by id).
-/// x of the forklift aisle's west lane (two tiles wide).
-const int _aisleX = 29;
+/// x of the tube-crate shipping dock, on the east wall.
+const int _shipX = 40;
 
-/// x of the shipping docks, on the east wall beyond the aisle.
-const int _shipX = 31;
-
-/// One ore-to-steel line with its base row at [y].
-void _steelLine(TemplateLayout l, int y, {Set<int> oreCrossings = const {}}) {
-  // Ore in on a dock conveyor: dock on the west wall, belt past both
-  // smelters.
-  l.add(EntityKind.receivingDock, 0, y, item: 'ore');
-  l.beltEast(2, 16, y, crossings: oreCrossings);
-  l.arm(5, y + 1, Dir4.north);
-  l.arm(14, y + 1, Dir4.north);
-  // Two smelters with the slag press between them.
-  l.machine(4, y + 2, SteelRecipes.smelt);
-  l.machine(9, y + 2, SteelRecipes.tube);
-  l.machine(13, y + 2, SteelRecipes.smelt);
-  l.arm(8, y + 3, Dir4.east); // smelter A â†’ press (takes slag only)
-  l.arm(12, y + 3, Dir4.west); // smelter B â†’ press
-  // Pig iron to the furnace by belt, with a crossing to the press.
-  l.arm(6, y + 6, Dir4.north, only: 'pigIron');
-  l.arm(14, y + 6, Dir4.north, only: 'pigIron');
-  l.beltEast(6, 15, y + 7, crossings: {10});
-  // The heavy line: furnace and mill end to end under one crane bay.
-  l.machine(16, y + 7, SteelRecipes.cast, mode: MachineMode.assisted);
-  l.machine(20, y + 7, SteelRecipes.roll, mode: MachineMode.assisted);
-  l.add(EntityKind.craneBay, 16, y + 7, span: (9, 3));
-  // Bars by arm to the packer; its crates wait for a forklift.
-  l.arm(25, y + 8, Dir4.east);
-  l.machine(26, y + 8, SteelRecipes.packSteel);
-  l.add(EntityKind.shippingDock, _shipX, y + 8);
+/// One ore-to-steel line with its lowest row at [b]. Every connection is a
+/// port (`station_ports.dart`; the tiles are in the comments):
+///
+///     row b+8       slag belt off the smelter's top port
+///     row b+4..7    ore dock > belt > smelter S > belt > furnace F
+///     row b+3       crane hook over (11, b+3), F's and M's hand ports
+///                   (the crane bay spans x 8..14, rows b..b+6)
+///     row b..2      ship < belt < packer K < belt < rolling mill M
+///
+/// Its slag leaves the smelter's top port onto (6, b+8); the caller routes
+/// it to the shared press.
+void _steelLine(TemplateLayout l, int b) {
+  // Ore: dock conveyor into the smelter's input port (4, b+5).
+  l.add(EntityKind.receivingDock, 0, b + 5, item: 'ore');
+  l.beltEast(2, 3, b + 5);
+  l.machine(4, b + 4, SteelRecipes.smelt, mode: MachineMode.automated);
+  // Pig iron: smelter output 1 (7, b+5) onto (8, b+5), into the furnace's
+  // input port (10, b+5).
+  l.beltEast(8, 9, b + 5);
+  l.machine(10, b + 4, SteelRecipes.cast);
+  // The rolling mill faces WEST below the furnace: its hand port (11, b+2)
+  // and the furnace's (11, b+4) both open onto (11, b+3), under the hook.
+  l.machine(9, b, SteelRecipes.roll, dir: Dir4.west);
+  // The runway spans the whole heavy line (7 x 7 tiles over furnace and
+  // mill), though the hook only ever works the shared tile.
+  l.add(EntityKind.craneBay, 8, b, span: (7, 7));
+  // Bars: mill output (9, b+1) west onto (8, b+1), into the west-facing
+  // packer's input port (6, b+1); crates out its port (4, b+1) onto a belt
+  // into the west-wall shipping dock.
+  l.beltRun(8, 7, b + 1, Dir4.west);
+  l.machine(4, b + 1, SteelRecipes.packSteel, dir: Dir4.west);
+  l.beltRun(3, 2, b + 1, Dir4.west);
+  l.add(EntityKind.shippingDock, 0, b + 1);
 }
 
 FloorBlueprint _steelMill() {
   final l = TemplateLayout();
-  _steelLine(l, 2);
-  // The tube corner between the lines: walkers bring tubes from both
-  // presses; crates leave by arm and belt, crossing the forklift aisle.
-  l.machine(9, 12, SteelRecipes.packTubes);
-  l.arm(12, 12, Dir4.east);
-  l.beltEast(13, _shipX - 1, 12, crossings: {_aisleX, _aisleX + 1});
-  l.add(EntityKind.shippingDock, _shipX, 12);
-  // The walkers' muster area beside it (where new hires stand).
-  l.add(EntityKind.staging, 3, 13, span: (4, 2));
-  // The upper line's ore belt gets a crossing on the walk to its press.
-  _steelLine(l, 16, oreCrossings: {10});
-  // The forklift aisle down the shipping wall, and its charging bay
-  // midway between the two lines.
-  l.add(EntityKind.aisle, _aisleX, 0, span: (2, kSteelMillHall.h));
-  l.add(EntityKind.chargingBay, _shipX, 14);
+  _steelLine(l, 1);
+  _steelLine(l, 14);
+  // Slag to the shared press's input port (16, 11), fed from (15, 11):
+  // the lower line's belt runs along row 10 and turns up into it, the
+  // upper line's along row 22 and down column 15 into it (a side merge).
+  l.add(EntityKind.belt, 6, 9, dir: Dir4.north);
+  l.beltEast(6, 14, 10);
+  l.add(EntityKind.belt, 15, 10, dir: Dir4.north);
+  l.beltEast(6, 14, 22);
+  l.beltRun(22, 12, 15, Dir4.south);
+  l.add(EntityKind.belt, 15, 11);
+  l.machine(16, 10, SteelRecipes.tube);
+  // The tube packer faces south so its hand port (19, 9) opens onto (18, 9),
+  // beside the press's (17, 9): a worker carries each tube one tile.
+  l.machine(19, 8, SteelRecipes.packTubes, dir: Dir4.south);
+  // The forklift aisle: a pad over both hand ports, then east along rows
+  // 6..7 to the tube-crate dock, with the charging bay off it.
+  l.add(EntityKind.aisle, 17, 8, span: (2, 2));
+  l.add(EntityKind.aisle, 17, 6, span: (_shipX - 17, 2));
+  l.add(EntityKind.shippingDock, _shipX, 6);
+  l.add(EntityKind.chargingBay, 27, 4);
+  // The walkers' muster area beside the tube corner (where new hires
+  // stand).
+  l.add(EntityKind.staging, 21, 12, span: (4, 1));
   return FloorBlueprint(
     name: 'Steel Mill',
     plantType: kSteelMillType,

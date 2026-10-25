@@ -36,15 +36,22 @@
 /// worker sets his load down first. [itemsOnFloor] and [craftNet] let a
 /// test prove it: held + shipped − received − craftNet is zero, always.
 ///
-/// **Who feeds what.** Feeds are tracked per (machine, item), not per
-/// machine. An arm or belt counts as feeding an input only if what can
-/// actually reach it upstream includes that item: a receiving dock's item,
-/// a machine's outputs (through a filter if the arm has one), what a belt
-/// run carries (solved as a fixed point over docks, arms and belts), and
-/// "anything" for an unfiltered chest. Likewise an arm clears only the
-/// outputs its filter passes AND its drop tile accepts. So an assembler
-/// with one belt-fed input still asks walkers for the other, and a
-/// smelter whose only arm takes pig iron still offers its slag.
+/// **Who feeds what: PORTS** (§10 item 19, `station_ports.dart`). Every
+/// station has fixed input ports (one per recipe input slot), output ports
+/// (main product, then byproducts) and one hand port. A belt (or a
+/// receiving dock's open end) feeds a machine ONLY from an input port's
+/// outside tile, pointing in, and only that slot's item; a machine pushes
+/// each output onto a belt at that slot's output port, and nowhere else.
+/// Arms no longer touch machines at all — they load and unload chests,
+/// docks, belts, staging and piles — and handlers drop and pick at the hand
+/// port only. Feeds are tracked per (machine, item): a slot counts as
+/// conveyor-fed only if what can reach its port's belt upstream includes
+/// that item (a dock's item, an upstream port's output, what a belt run
+/// carries — a fixed point over docks, ports, arms and belts — or anything
+/// for an unfiltered chest). So an assembler with one belt-fed input still
+/// asks handlers for the other, and a smelter whose pig iron leaves by belt
+/// still offers its slag at the hand port. An output with neither a belt at
+/// its port nor a handler to clear it fills and blocks the station.
 ///
 /// **People.** Stations need their crew and handlers are workers. The
 /// colony's staffing share decides how many of the layout's jobs are filled
@@ -85,6 +92,7 @@ import 'factory_vehicles.dart';
 import 'dock_geometry.dart';
 import 'dock_logistics.dart';
 import 'floor_blueprint.dart';
+import 'station_ports.dart';
 
 /// Belt speed in tiles per second: 3 m/s, a brisk industrial conveyor.
 const double kBeltTilesPerS = 1.5;
@@ -367,8 +375,21 @@ class FactoryFloor implements FactorySim, FloorCleanup {
   /// (machine, input item) pairs an arm or belt feeds: no hand requests.
   Set<(int, String)> _autoFed = const {};
 
-  /// (machine, output item) pairs an arm empties: not offered to handlers.
+  /// (machine, output item) pairs a belt at the output port empties: not
+  /// offered to handlers. (Named for the arms that did this before ports.)
   Set<(int, String)> _armCleared = const {};
+
+  /// (input port's outside tile key, port tile key) → the item that slot
+  /// takes, for every machine's USED input ports: the one test a conveyor
+  /// delivery into a machine must pass ([_depositTile]).
+  Map<(int, int), String> _inPortItem = const {};
+
+  /// Per machine id (sorted by id), its used output ports with a connected
+  /// belt: (belt tile, slot item). [_pushOutputs] walks them.
+  List<(int, List<(TilePos, String)>)> _outPorts = const [];
+
+  /// Per machine id, its hand port (where handlers work it).
+  Map<int, MachinePort> _handPorts = const {};
 
   /// Where idle handlers gather (and new hires start).
   TilePos _idleTile = const TilePos(0, 0);
@@ -740,6 +761,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     _swingArms(dt);
     _advanceBelts(dt);
     _craft(power, dt);
+    _pushOutputs();
     if (lg != null && ordered) {
       _shipOrdered(lg);
     } else {
@@ -808,8 +830,9 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       if (s.credit > 1) s.credit = 1;
       if (s.credit < 1 - _eps) continue;
       final front = _frontOf(p);
+      final from = front.step(p.dir.opposite);
       // Never take from the colony what can't be set down.
-      if (!_depositTile(front, def.id, commit: false)) continue;
+      if (!_depositTile(front, def.id, commit: false, from: from)) continue;
       // Units a removed receiving dock already took count first.
       s.paid += _useCredit(_owed, def.commodity, def.commodityUnits - s.paid);
       final need = def.commodityUnits - s.paid;
@@ -823,7 +846,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
         }
       }
       if (s.paid + _eps < def.commodityUnits) continue;
-      _depositTile(front, def.id);
+      _depositTile(front, def.id, from: from);
       s.paid = 0;
       s.credit -= 1;
     }
@@ -929,10 +952,18 @@ class FactoryFloor implements FactorySim, FloorCleanup {
 
   /// Sets [item] onto tile [t] (a belt's entry at [entry] progress, or into
   /// whatever placement covers it). With [commit] false, only asks.
+  ///
+  /// A MACHINE takes an item only through an input port: [from] must be
+  /// that port's outside tile and [item] its slot's item. Arms pass no
+  /// [from], so they never feed a machine (§10 item 19).
   bool _depositTile(TilePos t, String item,
-      {double entry = 0, bool commit = true}) {
+      {double entry = 0, bool commit = true, TilePos? from}) {
     final p = _at(t);
     if (p == null) return false;
+    if (p.kind == EntityKind.machine &&
+        (from == null || _inPortItem[(from.key, t.key)] != item)) {
+      return false;
+    }
     if (_isBelt(p.kind)) {
       final b = _belts[p.id]!;
       final last = b.items.isEmpty ? null : b.items.last;
@@ -988,9 +1019,12 @@ class FactoryFloor implements FactorySim, FloorCleanup {
 
   /// Takes one item [ok] accepts from tile [t]: the front-most on a belt,
   /// a machine's outputs in recipe order, a store's in id order.
+  ///
+  /// Only arms pick by tile, and arms never unload a machine (§10 item 19):
+  /// a machine's outputs leave by its output ports or its hand port.
   String? _takeFromTile(TilePos t, bool Function(String item) ok) {
     final p = _at(t);
-    if (p == null) return null;
+    if (p == null || p.kind == EntityKind.machine) return null;
     if (_isBelt(p.kind)) {
       final b = _belts[p.id]!;
       for (var i = 0; i < b.items.length; i++) {
@@ -1110,7 +1144,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
         var np = it.p + move;
         if (np > limit) np = limit;
         if (i == 0 && np >= 1) {
-          if (_depositTile(front, it.item, entry: np - 1)) {
+          if (_depositTile(front, it.item, entry: np - 1, from: p.pos)) {
             b.items.removeAt(0);
             // The next item is the front now, behind the one just handed on.
             limit = aheadBelt == null || aheadBelt.items.isEmpty
@@ -1234,6 +1268,22 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     } else {
       m.progress = 0;
       m.status = MachineStatus.starved;
+    }
+  }
+
+  /// Machines push finished goods onto the belts at their output ports:
+  /// each slot's item through its own port only (a byproduct never leaves
+  /// by the main product's belt). One item per port per sub-step, which the
+  /// belt's own spacing allows anyway; what a full belt can't take stays in
+  /// the buffer, and a full buffer blocks the station.
+  void _pushOutputs() {
+    for (final (id, ports) in _outPorts) {
+      final m = _machines[id];
+      if (m == null) continue;
+      for (final (tile, item) in ports) {
+        if (m.outBuf[item] <= 0) continue;
+        if (_depositTile(tile, item)) m.outBuf.add(item, -1);
+      }
     }
   }
 
@@ -1575,6 +1625,12 @@ class FactoryFloor implements FactorySim, FloorCleanup {
           }
           return out;
         }
+        // A machine is worked at its hand port only (§10 item 19).
+        final hand = _handPorts[p.id];
+        if (hand != null) {
+          if (_paths.isWalkable(hand.outside)) out.add(hand.outside);
+          return out;
+        }
         for (var y = f.y0 - 1; y <= f.y1; y++) {
           for (var x = f.x0 - 1; x <= f.x1; x++) {
             final side = (y == f.y0 - 1 || y == f.y1) && x >= f.x0 && x < f.x1;
@@ -1612,8 +1668,9 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       final home = _layerHome[layer];
       return home == null ? const [] : [home];
     }
-    final TileRect f;
+    TileRect f;
     var inside = true, ring = true;
+    MachinePort? hand;
     if (id < 0) {
       final pile = _piles[id];
       if (pile == null) return const [];
@@ -1626,7 +1683,21 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       f = p.footprint;
       inside = p.kind == EntityKind.staging || p.kind == EntityKind.chargingBay;
       ring = p.kind != EntityKind.chargingBay;
+      hand = _handPorts[p.id];
     }
+    if (layer < 0 && hand != null) {
+      // A crane works a machine with its hook over the hand port or just
+      // outside it.
+      final bay = _byId[-layer];
+      if (bay == null) return const [];
+      final b = bay.footprint;
+      return [
+        for (final t in [hand.tile, hand.outside])
+          if (_bp.hall.contains(t) && b.contains(t)) t,
+      ]..sort((a, b) => a.key.compareTo(b.key));
+    }
+    // A vehicle works a machine from its hand port's outside tile only.
+    final only = hand?.outside;
     if (layer < 0) {
       final bay = _byId[-layer];
       if (bay == null) return const [];
@@ -1644,7 +1715,9 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     for (var y = f.y0 - 1; y <= f.y1; y++) {
       for (var x = f.x0 - 1; x <= f.x1; x++) {
         final t = TilePos(x, y);
-        final ok = f.contains(t) ? inside : (ring && _beside(f, t));
+        final ok = only != null
+            ? t == only
+            : f.contains(t) ? inside : (ring && _beside(f, t));
         if (!ok || !hall.contains(t)) continue;
         if (open == null
             ? _paths.isPassable(layer, t)
@@ -2154,9 +2227,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     if (src == null) return const {};
     switch (src.kind) {
       case EntityKind.machine:
-        return {
-          for (final q in _recipeOf(src)?.outputs ?? const <ItemQty>[]) q.item,
-        };
+        return const {}; // arms never unload a machine (§10 item 19)
       case EntityKind.belt:
       case EntityKind.crossing:
         return carries[src.id] ?? const {};
@@ -2175,26 +2246,6 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     final f = a.item;
     if (f == null) return up;
     return up.contains(f) || up.contains(_kAnyItem) ? {f} : const {};
-  }
-
-  /// Whether the tile in front of an arm could ever take [item].
-  bool _accepts(Placement? to, String item) {
-    if (to == null) return false;
-    switch (to.kind) {
-      case EntityKind.belt:
-      case EntityKind.crossing:
-        return true;
-      case EntityKind.machine:
-        final r = _recipeOf(to);
-        return r != null && _qtyOf(r.inputs, item) != null;
-      case EntityKind.chest:
-      case EntityKind.staging:
-      case EntityKind.shippingDock:
-        final f = to.item;
-        return f == null || f == item;
-      default:
-        return false;
-    }
   }
 
   /// Re-derives every cache from the layout. Cheap (one pass over the
@@ -2237,7 +2288,39 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     _stagingList = ofKind((k) => k == EntityKind.staging);
     final belts = ofKind(_isBelt);
 
-    // What each belt run can carry: docks, arms and upstream belts feed it.
+    // Ports (§10 item 19): which conveyor tile feeds which input slot, and
+    // which belt each output slot pushes onto.
+    final inPortItem = <(int, int), String>{};
+    final outPorts = <(int, List<(TilePos, String)>)>[];
+    final handPorts = <int, MachinePort>{};
+    for (final m in _machineList) {
+      final r = _recipeOf(m);
+      if (r == null) continue;
+      final outs = <(TilePos, String)>[];
+      for (final port in portsOf(m)) {
+        if (port.role == PortRole.hand) {
+          handPorts[m.id] = port;
+          continue;
+        }
+        final q = recipeSlotItem(r, port);
+        if (q == null) continue;
+        if (port.role == PortRole.input) {
+          inPortItem[(port.outside.key, port.tile.key)] = q.item;
+          continue;
+        }
+        final b = _at(port.outside);
+        if (b != null && _isBelt(b.kind) && port.connectsBelt(b.dir)) {
+          outs.add((port.outside, q.item));
+        }
+      }
+      if (outs.isNotEmpty) outPorts.add((m.id, outs));
+    }
+    _inPortItem = inPortItem;
+    _outPorts = outPorts;
+    _handPorts = handPorts;
+
+    // What each belt run can carry: docks, output ports, arms and upstream
+    // belts feed it.
     // Sets only grow over a finite universe, so the loop ends.
     final carries = {for (final b in belts) b.id: <String>{}};
     var changed = true;
@@ -2256,6 +2339,11 @@ class FactoryFloor implements FactorySim, FloorCleanup {
         final it = d.item;
         if (it != null) feed(_frontOf(d), {it});
       }
+      for (final (_, ports) in outPorts) {
+        for (final (t, it) in ports) {
+          feed(t, {it});
+        }
+      }
       for (final a in _armList) {
         feed(_frontOf(a), _armDelivers(a, carries));
       }
@@ -2265,28 +2353,30 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     }
 
     final autoFed = <(int, String)>{}, armCleared = <(int, String)>{};
-    void feeds(Placement? to, Set<String> items) {
+    // A conveyor on [from] feeds the machine on [front] only through an
+    // input port there, and only if [items] can include that slot's item.
+    void feeds(TilePos from, TilePos front, Set<String> items) {
+      final to = _at(front);
       if (to == null || to.kind != EntityKind.machine) return;
-      for (final q in _recipeOf(to)?.inputs ?? const <ItemQty>[]) {
-        if (items.contains(q.item) || items.contains(_kAnyItem)) {
-          autoFed.add((to.id, q.item));
-        }
+      final it = inPortItem[(from.key, front.key)];
+      if (it == null) return;
+      if (items.contains(it) || items.contains(_kAnyItem)) {
+        autoFed.add((to.id, it));
       }
     }
 
-    for (final a in _armList) {
-      final from = _at(_behindOf(a)), to = _at(_frontOf(a));
-      if (from != null && from.kind == EntityKind.machine) {
-        final filter = a.item;
-        for (final q in _recipeOf(from)?.outputs ?? const <ItemQty>[]) {
-          if (filter != null && filter != q.item) continue;
-          if (_accepts(to, q.item)) armCleared.add((from.id, q.item));
-        }
-      }
-      feeds(to, _armDelivers(a, carries));
+    for (final d in _recvList) {
+      final it = d.item;
+      final front = _frontOf(d);
+      if (it != null) feeds(front.step(d.dir.opposite), front, {it});
     }
     for (final b in belts) {
-      feeds(_at(_frontOf(b)), carries[b.id]!);
+      feeds(b.pos, _frontOf(b), carries[b.id]!);
+    }
+    for (final (id, ports) in outPorts) {
+      for (final (_, it) in ports) {
+        armCleared.add((id, it));
+      }
     }
     _autoFed = autoFed;
     _armCleared = armCleared;

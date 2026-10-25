@@ -505,6 +505,12 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
       pricing: yes (tooling capital plus engineering hours).
     - Cost: it changes the engine's feed rule; all seven templates are redrawn within 5% of
       spec; the tutorial is rewritten. Build it alongside construction crews and blueprint mode.
+    - **BUILT 2026-10-25** (user answers: arms for chests and docks only; one hand port per
+      station; items fixed per recipe slot; layout per station kind). `station_ports.dart`
+      holds the layouts; the engine feeds and empties machines only through ports; the editor
+      draws notches (lit when connected) with a hover tip; the Steel Mill and the Rocket Parts
+      tutorial are redrawn. The other six templates still await their redraw: their tests are
+      skipped with `awaiting port redraw (#19)`.
 
 20. **Station operators are hired people.** Manual (2) and assisted (1) stations need operators
     the player HIRES, a new Operator role in the roster, not an abstract staffing share (today

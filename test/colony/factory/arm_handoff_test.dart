@@ -8,15 +8,16 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_p
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
-import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'factory_test_support.dart';
 
-/// Arms are the fixed short hop between belts and stations (§3). They pick
-/// from the tile BEHIND and drop on the tile in FRONT, one item per swing,
-/// and — like an inserter — only pick what the front can take now, which is
-/// what lets one mixed belt feed a station without jamming its arm.
+/// Arms are the fixed short hop between belts, chests and docks (§3; since
+/// §10 item 19 they never touch machines, which connect by ports). They
+/// pick from the tile BEHIND and drop on the tile in FRONT, one item per
+/// swing, and — like an inserter — only pick what the front can take now,
+/// which is what lets one mixed belt load a filtered chest without jamming
+/// its arm.
 void main() {
   setUpAll(ensureFactoryCatalog);
 
@@ -40,37 +41,40 @@ void main() {
     expect(onFloor, port.taken['ore']!.toInt(), reason: 'nothing lost');
   });
 
-  test('an arm only picks what the station in front accepts', () {
+  // Arms no longer feed machines (station_ports.dart rule 1: belts connect
+  // to machine ports), so the inserter rule is pinned on what arms still
+  // load: a filtered chest in front takes only its item, an unfiltered one
+  // anything.
+  test('an arm only picks what the chest in front accepts', () {
     final l = Lay();
     l.add(EntityKind.receivingDock, 0, 1, item: 'ore');
     // A side dock pushes slag onto the same belt from below.
     l.add(EntityKind.receivingDock, 3, 3, dir: Dir4.south, item: 'slag');
     l.add(EntityKind.belt, 3, 2, dir: Dir4.south);
-    final main = l.beltRow(2, 6, 1);
-    final feed = l.add(EntityKind.arm, 6, 2, dir: Dir4.north);
-    final smelter = l.add(EntityKind.machine, 5, 3,
-        recipe: SteelRecipes.smelt.id, mode: MachineMode.assisted);
-    final out = l.add(EntityKind.arm, 9, 4);
-    final chest = l.add(EntityKind.chest, 10, 4);
+    l.beltRow(2, 6, 1);
+    // An ore-only chest first: its arm must let the slag ride past.
+    final feed = l.add(EntityKind.arm, 4, 2, dir: Dir4.north);
+    final oreChest = l.add(EntityKind.chest, 4, 3, item: 'ore');
+    // Then a filterless arm into an unfiltered chest, which takes anything.
+    final out = l.add(EntityKind.arm, 5, 2, dir: Dir4.north);
+    final anyChest = l.add(EntityKind.chest, 5, 3);
     final floor = FactoryFloor.fromBlueprint(l.blueprint(12, 8));
     final port = InfiniteColonyPort();
 
+    // 24 s: short of filling either 32-item chest.
     var sawSlagInArm = false;
-    for (var i = 0; i < 480; i++) {
+    for (var i = 0; i < 96; i++) {
       floor.step(0.25, port);
       if ((floor.contentsOf(feed)['slag'] ?? 0) > 0) sawSlagInArm = true;
     }
     expect(sawSlagInArm, isFalse);
-    expect(floor.contentsOf(smelter)['slag'] ?? 0, 0);
-    expect(floor.contentsOf(chest)['pigIron'], greaterThan(0),
-        reason: 'the smelter crafted and its output arm cleared it');
-    expect(floor.contentsOf(chest)['slag'], greaterThan(0),
-        reason: 'a filterless arm into a chest takes any output');
-    var slagOnBelt = 0;
-    for (final b in main) {
-      slagOnBelt += floor.contentsOf(b)['slag'] ?? 0;
-    }
-    expect(slagOnBelt, greaterThan(0), reason: 'slag rode past the feed arm');
+    expect(floor.contentsOf(oreChest)['slag'] ?? 0, 0);
+    expect(floor.contentsOf(oreChest)['ore'], greaterThan(0),
+        reason: 'the filtered chest got the ore it accepts');
+    expect(floor.contentsOf(anyChest)['slag'], greaterThan(0),
+        reason: 'slag rode past the ore arm, and a filterless arm into an '
+            'unfiltered chest takes it');
     expect(floor.contentsOf(out).length, lessThanOrEqualTo(1));
+    expect(conservationError(floor), isEmpty);
   });
 }

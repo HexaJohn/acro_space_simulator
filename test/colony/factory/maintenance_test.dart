@@ -23,7 +23,9 @@ import 'factory_test_support.dart';
 void main() {
   setUpAll(ensureFactoryCatalog);
 
-  /// Dock → belt → automated smelter → arm → shipping: it runs flat out.
+  /// Dock → belt → automated smelter → port belts → shipping: it runs flat
+  /// out. Smelter 4×4 at (4, 0): ore in at (4, 1) from (3, 1); pig iron
+  /// out at (7, 1) onto (8, 1); slag out at (6, 3) onto (6, 4).
   (FactoryFloor, int) autoSmelter() {
     final l = Lay();
     l.add(EntityKind.receivingDock, 0, 1, item: 'ore');
@@ -35,10 +37,10 @@ void main() {
       recipe: SteelRecipes.smelt.id,
       mode: MachineMode.automated,
     );
-    l.add(EntityKind.arm, 8, 1);
+    l.add(EntityKind.belt, 8, 1);
     l.add(EntityKind.shippingDock, 9, 1);
-    l.add(EntityKind.arm, 8, 2);
-    l.add(EntityKind.shippingDock, 9, 2);
+    l.beltRow(6, 7, 4);
+    l.add(EntityKind.shippingDock, 8, 4);
     return (FactoryFloor.fromBlueprint(l.blueprint(12, 5)), m);
   }
 

@@ -5,12 +5,17 @@
 
 import 'dart:convert';
 
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_catalog.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
-import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/floor_blueprint.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'factory_test_support.dart';
 
 /// Floors are measured headless and re-run after load (§3 "Off-screen",
 /// "Persistence"), so vehicles must be as deterministic as walkers: two
@@ -18,9 +23,58 @@ import 'package:flutter_test/flutter_test.dart';
 /// forklift on charge, another mid-trip and a crane mid-lift continues
 /// bit for bit as if the game had never stopped.
 void main() {
-  /// The template plus a jack and an AGV: every kind on one floor.
+  setUpAll(ensureFactoryCatalog);
+
+  const kPortMillHall = HallSize(28, 10);
+  const kPortMillWalkers = 2;
+
+  /// A compact port-correct steel line (the Steel Mill template's chain on
+  /// a 28 × 10 hall), laid here so this test doesn't hang on the template's
+  /// layout. Every machine faces east (ports per `station_ports.dart`):
+  /// ore belts into the smelter's input port; pig iron leaves its front
+  /// port by belt into the furnace; its slag port belts round into the tube
+  /// press. The crane carries billets furnace → mill between their hand
+  /// ports in one bay; steel belts mill → packer; the forklift clears steel
+  /// crates from the packer's hand port (worked from the aisle) to the
+  /// dock; walkers clear the press's tubes from its hand port to shipping.
+  FloorBlueprint portMill() {
+    final l = Lay();
+    l.add(EntityKind.receivingDock, 0, 3, item: 'ore');
+    l.beltRow(2, 3, 3); // → smelter input (4, 3)
+    l.add(EntityKind.machine, 4, 2, recipe: SteelRecipes.smelt.id);
+    l.beltRow(8, 9, 3); // pig iron (7, 3) → furnace input (10, 3)
+    l.add(EntityKind.machine, 10, 2,
+        recipe: SteelRecipes.cast.id, mode: MachineMode.assisted);
+    l.add(EntityKind.machine, 15, 2,
+        recipe: SteelRecipes.roll.id, mode: MachineMode.assisted);
+    // Hand ports (11, 2) and (17, 2) and their outside tiles under the hook.
+    l.add(EntityKind.craneBay, 10, 1, span: (10, 4));
+    l.add(EntityKind.belt, 20, 3); // steel (19, 3) → packer input (21, 3)
+    l.add(EntityKind.machine, 21, 2, recipe: SteelRecipes.packSteel.id);
+    // The packer's hand port (22, 2) is worked from (22, 1) on the aisle.
+    l.add(EntityKind.aisle, 20, 0, span: (8, 2));
+    l.add(EntityKind.chargingBay, 24, 2);
+    l.add(EntityKind.shippingDock, 26, 2);
+    // Slag (6, 5) → north, then east into the press input (8, 7).
+    l.add(EntityKind.belt, 6, 6, dir: Dir4.north);
+    l.beltRow(6, 7, 7);
+    l.add(EntityKind.machine, 8, 6, recipe: SteelRecipes.tube.id);
+    l.add(EntityKind.shippingDock, 12, 6); // tubes, walked from (9, 5)
+    return FloorBlueprint(
+      name: 'Port Mill',
+      hall: kPortMillHall,
+      placements: l.out,
+      roster: {
+        HandlerKind.onFoot: kPortMillWalkers,
+        HandlerKind.forklift: 1,
+        HandlerKind.crane: 1,
+      },
+    );
+  }
+
+  /// [portMill] plus a jack and an AGV: every kind on one floor.
   FactoryFloor mixed() {
-    final f = FactoryFloor.fromBlueprint(factoryTemplateFor('steelmill')!);
+    final f = FactoryFloor.fromBlueprint(portMill());
     expect(f.hire(HandlerKind.palletJack, 1).ok, isTrue);
     expect(f.hire(HandlerKind.agv, 1).ok, isTrue);
     return f;

@@ -136,17 +136,19 @@ void main() {
 
   // ---- 2. Tutorial steps 5 and 6 --------------------------------------------
 
-  test('tutorial steps 5 and 6 say where the arm goes; the jack comes later',
-      () {
+  test('tutorial steps 5 and 6 say which port the belt meets; the jack '
+      'comes later', () {
     final steps = rocketPartsScenario().steps;
     final ids = [for (final s in steps) s.id];
     final feed = steps[ids.indexOf('feed')];
     final ship = steps[ids.indexOf('ship')];
     expect(ids.indexOf('feed'), 4, reason: 'step 5');
     expect(ids.indexOf('ship'), 5, reason: 'step 6');
-    expect(feed.body, contains('BETWEEN the belt and the cell'));
+    // Explicit ports (§10 item 19): the belt meets the input notch pointing
+    // in, and the frames leave by the output notch.
+    expect(feed.body, contains('INPUT port'));
     expect(feed.body, contains('INTO the cell'));
-    expect(ship.body, contains('Arm'));
+    expect(ship.body, contains('OUTPUT port'));
     expect(ship.body, contains('Shipping Dock'));
     expect(ship.body, isNot(contains('Pallet Jack')));
     expect(ship.hint!.targets, isNot(contains(ScenarioHintTarget.palletJack)));

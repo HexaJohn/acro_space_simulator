@@ -54,9 +54,11 @@ import '../../../../domain/colony/city/factory/factory_grid.dart';
 import '../../../../domain/colony/city/factory/factory_handling.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
+import '../../../../domain/colony/city/factory/station_ports.dart';
 import 'factory_editor_controller.dart';
 import 'floor_item_info.dart' show itemAbbrev;
 import 'floor_layout_index.dart';
+import 'machine_ports_view.dart';
 
 /// Below this zoom (px per tile) the grid is gone; it is fully drawn
 /// [kGridFadePx] px per tile later.
@@ -79,6 +81,10 @@ const double kItemLabelMinPx = 36;
 
 /// Label font size, logical px.
 const double kLabelFont = 11;
+
+/// Pixels per tile above which port notches name their items (a label
+/// needs about a tile and a half of room).
+const double kPortLabelMinPx = 40;
 
 /// Colors.
 const Color kFactoryBg = Color(0xFF070B12);
@@ -455,6 +461,11 @@ class FactoryFloorPainter extends CustomPainter {
   /// units; null when none was drawn.
   Rect? sweepRect;
 
+  /// Port notches the last frame drew (placed machines and ghosts), and
+  /// how many of them were lit as connected (§10 item 19).
+  int portMarks = 0;
+  int litPorts = 0;
+
   static final Paint _bg = _fill(kFactoryBg);
   static final Paint _grid = _stroke(const Color(0xFFFFFFFF), 0);
   static final Paint _gridFill = Paint();
@@ -487,6 +498,7 @@ class FactoryFloorPainter extends CustomPainter {
   static final Paint _unusedMark = _fill(const Color(0xFFFFB300));
   static final Paint _clearFill = _fill(const Color(0x4026C6DA));
   static final Paint _clearEdge = _stroke(const Color(0xFF26C6DA), 0.1);
+  static final Paint _portPaint = Paint();
 
   /// The hover-delete outline: red, as wide as the selection ring so it
   /// reads at any zoom, and drawn through [_T] as a FILLED ring.
@@ -528,6 +540,7 @@ class FactoryFloorPainter extends CustomPainter {
     _paintGrid(canvas, vis, px);
     canvas.drawPicture(cache.entities);
     _paintMachines(canvas, ix, vis);
+    _paintPorts(canvas, ix, vis);
     if (c.overlays.contains(FactoryOverlay.traffic)) _paintHeat(canvas, vis);
     if (px >= kDynamicMinPx) {
       _paintPiles(canvas, vis);
@@ -545,6 +558,7 @@ class FactoryFloorPainter extends CustomPainter {
     canvas.restore();
     if (px >= kLabelMinPx) _paintLabels(canvas, ix, vis, px);
     if (px >= kItemLabelMinPx) _paintItemLabels(canvas, ix, vis);
+    if (px >= kPortLabelMinPx) _paintPortLabels(canvas, ix, vis);
     _paintEditLabels(canvas, px);
   }
 
@@ -655,6 +669,43 @@ class FactoryFloorPainter extends CustomPainter {
       if (s == MachineStatus.broken) {
         _T.line(canvas, rect.topLeft, rect.bottomRight, _broken);
         _T.line(canvas, rect.bottomLeft, rect.topRight, _broken);
+      }
+    }
+  }
+
+  /// Every visible machine's port notches (§10 item 19): filled strips via
+  /// [_T], green inputs, orange outputs, the white hand port, an open port
+  /// dimmed and a connected one in full.
+  void _paintPorts(Canvas canvas, FloorLayoutIndex ix, TileRect vis) {
+    portMarks = 0;
+    litPorts = 0;
+    for (final m in ix.machines) {
+      if (!m.footprint.overlaps(vis)) continue;
+      _drawMarks(canvas, portMarksOf(m, ix));
+    }
+  }
+
+  void _drawMarks(Canvas canvas, List<PortMark> marks) {
+    for (final mark in marks) {
+      _portPaint.color = mark.color;
+      _T.rect(canvas, mark.rect, _portPaint);
+      portMarks++;
+      if (mark.connected) litPorts++;
+    }
+  }
+
+  /// Zoomed in, each used input and output notch names its slot's item.
+  void _paintPortLabels(Canvas canvas, FloorLayoutIndex ix, TileRect vis) {
+    for (final m in ix.machines) {
+      if (!m.footprint.overlaps(vis)) continue;
+      for (final mark in portMarksOf(m, ix)) {
+        if (mark.port.role == PortRole.hand) continue;
+        final i = mark.label.indexOf(': ');
+        if (i < 0 || mark.label.endsWith('unused')) continue;
+        final tp = _label(mark.label.substring(i + 2));
+        final c0 = mark.rect.center;
+        final at = c.tileToLocal(c0.dx, c0.dy);
+        tp.paint(canvas, at - Offset(tp.width / 2, tp.height / 2));
       }
     }
   }
@@ -923,6 +974,9 @@ class FactoryFloorPainter extends CustomPainter {
           headLen: math.min(0.45, reach),
           headWidth: 0.55);
       ghostArrows++;
+      // A machine ghost shows its ports before it lands, lit where the
+      // layout it would join already connects them.
+      if (p.kind == EntityKind.machine) _drawMarks(canvas, portMarksOf(p, c.index));
       if (p.kind == EntityKind.arm) {
         final from = TilePos(p.pos.x - p.dir.dx, p.pos.y - p.dir.dy);
         final to = p.pos.step(p.dir);

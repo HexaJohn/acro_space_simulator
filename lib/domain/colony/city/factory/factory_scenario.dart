@@ -695,73 +695,73 @@ FactoryScenario rocketPartsScenario() {
             'TRANSPORT ▸ Belt, then drag', {ScenarioHintTarget.belt}),
         check: (sim, p) => sim.beltItems.any((b) => b.item == _tubes),
       ),
+      // Steps from here teach explicit PORTS (§10 item 19): every station
+      // has fixed input ports (one per recipe input, green notches),
+      // output ports (orange) and one hand port (white) where handlers
+      // load and unload it. Arms no longer feed or clear machines, so the
+      // line is belts into ports and belts out of ports.
       TutorialStep(
         id: 'make',
         title: 'Place a welding cell',
         body: 'Pick the Assembler, choose the recipe Weld Frame, and place it '
-            'next to the belt with ONE free tile between them. Weld Frame '
-            'turns 5 tubes into 2 welded frames every 36 s.',
+            'just past the END of the tube belt. Weld Frame turns 5 tubes '
+            'into 2 welded frames every 36 s. Look at its edges: the green '
+            'notches are INPUT ports (hover one: "Input 1: Tubes"), the '
+            'orange notch is its OUTPUT port, and the white one is the HAND '
+            'port where workers load and unload it.',
         hint: const ScenarioHint('MACHINES ▸ Assembler, recipe: Weld Frame '
             '(or set it in the Inspector)', {ScenarioHintTarget.assembler}),
         check: (sim, p) => _running(sim, weld).isNotEmpty,
       ),
-      // Steps 5 and 6 were the playtest's sticking point (§10 item 2):
-      // "feed it" and "ship it" didn't say WHERE the arm goes or which way
-      // it points, and step 6 sent the player to hire a pallet jack before
-      // they had seen an arm carry anything out. Both now name the exact
-      // tile and facing; the jack is offered later as the alternative.
+      // Steps 5 and 6 were the playtest's sticking point (§10 item 2), and
+      // with ports they are where the puzzle starts: the belt has to meet
+      // the right notch, pointing the right way.
       TutorialStep(
         id: 'feed',
-        title: 'Feed it with an arm',
-        body: 'Pick Arm and put it on the free tile BETWEEN the belt and the '
-            'cell, its arrow pointing INTO the cell (R turns it, Shift+R the '
-            'other way). An arm takes from the tile behind it and drops '
-            'into the tile its arrow points at: the ghost tints the "take" '
-            'tile (the belt) and the "drop" tile (the cell). It lifts tubes '
-            'off the belt into the cell, which starts welding.',
+        title: 'Run the tubes into input 1',
+        body: 'A belt feeds a machine only through an INPUT port: its last '
+            'tile must sit on the tile just outside the green "Input 1: '
+            'Tubes" notch (the middle of the cell\'s back, the side its '
+            'arrow points away from), pointing INTO the cell. Extend or '
+            'redraw the tube belt so it does. A belt touching any other '
+            'tile of the cell, or the wrong notch, feeds nothing. When the '
+            'port is connected it lights up and the cell starts welding.',
         hint: const ScenarioHint(
-            'TRANSPORT ▸ Arm on the gap tile, arrow → the cell',
-            {ScenarioHintTarget.arm}),
+            'TRANSPORT ▸ Belt, last tile → the Input 1 notch',
+            {ScenarioHintTarget.belt}),
         check: (sim, p) => _fed(sim, weld, {_tubes, frame}),
       ),
       TutorialStep(
         id: 'ship',
-        title: 'Get the frames out',
-        body: 'Frames come out the same way tubes went in. Put a second Arm '
-            'on a free tile beside the cell with an empty tile past it, its '
-            'arrow pointing AWAY from the cell, then lay a Belt starting on '
-            'that empty tile (the arm drops onto it) and run it into a '
-            'Shipping Dock: the belt\'s last tile points into the dock, '
-            'which ships any item.',
+        title: 'Take the frames out of the output port',
+        body: 'Frames leave only by the cell\'s orange OUTPUT port, on the '
+            'side its arrow points at. Lay a Belt starting on the tile just '
+            'outside that notch and run it into a Shipping Dock (the belt\'s '
+            'last tile points into the dock, which ships any item). With '
+            'no belt there and nobody to carry them, the frames pile up '
+            'inside and the cell stops: "blocked".',
         hint: const ScenarioHint(
-            'Arm (cell → belt), Belt from the arm\'s drop tile, Shipping '
-            'Dock at the belt\'s end',
-            {
-              ScenarioHintTarget.arm,
-              ScenarioHintTarget.belt,
-              ScenarioHintTarget.shippingDock,
-            }),
+            'Belt from the output notch → Shipping Dock',
+            {ScenarioHintTarget.belt, ScenarioHintTarget.shippingDock}),
         check: (sim, p) => _shipped(sim, frame) >= 1,
       ),
       TutorialStep(
         id: 'secondLine',
         title: 'Start the avionics line',
-        body: 'Add a Receiving Dock set to '
+        body: 'Add an Assembler set to Wire Avionics (3 electronics → 2 '
+            'harnesses) and a Receiving Dock set to '
             '${FactoryItems.electronics.pickerLabel} — the LOOSE boards, not '
             'the ${FactoryItems.crateElectronics.pickerLabel}, which no bench '
-            'here unpacks — and an Assembler set to Wire Avionics (3 '
-            'electronics → 2 harnesses). Point the dock straight at the '
-            'bench: a dock can unload into a machine. Harnesses are HAND '
-            'loads, so hire a couple of Workers to carry them.',
+            'here unpacks. Run a belt from in front of the dock into the '
+            'bench\'s Input 1 notch, the same way as the tubes. Its '
+            'harnesses will leave by its output port in the next step.',
         hint: ScenarioHint(
             'Receiving Dock (${FactoryItems.electronics.pickerLabel}), '
-            'Assembler (Wire Avionics), '
-            'HANDLERS ▸ Worker +. Idle workers wait on the first Staging '
-            'area you lay; with none they walk back to the hall\'s corner.',
-            {
+            'Assembler (Wire Avionics), Belt → its Input 1',
+            const {
               ScenarioHintTarget.receivingDock,
               ScenarioHintTarget.assembler,
-              ScenarioHintTarget.walker,
+              ScenarioHintTarget.belt,
             }),
         check: (sim, p) =>
             _hasDock(sim, _electronics) &&
@@ -769,27 +769,29 @@ FactoryScenario rocketPartsScenario() {
       ),
       TutorialStep(
         id: 'assemble',
-        title: 'Assemble rocket parts',
+        title: 'Assemble rocket parts: two inputs',
         body: 'Place an Assembler set to Assemble Rocket Parts (1 frame + 1 '
-            'harness → 2 parts) one tile off the frame belt, with an Arm '
-            'in the gap pointing into it: it takes the frames it needs as '
-            'they ride past, and the rest still ship. The workers bring it '
-            'harnesses. (Alternative: hand frames to a handler instead — '
-            'frames are PALLET loads, so hire a Pallet Jack to carry them '
-            'from the cell.) Rocket parts are HEAVY: no worker or jack can '
-            'lift them. An arm lifts anything, so put one between the '
-            'assembler and a shipping dock (or a belt to one), or lay a '
-            'Crane Bay over it and hire a Crane.',
+            'harness → 2 parts). It has TWO input ports: frames go into '
+            'Input 1 (the back) and harnesses into Input 2 (the top). '
+            'Replace the frame shipping dock with it so the frame belt runs '
+            'into Input 1, then run a belt from the wiring bench\'s output '
+            'port round into Input 2 — hover a notch to check which is '
+            'which. Rocket parts are HEAVY, so no worker can lift them: '
+            'run a belt from the assembler\'s output port into a Shipping '
+            'Dock. (Arms still load and unload chests and docks, but never '
+            'a machine. A handler — a Pallet Jack for frames, a Crane over '
+            'the hand port for parts — is the alternative to a belt: '
+            'hand frames to a handler at the cell\'s white hand port.)',
         hint: const ScenarioHint(
-            'Assembler (Assemble Rocket Parts) + Arm from the frame belt; '
-            'Arm → Shipping Dock (or Crane Bay + Crane). Or HANDLERS ▸ '
-            'Pallet Jack + to carry frames',
+            'Assembler (Assemble Rocket Parts): frames → Input 1, harnesses '
+            '→ Input 2, output belt → Shipping Dock',
             {
               ScenarioHintTarget.assembler,
-              ScenarioHintTarget.arm,
+              ScenarioHintTarget.belt,
+              ScenarioHintTarget.shippingDock,
+              ScenarioHintTarget.palletJack,
               ScenarioHintTarget.craneBay,
               ScenarioHintTarget.crane,
-              ScenarioHintTarget.palletJack,
             }),
         check: (sim, p) => _shipped(sim, _rocketParts) >= 1,
       ),
@@ -810,8 +812,9 @@ FactoryScenario rocketPartsScenario() {
     freePlayTitle: 'Free play: build a plant that makes rocket parts',
     freePlayBody: 'The line you built works, but slowly. Grow it into a real '
         'plant: the colony\'s Rocket Parts Factory makes 0.4 parts a second '
-        'with 50 jobs. Belts and arms cost no crew; Recipe info shows what '
-        'each step takes.',
+        'with 50 jobs. Belts cost no crew, but each one connects to one '
+        'port, so feeding more cells is a layout puzzle; Recipe info shows '
+        'what each step takes.',
     goals: [
       ScenarioGoal(
         id: 'ship20',

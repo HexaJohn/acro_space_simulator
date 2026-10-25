@@ -24,25 +24,32 @@ void main() {
   setUpAll(ensureFactoryCatalog);
 
   /// A forklift keeps a smelter in ore down a 2-wide aisle; [bay] adds a
-  /// charging bay off the aisle.
+  /// charging bay off the aisle. The smelter sits north of the aisle's east
+  /// end so its hand port (south face, outside tile (13, 1)) is on the
+  /// aisle: a forklift works a machine there and nowhere else.
   FactoryFloor busyForklift({required bool bay}) {
     final l = Lay();
     l.add(EntityKind.receivingDock, 0, 0, item: 'ore');
     l.add(EntityKind.staging, 2, 0, span: (2, 2));
-    l.add(EntityKind.aisle, 4, 0, span: (8, 2));
+    l.add(EntityKind.aisle, 4, 0, span: (10, 2));
+    // Smelter 4×4 at (12, 2): input port (12, 3), pig iron out at (15, 3),
+    // slag out at (14, 5), hand port (13, 2).
     l.add(
       EntityKind.machine,
       12,
-      0,
+      2,
       recipe: SteelRecipes.smelt.id,
       mode: MachineMode.assisted,
     );
-    // Its pig iron and slag go by arm to shipping so it never blocks.
-    l.add(EntityKind.arm, 13, 4, dir: Dir4.north);
-    l.add(EntityKind.shippingDock, 13, 5);
+    // Its pig iron and slag leave by port belts to shipping, so it never
+    // blocks and the forklift only ever hauls ore.
+    l.add(EntityKind.belt, 16, 3);
+    l.add(EntityKind.shippingDock, 17, 3);
+    l.add(EntityKind.belt, 14, 6, dir: Dir4.north);
+    l.add(EntityKind.shippingDock, 14, 7);
     if (bay) l.add(EntityKind.chargingBay, 6, 2);
     final f = FactoryFloor.fromBlueprint(
-      l.blueprint(16, 8, crew: {HandlerKind.forklift: 1}),
+      l.blueprint(20, 9, crew: {HandlerKind.forklift: 1}),
     );
     return f;
   }

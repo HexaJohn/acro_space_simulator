@@ -27,16 +27,19 @@ void main() {
 
   /// An ore dock unloads into staging; a hand-fed smelter at the far end
   /// of an aisle [width] tiles wide wants the ore; one forklift, no
-  /// walkers (ore is pallet work anyway).
+  /// walkers (ore is pallet work anyway). The smelter (4×4 at (12, 2))
+  /// sits north of the aisle's east end: its hand port (13, 2) faces south,
+  /// so the forklift works it from (13, 1) — on a 2-wide aisle, and not on
+  /// a 1-wide one.
   (FactoryFloor, int) aisleFloor(int width) {
     final l = Lay();
     l.add(EntityKind.receivingDock, 0, 0, item: 'ore');
     l.add(EntityKind.staging, 2, 0, span: (2, 2));
-    l.add(EntityKind.aisle, 4, 0, span: (8, width));
+    l.add(EntityKind.aisle, 4, 0, span: (10, width));
     final smelter = l.add(
       EntityKind.machine,
       12,
-      0,
+      2,
       recipe: SteelRecipes.smelt.id,
       mode: MachineMode.assisted,
     );

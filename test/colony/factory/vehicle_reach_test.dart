@@ -41,7 +41,9 @@ void main() {
     // Island: ore dock D1 → staging S1 right beside the smelter's west
     // side, a 2 x 2 pad no aisle touches. Network: a 2-wide aisle down the
     // smelter's east side and along the bottom to staging S2 in front of
-    // a second ore dock. One forklift, on the network.
+    // a second ore dock. One forklift, on the network. The smelter faces
+    // north so its hand port (where a forklift loads it) is (7, 1), worked
+    // from (8, 1) on the aisle.
     final l = Lay();
     l.add(EntityKind.receivingDock, 0, 0, item: 'ore');
     l.add(EntityKind.staging, 2, 0, span: (2, 2));
@@ -49,6 +51,7 @@ void main() {
       EntityKind.machine,
       4,
       0,
+      dir: Dir4.north,
       recipe: SteelRecipes.smelt.id,
       mode: MachineMode.assisted,
     );
@@ -79,16 +82,19 @@ void main() {
 
   test('a hired forklift lands on the aisle network, not on an island', () {
     // A lone 2 x 2 staging pad (the lowest id: the old "first staging"
-    // home), then dock → staging → 2-wide aisle → smelter.
+    // home), then dock → staging → aisle → smelter. The smelter faces south
+    // so its hand port is (12, 2), worked from (11, 2): the aisle is three
+    // rows deep so a forklift's square covers that tile.
     final l = Lay();
     final island = l.add(EntityKind.staging, 0, 6, span: (2, 2));
     l.add(EntityKind.receivingDock, 0, 0, item: 'ore');
     l.add(EntityKind.staging, 2, 0, span: (2, 2));
-    l.add(EntityKind.aisle, 4, 0, span: (8, 2));
+    l.add(EntityKind.aisle, 4, 0, span: (8, 3));
     final smelter = l.add(
       EntityKind.machine,
       12,
       0,
+      dir: Dir4.south,
       recipe: SteelRecipes.smelt.id,
       mode: MachineMode.assisted,
     );
@@ -111,17 +117,20 @@ void main() {
   test('two wide aisles joined by a one-tile neck do not connect', () {
     // Aisle A (x 4-7, y 0-1) and aisle B (x 8-11) one row lower: they
     // touch along one tile edge, and every tile is in some 2 x 2 marked
-    // square, but no 2 x 2 vehicle can slide from one onto the other.
+    // square, but no 2 x 2 vehicle can slide from one onto the other. B is
+    // three rows deep and the smelter faces south, so its hand port (12, 2)
+    // is worked from (11, 2) on B in both layouts.
     (FactoryFloor, int) floor(int bY) {
       final l = Lay();
       l.add(EntityKind.receivingDock, 0, 0, item: 'ore');
       l.add(EntityKind.staging, 2, 0, span: (2, 2));
       l.add(EntityKind.aisle, 4, 0, span: (4, 2));
-      l.add(EntityKind.aisle, 8, bY, span: (4, 2));
+      l.add(EntityKind.aisle, 8, bY, span: (4, 3));
       final smelter = l.add(
         EntityKind.machine,
         12,
         0,
+        dir: Dir4.south,
         recipe: SteelRecipes.smelt.id,
         mode: MachineMode.assisted,
       );
