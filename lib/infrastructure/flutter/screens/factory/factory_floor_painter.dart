@@ -243,14 +243,17 @@ class FloorLayerCache {
     final hall = ix.hall;
     final hallRect = Rect.fromLTWH(0, 0, hall.w.toDouble(), hall.h.toDouble());
     _T.rect(c, hallRect, _fill(_hallFloor));
-    final aisle = Path(), staging = Path(), bay = Path(), rails = Path();
+    final aisle = Path(), staging = Path(), bay = Path();
+    final aisleEdge = _SP(), stagingEdge = _SP(), rails = _SP();
     for (final p in ix.overlays) {
       final r = _r(p.footprint);
       switch (p.kind) {
         case EntityKind.aisle:
           aisle.addRect(r);
+          aisleEdge.addRect(r);
         case EntityKind.staging:
           staging.addRect(r);
+          stagingEdge.addRect(r);
         case EntityKind.craneBay:
           bay.addRect(r);
           // Runway rails along the bay's long sides.
@@ -271,11 +274,11 @@ class FloorLayerCache {
       }
     }
     c.drawPath(aisle, _fill(const Color(0x30FFD54F)));
-    c.drawPath(aisle, _stroke(const Color(0x90FFD54F), 0.08));
+    aisleEdge.draw(c, const Color(0x90FFD54F), 0.08);
     c.drawPath(staging, _fill(const Color(0x284FC3F7)));
-    c.drawPath(staging, _stroke(const Color(0x704FC3F7), 0.08));
+    stagingEdge.draw(c, const Color(0x704FC3F7), 0.08);
     c.drawPath(bay, _fill(const Color(0x22FF8C66)));
-    c.drawPath(rails, _stroke(const Color(0xB0FF8C66), 0.18));
+    rails.draw(c, const Color(0xB0FF8C66), 0.18);
     _T.rect(c, hallRect.inflate(0.25), _stroke(_hallWall, 0.5));
     return rec.endRecording();
   }
@@ -283,12 +286,19 @@ class FloorLayerCache {
   ui.Picture _recordEntities(FloorLayoutIndex ix) {
     final rec = ui.PictureRecorder();
     final c = Canvas(rec);
-    final belts = Path(), chevrons = Path(), zebra = Path();
-    final chests = Path(), recv = Path(), ship = Path(), doors = Path();
-    final racks = Path(), rackBeams = Path(), charge = Path(), bolts = Path();
+    // Every outline and line here is a [_SP]: drawn as FILLED geometry, never
+    // a stroke (see [_T]). A stroked machine output bar smeared into a wide
+    // blurred white slab beside the machine on Windows (user report,
+    // 2026-10-25).
+    final belts = Path(), chevrons = _SP(), zebra = _SP();
+    final chests = Path(), chestEdges = _SP(), recv = Path(), ship = Path();
+    final doors = _SP();
+    final racks = Path(), rackEdges = _SP(), rackBeams = _SP();
+    final charge = Path(), bolts = _SP();
     final arms = Path(), armLines = Path(), armPicks = Path();
     final byStation = <StationKind?, Path>{};
-    final notches = Path();
+    final stationEdges = _SP();
+    final notches = _SP();
     for (final p in ix.blueprint.placements) {
       final f = p.footprint;
       final cx = f.x0 + f.w / 2, cy = f.y0 + f.h / 2;
@@ -326,6 +336,7 @@ class FloorLayerCache {
               height: fx != 0 ? 0.5 : 0.12));
         case EntityKind.chest:
           chests.addRect(_r(f, 0.12));
+          chestEdges.addRect(_r(f, 0.12));
         case EntityKind.receivingDock:
         case EntityKind.shippingDock:
           (p.kind == EntityKind.receivingDock ? recv : ship)
@@ -344,6 +355,7 @@ class FloorLayerCache {
         case EntityKind.rack:
           final r = _r(f, 0.08);
           racks.addRect(r);
+          rackEdges.addRect(r);
           rackBeams
             ..moveTo(r.left, r.top)
             ..lineTo(r.right, r.bottom)
@@ -359,8 +371,10 @@ class FloorLayerCache {
         case EntityKind.machine:
           final rid = p.recipe;
           final st = rid == null ? null : FactoryRecipes.byId(rid)?.station;
-          byStation.putIfAbsent(st, Path.new).addRRect(RRect.fromRectAndRadius(
-              _r(f, 0.1), const Radius.circular(0.3)));
+          final body =
+              RRect.fromRectAndRadius(_r(f, 0.1), const Radius.circular(0.3));
+          byStation.putIfAbsent(st, Path.new).addRRect(body);
+          stationEdges.addRRect(body);
           // The output face: a bar on the side the machine faces.
           final half = (p.dir.isVertical ? f.w : f.h) / 2 - 0.4;
           final ex = cx + fx * (f.w / 2 - 0.25), ey = cy + fy * (f.h / 2 - 0.25);
@@ -373,26 +387,26 @@ class FloorLayerCache {
       }
     }
     c.drawPath(belts, _fill(_beltBody));
-    c.drawPath(chevrons, _stroke(_beltChevron, 0.07));
-    c.drawPath(zebra, _stroke(const Color(0xFFE0E0E0), 0.1));
+    chevrons.draw(c, _beltChevron, 0.07);
+    zebra.draw(c, const Color(0xFFE0E0E0), 0.1);
     c.drawPath(chests, _fill(const Color(0xFF7A5A3A)));
-    c.drawPath(chests, _stroke(const Color(0xFFC09060), 0.06));
+    chestEdges.draw(c, const Color(0xFFC09060), 0.06);
     c.drawPath(recv, _fill(const Color(0xFF2E6B4A)));
     c.drawPath(ship, _fill(const Color(0xFF8A5A2E)));
-    c.drawPath(doors, _stroke(const Color(0xFFE8EEF4), 0.16));
+    doors.draw(c, const Color(0xFFE8EEF4), 0.16);
     c.drawPath(racks, _fill(const Color(0xFF253A55)));
-    c.drawPath(racks, _stroke(const Color(0xFF6A9AD0), 0.08));
-    c.drawPath(rackBeams, _stroke(const Color(0x806A9AD0), 0.05));
+    rackEdges.draw(c, const Color(0xFF6A9AD0), 0.08);
+    rackBeams.draw(c, const Color(0x806A9AD0), 0.05);
     c.drawPath(charge, _fill(const Color(0xFF1E4A4A)));
-    c.drawPath(bolts, _stroke(const Color(0xFF4FC3F7), 0.1));
+    bolts.draw(c, const Color(0xFF4FC3F7), 0.1);
     c.drawPath(arms, _fill(const Color(0xFF606C78)));
     c.drawPath(armLines, _fill(const Color(0xFFFFD54F)));
     c.drawPath(armPicks, _fill(kArmTakeColor));
     for (final e in byStation.entries) {
       c.drawPath(e.value, _fill(kStationColor[e.key] ?? const Color(0xFF555555)));
-      c.drawPath(e.value, _stroke(const Color(0xFF0E1622), 0.1));
     }
-    c.drawPath(notches, _stroke(const Color(0xFFE8EEF4), 0.18));
+    stationEdges.draw(c, const Color(0xFF0E1622), 0.1);
+    notches.draw(c, const Color(0xFFE8EEF4), 0.18);
     return rec.endRecording();
   }
 }
@@ -660,7 +674,13 @@ class FactoryFloorPainter extends CustomPainter {
             ..lineTo(at.dx - 0.42, at.dy)
             ..close();
           canvas.drawPath(d, _dot);
-          canvas.drawPath(d, _handlerRing);
+          (_SP()
+                ..moveTo(at.dx, at.dy + 0.42)
+                ..lineTo(at.dx + 0.42, at.dy)
+                ..lineTo(at.dx, at.dy - 0.42)
+                ..lineTo(at.dx - 0.42, at.dy)
+                ..close())
+              .draw(canvas, _handlerRing.color, _handlerRing.strokeWidth);
         case HandlerKind.forklift:
           // A forklift: a body filling most of its square, a mast bar and
           // two forks out the front (+x).
@@ -990,5 +1010,74 @@ abstract final class _T {
           ..lineTo(a.dx - n.dx, a.dy - n.dy)
           ..close(),
         _asFill(p));
+  }
+}
+
+/// A stroke described as lines, rects and rounded rects, then drawn as
+/// FILLED geometry: every segment a quad with square caps, every rect or
+/// rounded rect a ring (outer minus inner). The path-stroke twin of [_T]:
+/// on Windows the engine smears thin stroked paths into wide blurs (a
+/// machine's output bar became a white slab beside it), and filled
+/// tessellated geometry draws true.
+class _SP {
+  final List<(Offset, Offset)> _segs = [];
+  final List<RRect> _rings = [];
+  Offset? _last;
+  Offset? _start;
+
+  void moveTo(double x, double y) {
+    _last = Offset(x, y);
+    _start = _last;
+  }
+
+  void lineTo(double x, double y) {
+    final p = Offset(x, y);
+    final last = _last;
+    if (last != null) _segs.add((last, p));
+    _last = p;
+  }
+
+  void close() {
+    final last = _last, start = _start;
+    if (last != null && start != null && last != start) {
+      _segs.add((last, start));
+    }
+    _last = start;
+  }
+
+  void addRect(Rect r) => _rings.add(RRect.fromRectAndRadius(r, Radius.zero));
+  void addRRect(RRect r) => _rings.add(r);
+
+  bool get isEmpty => _segs.isEmpty && _rings.isEmpty;
+
+  /// Fills the outline [width] wide in [color].
+  void draw(Canvas c, Color color, double width) {
+    if (isEmpty || width <= 0) return;
+    final h = width / 2;
+    final quads = Path();
+    for (final (a, b) in _segs) {
+      final d = b - a;
+      final len = d.distance;
+      if (len <= 0) continue;
+      final u = d / len;
+      final n = Offset(-u.dy * h, u.dx * h);
+      final a2 = a - u * h, b2 = b + u * h; // square caps close the joints
+      quads
+        ..moveTo(a2.dx + n.dx, a2.dy + n.dy)
+        ..lineTo(b2.dx + n.dx, b2.dy + n.dy)
+        ..lineTo(b2.dx - n.dx, b2.dy - n.dy)
+        ..lineTo(a2.dx - n.dx, a2.dy - n.dy)
+        ..close();
+    }
+    final paint = Paint()..color = color;
+    if (_segs.isNotEmpty) c.drawPath(quads, paint);
+    for (final r in _rings) {
+      c.drawPath(
+          Path()
+            ..fillType = PathFillType.evenOdd
+            ..addRRect(r.inflate(h))
+            ..addRRect(r.deflate(h)),
+          paint);
+    }
   }
 }

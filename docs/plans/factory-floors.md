@@ -457,8 +457,9 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
     - **Toggleable:** an "Unlimited supply" sandbox switch, and the goal tracker marks runs that
       used it.
 
-12. **Delete hotkey.** Del removes the selection today; add a key that picks the Delete TOOL (e.g.
-    X), as builder games do.
+12. **Hover-delete hotkey.** Separate from select + Del. Hover anything and press the delete
+    key (e.g. X) to remove what is under the cursor, with no tool switch and no selection. Holding
+    the key while sweeping the mouse deletes along the path. Undo still applies.
 13. **Construction crews, Prison Architect style.**
     - Placing a machine (or belt, dock, rack) does not make it appear. It posts a CONSTRUCTION job:
       a crew brings the materials (the item's capex, carried like freight) and works for a build
