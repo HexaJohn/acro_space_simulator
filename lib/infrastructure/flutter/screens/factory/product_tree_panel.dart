@@ -89,12 +89,18 @@ String machinesText(ProductNode n) =>
     'Auto ${n.machinesCeil(MachineMode.automated)}';
 
 class ProductTreePanel extends StatefulWidget {
-  const ProductTreePanel({super.key, required this.c, required this.onClose});
+  const ProductTreePanel(
+      {super.key, required this.c, required this.onClose, this.onItem});
 
   /// The editor: its floor seeds the default product, and its highlight
   /// outlines the machines running the selected step's recipe.
   final FactoryEditorController c;
   final VoidCallback onClose;
+
+  /// Told the product the tree shows: once when the panel opens, and on
+  /// every pick. A scenario's "open the Product tree on Rocket Parts" step
+  /// listens here, since which product is open is the panel's own state.
+  final ValueChanged<String>? onItem;
 
   @override
   State<ProductTreePanel> createState() => ProductTreePanelState();
@@ -134,7 +140,10 @@ class ProductTreePanelState extends State<ProductTreePanel> {
     _searchFocus.addListener(_onSearchFocus);
     // Take the keyboard so Esc closes at once, before anything is clicked.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _panelFocus.requestFocus();
+      if (!mounted) return;
+      _panelFocus.requestFocus();
+      // After the frame: a listener may rebuild its own widgets.
+      widget.onItem?.call(item);
     });
   }
 
@@ -191,6 +200,7 @@ class ProductTreePanelState extends State<ProductTreePanel> {
     });
     widget.c.setHighlightRecipe(null);
     _panelFocus.requestFocus();
+    widget.onItem?.call(id);
   }
 
   void _setRate(String s) {

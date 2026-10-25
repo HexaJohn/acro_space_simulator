@@ -13,7 +13,9 @@
 /// the editor switches plants: every placed-plant type that has a template
 /// ([kFactoryDevPlants] filtered by `factoryTemplateFor`, so new templates
 /// appear here the moment they are wired, and none is hard-wired), plus
-/// "Blank hall" — an empty floor of a chosen size to design from scratch.
+/// "Blank hall" — an empty floor of a chosen size to design from scratch —
+/// and "Tutorial: Rocket Parts", the guided scenario
+/// (`lib/main_factory_tutorial.dart` boots straight into it).
 /// Receiving and shipping run against the sandbox colony
 /// (`InfiniteColonyPort`), every unlock is on, and the editor drives the
 /// floor itself. "Save as blueprint" prints the blueprint JSON.
@@ -25,6 +27,7 @@ import 'package:flutter/material.dart';
 
 import 'domain/colony/city/factory/factory_floor.dart';
 import 'domain/colony/city/factory/factory_grid.dart';
+import 'domain/colony/city/factory/factory_scenario.dart';
 import 'domain/colony/city/factory/factory_templates.dart';
 import 'domain/colony/city/factory/floor_blueprint.dart';
 import 'infrastructure/flutter/screens/factory/factory_floor_screen.dart';
@@ -43,6 +46,9 @@ const List<String> kFactoryDevPlants = [
 
 /// The picker's value for an empty hall.
 const String kBlankHall = 'blank';
+
+/// The picker's value for the Rocket Parts tutorial scenario.
+const String kRocketTutorial = 'tutorial:rocketParts';
 
 /// Blank-hall sizes offered, in tiles (2 m each): a workshop, the Steel
 /// Mill's 66 × 56 m shed, a big plant and the plan's 200 × 150 m scale
@@ -75,13 +81,22 @@ class FactoryDevAppState extends State<FactoryDevApp> {
   /// A plant type from [plants], or [kBlankHall].
   late String choice = plants.isEmpty ? kBlankHall : plants.first;
   HallSize blankSize = kBlankHallSizes[1];
+
+  /// The scenario running on [floor] (null: a plain floor). A fresh one on
+  /// every pick, so the screen starts its tutorial over.
+  FactoryScenario? scenario;
   late FactoryFloor floor = _build();
 
   FactoryFloor _build() {
-    final bp = choice == kBlankHall
-        ? FloorBlueprint(
-            name: 'Blank hall ${blankSize.w}×${blankSize.h}', hall: blankSize)
-        : factoryTemplateFor(choice)!;
+    scenario = choice == kRocketTutorial ? rocketPartsScenario() : null;
+    final sc = scenario;
+    final bp = sc != null
+        ? sc.blueprint()
+        : choice == kBlankHall
+            ? FloorBlueprint(
+                name: 'Blank hall ${blankSize.w}×${blankSize.h}',
+                hall: blankSize)
+            : factoryTemplateFor(choice)!;
     return FactoryFloor.fromBlueprint(bp);
   }
 
@@ -113,6 +128,9 @@ class FactoryDevAppState extends State<FactoryDevApp> {
                       DropdownMenuItem(value: t, child: Text(t)),
                     const DropdownMenuItem(
                         value: kBlankHall, child: Text('Blank hall')),
+                    const DropdownMenuItem(
+                        value: kRocketTutorial,
+                        child: Text('Tutorial: Rocket Parts')),
                   ],
                   onChanged: (v) {
                     if (v != null) pick(v);
@@ -142,6 +160,7 @@ class FactoryDevAppState extends State<FactoryDevApp> {
             child: FactoryFloorScreen(
               sim: floor,
               title: floor.blueprint.name,
+              scenario: scenario,
               onSaveBlueprint: (bp) =>
                   debugPrint('blueprint: ${jsonEncode(bp.toJson())}'),
             ),

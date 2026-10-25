@@ -47,6 +47,7 @@ import '../../../../domain/colony/city/factory/factory_handling.dart';
 import '../../../../domain/colony/city/factory/factory_item.dart';
 import '../../../../domain/colony/city/factory/factory_ledger.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
+import '../../../../domain/colony/city/factory/factory_scenario.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/factory_unlocks.dart';
 import 'floor_layout_index.dart';
@@ -371,6 +372,21 @@ class FactoryEditorController extends ChangeNotifier {
     frame.value++;
     notifyListeners();
   }
+
+  /// What a scenario's current tutorial hint points at (empty: nothing).
+  /// The palette, roster and header pulse the matching control's border, so
+  /// "pick Receiving Dock" shows WHERE without the tutorial card having to
+  /// know any widget. Set by the tutorial panel; the editor never reads it
+  /// for anything but drawing.
+  Set<ScenarioHintTarget> hintTargets = const {};
+
+  void setHintTargets(Set<ScenarioHintTarget> t) {
+    if (setEquals(t, hintTargets)) return;
+    hintTargets = t;
+    notifyListeners();
+  }
+
+  bool hinted(ScenarioHintTarget t) => hintTargets.contains(t);
 
   /// Machines on this floor running [recipeId] (the tree's "N here" hint).
   int machinesRunning(String recipeId) {

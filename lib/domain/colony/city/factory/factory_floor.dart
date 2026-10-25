@@ -1202,6 +1202,28 @@ class FactoryFloor implements FactorySim {
     return cap - held - (inbound[p.id] ?? 0);
   }
 
+  /// Whether a queued, not-yet-assigned request is one [_postRequests]
+  /// would no longer post, because an edit since changed who wants the
+  /// goods:
+  ///
+  /// * a PUSH (to a shipping dock, chest or staging area) of an item some
+  ///   hand-fed machine now consumes — a newly placed assembler wants the
+  ///   frames that were on their way out, and without this the floor kept
+  ///   shipping out up to a dock buffer's worth of them (found by the Rocket
+  ///   Parts tutorial: the jack ran four more frames to the dock while the
+  ///   new bay starved);
+  /// * a PULL into a machine input an arm or belt now feeds.
+  ///
+  /// Dropping a queue entry is always safe: it reserves no goods (a
+  /// handler's own job is not in the queue), and the request is re-derived
+  /// fresh right after.
+  bool _stale(MoveRequest r) {
+    final to = _byId[r.to];
+    if (to == null) return false;
+    if (to.kind == EntityKind.machine) return _autoFed.contains((to.id, r.item));
+    return _handFedConsumes.contains(r.item);
+  }
+
   /// Posts what hand-fed inputs need and what hand-cleared outputs (and
   /// piles) no one on the floor consumes. "Already on its way" is
   /// re-derived from the queue and the handlers' jobs every time, so
@@ -1210,7 +1232,16 @@ class FactoryFloor implements FactorySim {
     // A request nobody on the floor could serve any more (the forklift was
     // sold, the aisle lifted, the crane bay moved) is dropped and derived
     // afresh below, so it never holds goods another handler could move.
-    _queue.removeWhere((r) => !_servable(r.item, r.from, r.to));
+    _queue.removeWhere((r) => !_servable(r.item, r.from, r.to) || _stale(r));
+    // An empty-handed trip on its way to pick up a stale request is called
+    // off the same way (nothing is in its hands; [_cancelJobsFor] does the
+    // same when a trip's end is removed).
+    for (final h in _handlers) {
+      final j = h.job;
+      if (j != null && h.state == HandlerState.toPickup && _stale(j)) {
+        h.goIdle();
+      }
+    }
     final inbound = <int, ItemBag>{};
     final outbound = <int, ItemBag>{};
     final inboundTotal = <int, int>{};

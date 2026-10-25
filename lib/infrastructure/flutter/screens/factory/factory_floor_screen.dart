@@ -40,6 +40,12 @@
 /// canvas [Listener]) for the same reason, and owns the keyboard while it
 /// has focus, so typing in its search never rotates or deletes on the
 /// floor.
+///
+/// Given a [FactoryFloorScreen.scenario], the screen also hosts the
+/// [TutorialPanel] card in the canvas area's top-left corner (again a
+/// sibling above the canvas [Listener]), trades through the scenario's
+/// supply port, and pulses the palette entry, roster row or header button
+/// the current step's hint names. Without one, nothing changes.
 library;
 
 import 'package:flutter/gestures.dart';
@@ -54,6 +60,7 @@ import '../../../../domain/colony/city/factory/factory_grid.dart';
 import '../../../../domain/colony/city/factory/factory_handling.dart';
 import '../../../../domain/colony/city/factory/factory_item.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
+import '../../../../domain/colony/city/factory/factory_scenario.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/factory_unlocks.dart';
 import '../../../../domain/colony/city/factory/floor_blueprint.dart';
@@ -61,6 +68,7 @@ import '../app_theme.dart';
 import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
 import 'product_tree_panel.dart';
+import 'tutorial_panel.dart';
 
 /// Width of the palette column, logical px.
 const double kPaletteWidth = 212;
@@ -78,9 +86,15 @@ class FactoryFloorScreen extends StatefulWidget {
     this.unlocks = FactoryUnlocks.all,
     this.drivesSim = true,
     this.onClose,
+    this.scenario,
   });
 
   final FactorySim sim;
+
+  /// A guided scenario on this floor: the tutorial card over the canvas
+  /// and, unless [port] is given, the scenario's own supply port. Null (the
+  /// default) is the plain editor, exactly as before.
+  final FactoryScenario? scenario;
 
   /// What the back arrow does. Null pops the route the screen was pushed
   /// on. A host that shows the editor INSIDE its own view (the colony, so
@@ -114,8 +128,21 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   /// The sandbox port used while the widget gives none (made once).
   InfiniteColonyPort? _sandbox;
 
+  /// The scenario's runner (null: no scenario). It owns the scenario's
+  /// supply port, which the floor trades through unless the host passed
+  /// its own [FactoryFloorScreen.port] (a [ScenarioColonyPort] given that
+  /// way becomes the runner's).
+  late ScenarioRunner? runner = _newRunner();
+
+  ScenarioRunner? _newRunner() {
+    final s = widget.scenario;
+    if (s == null) return null;
+    final given = widget.port;
+    return ScenarioRunner(s, port: given is ScenarioColonyPort ? given : null);
+  }
+
   FactoryColonyPort get _port =>
-      widget.port ?? (_sandbox ??= InfiniteColonyPort());
+      widget.port ?? runner?.port ?? (_sandbox ??= InfiniteColonyPort());
 
   late FactoryEditorController controller = _newController();
 
@@ -179,8 +206,10 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   @override
   void didUpdateWidget(FactoryFloorScreen old) {
     super.didUpdateWidget(old);
+    if (!identical(old.scenario, widget.scenario)) runner = _newRunner();
     if (identical(old.sim, widget.sim) &&
         identical(old.port, widget.port) &&
+        identical(old.scenario, widget.scenario) &&
         old.drivesSim == widget.drivesSim) {
       controller.setUnlocks(widget.unlocks);
       return;
@@ -259,7 +288,9 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
                         right: 0,
                         width: kProductTreeWidth,
                         child: ProductTreePanel(
-                            c: controller, onClose: closeProductTree),
+                            c: controller,
+                            onClose: closeProductTree,
+                            onItem: runner?.noteProductTree),
                       ),
                   ],
                 ),
@@ -273,6 +304,7 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
 
   Widget _canvas() {
     final c = controller;
+    final run = runner;
     return LayoutBuilder(builder: (context, box) {
       c.setViewSize(box.biggest);
       return Stack(
@@ -322,11 +354,44 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
               ),
             ),
           ),
+          // Above the canvas Listener as a sibling, never inside it: see
+          // tutorial_panel.dart. Only its own box takes clicks.
+          if (run != null)
+            Positioned(
+              left: 8,
+              top: 8,
+              child: TutorialPanel(
+                  key: const Key('tutorial'),
+                  runner: run,
+                  c: c,
+                  maxHeight: box.maxHeight - 16),
+            ),
         ],
       );
     });
   }
 }
+
+/// The tutorial hint a palette kind answers to (null: none points at it).
+ScenarioHintTarget? _kindHint(EntityKind k) => switch (k) {
+      EntityKind.receivingDock => ScenarioHintTarget.receivingDock,
+      EntityKind.shippingDock => ScenarioHintTarget.shippingDock,
+      EntityKind.belt => ScenarioHintTarget.belt,
+      EntityKind.arm => ScenarioHintTarget.arm,
+      EntityKind.craneBay => ScenarioHintTarget.craneBay,
+      _ => null,
+    };
+
+/// The tutorial hint a roster row answers to.
+ScenarioHintTarget? _handlerHint(HandlerKind k) => switch (k) {
+      HandlerKind.onFoot => ScenarioHintTarget.walker,
+      HandlerKind.palletJack => ScenarioHintTarget.palletJack,
+      HandlerKind.crane => ScenarioHintTarget.crane,
+      _ => null,
+    };
+
+bool _isHinted(FactoryEditorController c, ScenarioHintTarget? t) =>
+    t != null && c.hinted(t);
 
 String _kindLabel(EntityKind k) => switch (k) {
       EntityKind.machine => 'Machine',
@@ -425,29 +490,36 @@ class _TopBar extends StatelessWidget {
                   for (final o in FactoryOverlay.values)
                     Padding(
                       padding: const EdgeInsets.only(right: 6),
-                      child: FilterChip(
-                        key: Key('overlay-${o.name}'),
-                        label: Text(switch (o) {
-                          FactoryOverlay.power => 'Power',
-                          FactoryOverlay.staffing => 'Staffing',
-                          FactoryOverlay.bottleneck => 'Bottlenecks',
-                          FactoryOverlay.traffic => 'Traffic',
-                        }),
-                        selected: c.overlays.contains(o),
-                        onSelected: (_) => c.toggleOverlay(o),
+                      child: HintPulse(
+                        on: o == FactoryOverlay.bottleneck &&
+                            c.hinted(ScenarioHintTarget.bottlenecks),
+                        child: FilterChip(
+                          key: Key('overlay-${o.name}'),
+                          label: Text(switch (o) {
+                            FactoryOverlay.power => 'Power',
+                            FactoryOverlay.staffing => 'Staffing',
+                            FactoryOverlay.bottleneck => 'Bottlenecks',
+                            FactoryOverlay.traffic => 'Traffic',
+                          }),
+                          selected: c.overlays.contains(o),
+                          onSelected: (_) => c.toggleOverlay(o),
+                        ),
                       ),
                     ),
                 ]),
               ),
             ),
-            TextButton.icon(
-              key: const Key('product-tree-button'),
-              onPressed: onProductTree,
-              icon: Icon(Icons.account_tree,
-                  color: treeOpen ? AppTheme.accent : AppTheme.text),
-              label: Text('Product tree',
-                  style: TextStyle(
-                      color: treeOpen ? AppTheme.accent : AppTheme.text)),
+            HintPulse(
+              on: c.hinted(ScenarioHintTarget.productTree),
+              child: TextButton.icon(
+                key: const Key('product-tree-button'),
+                onPressed: onProductTree,
+                icon: Icon(Icons.account_tree,
+                    color: treeOpen ? AppTheme.accent : AppTheme.text),
+                label: Text('Product tree',
+                    style: TextStyle(
+                        color: treeOpen ? AppTheme.accent : AppTheme.text)),
+              ),
             ),
             IconButton(
               key: const Key('fit-hall'),
@@ -477,24 +549,27 @@ class _Palette extends StatelessWidget {
   final FactoryEditorController c;
 
   Widget _entry(String label, IconData icon, bool on, VoidCallback tap,
-          Key key) =>
-      InkWell(
-        key: key,
-        onTap: tap,
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: BoxDecoration(
-            color: on ? AppTheme.panelLight : null,
-            borderRadius: BorderRadius.circular(4),
-            border: Border.all(
-                color: on ? AppTheme.accent : const Color(0x00000000)),
+          Key key, {bool hint = false}) =>
+      HintPulse(
+        on: hint,
+        child: InkWell(
+          key: key,
+          onTap: tap,
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              color: on ? AppTheme.panelLight : null,
+              borderRadius: BorderRadius.circular(4),
+              border: Border.all(
+                  color: on ? AppTheme.accent : const Color(0x00000000)),
+            ),
+            child: Row(children: [
+              Icon(icon, size: 16, color: on ? AppTheme.accent : AppTheme.textDim),
+              const SizedBox(width: 8),
+              Expanded(child: Text(label, style: AppTheme.body)),
+            ]),
           ),
-          child: Row(children: [
-            Icon(icon, size: 16, color: on ? AppTheme.accent : AppTheme.textDim),
-            const SizedBox(width: 8),
-            Expanded(child: Text(label, style: AppTheme.body)),
-          ]),
         ),
       );
 
@@ -512,7 +587,8 @@ class _Palette extends StatelessWidget {
       icon,
       c.tool == FactoryTool.place && c.kind == k,
       () => c.choose(k),
-      Key('palette-${k.name}'));
+      Key('palette-${k.name}'),
+      hint: _isHinted(c, _kindHint(k)));
 
   @override
   Widget build(BuildContext context) {
@@ -538,7 +614,9 @@ class _Palette extends StatelessWidget {
                       c.kind == EntityKind.machine &&
                       c.station == s,
                   () => c.choose(EntityKind.machine, st: s),
-                  Key('palette-machine-${s.name}')),
+                  Key('palette-machine-${s.name}'),
+                  hint: s == StationKind.assembler &&
+                      c.hinted(ScenarioHintTarget.assembler)),
             if (c.tool == FactoryTool.place && c.kind == EntityKind.machine)
               _recipePicker(),
             _head('TRANSPORT'),
@@ -841,52 +919,55 @@ class _Roster extends StatelessWidget {
     return Opacity(
       key: Key('roster-${k.name}'),
       opacity: locked ? 0.5 : 1,
-      child: Row(children: [
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(
-              color: locked ? AppTheme.textDim : kHandlerColor[k],
-              shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(locked ? '${spec.label} · locked' : spec.label,
-                  key: Key('hire-${k.name}-label'),
-                  style: AppTheme.body.copyWith(color: dim)),
-              Text(
-                  '${have * spec.operators} operators · '
-                  '${busy[k] ?? 0} on a job'
-                  '${ch > 0 ? ' · $ch charging' : ''}',
-                  style: AppTheme.dim.copyWith(fontSize: 11)),
-            ],
+      child: HintPulse(
+        on: _isHinted(c, _handlerHint(k)),
+        child: Row(children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+                color: locked ? AppTheme.textDim : kHandlerColor[k],
+                shape: BoxShape.circle),
           ),
-        ),
-        IconButton(
-          key: Key('hire-${k.name}-minus'),
-          visualDensity: VisualDensity.compact,
-          onPressed: have > 0 ? () => c.hire(k, -1) : null,
-          icon: const Icon(Icons.remove, size: 16),
-          color: dim,
-        ),
-        SizedBox(
-          width: 24,
-          child: Text('$have',
-              key: Key('hire-${k.name}-count'),
-              textAlign: TextAlign.center,
-              style: AppTheme.mono.copyWith(color: dim)),
-        ),
-        IconButton(
-          key: Key('hire-${k.name}-plus'),
-          visualDensity: VisualDensity.compact,
-          onPressed: () => c.hire(k, 1),
-          icon: Icon(locked ? Icons.lock_outline : Icons.add, size: 16),
-          color: dim,
-        ),
-      ]),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(locked ? '${spec.label} · locked' : spec.label,
+                    key: Key('hire-${k.name}-label'),
+                    style: AppTheme.body.copyWith(color: dim)),
+                Text(
+                    '${have * spec.operators} operators · '
+                    '${busy[k] ?? 0} on a job'
+                    '${ch > 0 ? ' · $ch charging' : ''}',
+                    style: AppTheme.dim.copyWith(fontSize: 11)),
+              ],
+            ),
+          ),
+          IconButton(
+            key: Key('hire-${k.name}-minus'),
+            visualDensity: VisualDensity.compact,
+            onPressed: have > 0 ? () => c.hire(k, -1) : null,
+            icon: const Icon(Icons.remove, size: 16),
+            color: dim,
+          ),
+          SizedBox(
+            width: 24,
+            child: Text('$have',
+                key: Key('hire-${k.name}-count'),
+                textAlign: TextAlign.center,
+                style: AppTheme.mono.copyWith(color: dim)),
+          ),
+          IconButton(
+            key: Key('hire-${k.name}-plus'),
+            visualDensity: VisualDensity.compact,
+            onPressed: () => c.hire(k, 1),
+            icon: Icon(locked ? Icons.lock_outline : Icons.add, size: 16),
+            color: dim,
+          ),
+        ]),
+      ),
     );
   }
 }
