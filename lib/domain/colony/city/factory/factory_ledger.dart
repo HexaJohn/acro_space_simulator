@@ -32,6 +32,11 @@ class FactoryLedger {
   final Map<String, double> received = {};
   final Map<String, double> shipped = {};
 
+  /// Commodity units destroyed by a sandbox "scrap" of a floor pile
+  /// (`FloorCleanup.disposePile`). Additive: conservation counts it as
+  /// leaving the floor, like [shipped], but nothing reaches the colony.
+  final Map<String, double> scrapped = {};
+
   /// Item-metres hauled by handlers (belts are free to run, not to build).
   double itemMetres = 0;
 
@@ -44,6 +49,8 @@ class FactoryLedger {
       received[c] = (received[c] ?? 0) + units;
   void addShipped(String c, double units) =>
       shipped[c] = (shipped[c] ?? 0) + units;
+  void addScrapped(String c, double units) =>
+      scrapped[c] = (scrapped[c] ?? 0) + units;
   void addEquipment(HandlerKind k, double s) =>
       equipmentSeconds[k] = (equipmentSeconds[k] ?? 0) + s;
 
@@ -58,6 +65,7 @@ class FactoryLedger {
     o.workerSeconds.forEach(addWork);
     o.received.forEach(addReceived);
     o.shipped.forEach(addShipped);
+    o.scrapped.forEach(addScrapped);
     o.equipmentSeconds.forEach(addEquipment);
   }
 
@@ -68,6 +76,7 @@ class FactoryLedger {
     workerSeconds.clear();
     received.clear();
     shipped.clear();
+    scrapped.clear();
     equipmentSeconds.clear();
   }
 
@@ -79,6 +88,7 @@ class FactoryLedger {
           'w': {for (final e in workerSeconds.entries) e.key.name: e.value},
         if (received.isNotEmpty) 'in': {...received},
         if (shipped.isNotEmpty) 'out': {...shipped},
+        if (scrapped.isNotEmpty) 'scr': {...scrapped},
         if (equipmentSeconds.isNotEmpty)
           'eq': {for (final e in equipmentSeconds.entries) e.key.name: e.value},
       };
@@ -94,6 +104,7 @@ class FactoryLedger {
         (k, v) => l.addWork(WorkRole.values.byName(k), (v as num).toDouble()));
     m(j['in']).forEach((k, v) => l.addReceived(k, (v as num).toDouble()));
     m(j['out']).forEach((k, v) => l.addShipped(k, (v as num).toDouble()));
+    m(j['scr']).forEach((k, v) => l.addScrapped(k, (v as num).toDouble()));
     m(j['eq']).forEach((k, v) =>
         l.addEquipment(HandlerKind.values.byName(k), (v as num).toDouble()));
     return l;

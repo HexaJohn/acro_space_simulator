@@ -118,6 +118,7 @@ Map<String, double> conservationError(FactoryFloor f) {
   f.itemsOnFloor.forEach((k, v) => add(k, v.toDouble()));
   f.craftNet.forEach((k, v) => add(k, -v.toDouble()));
   f.ledger.shipped.forEach((c, u) => net[c] = (net[c] ?? 0) + u);
+  f.ledger.scrapped.forEach((c, u) => net[c] = (net[c] ?? 0) + u);
   f.ledger.received.forEach((c, u) => net[c] = (net[c] ?? 0) - u);
   f.shippedAhead.forEach((c, u) => net[c] = (net[c] ?? 0) - u);
   f.receivedAhead.forEach((c, u) => net[c] = (net[c] ?? 0) + u);

@@ -81,6 +81,7 @@ import '../../../../domain/colony/city/factory/product_tree.dart';
 import '../app_theme.dart';
 import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
+import 'floor_item_overlays.dart';
 import 'floor_layout_index.dart';
 import 'product_tree_panel.dart';
 import 'recipe_info_panel.dart';
@@ -445,6 +446,10 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
               ),
             ),
           ),
+          // Item tooltip and legend: plain widgets above the canvas, never
+          // inside its gesture layer (floor_item_overlays.dart).
+          FloorHoverTip(c: c),
+          FloorLegend(c: c),
           // Above the canvas Listener as a sibling, never inside it: see
           // tutorial_panel.dart. Only its own box takes clicks.
           if (run != null)
@@ -799,6 +804,9 @@ class _Palette extends StatelessWidget {
             _entry('Delete', Icons.delete_outline,
                 c.tool == FactoryTool.delete,
                 () => c.setTool(FactoryTool.delete), const Key('tool-delete')),
+            _entry('Clear piles', Icons.cleaning_services,
+                c.tool == FactoryTool.clear,
+                () => c.setTool(FactoryTool.clear), const Key('tool-clear')),
             _head('MACHINES'),
             for (final s in StationKind.values)
               _entry(
@@ -956,6 +964,7 @@ class _SidePanel extends StatelessWidget {
         child: ListView(
           padding: const EdgeInsets.all(10),
           children: [
+            PileInspector(c: c),
             _Inspector(c: c),
             const SizedBox(height: 14),
             _Roster(c: c),
@@ -1292,6 +1301,11 @@ class _Readout extends StatelessWidget {
             style: AppTheme.mono),
         Text('Jobs   ${sim.jobDemand.toStringAsFixed(1)}',
             style: AppTheme.mono),
+        if (c.stuckPiles.isNotEmpty)
+          Text('Stuck  ${c.stuckPiles.length} pile'
+              '${c.stuckPiles.length == 1 ? '' : 's'} nothing can take',
+              key: const Key('readout-stuck'),
+              style: AppTheme.mono.copyWith(color: AppTheme.warn)),
         Text('Queue  $pending move request${pending == 1 ? '' : 's'}',
             key: const Key('readout-queue'),
             style: AppTheme.mono.copyWith(

@@ -119,6 +119,8 @@ void main() {
     expect(c.ghost.single.check.refusal, want.refusal);
     expect(c.ghost.single.check.otherId, m.id);
 
+    await t.ensureVisible(find.byKey(const Key('palette-craneBay')));
+    await t.pump();
     await t.tap(find.byKey(const Key('palette-craneBay')));
     await t.pump();
     await g.moveTo(at(t, freeTile(f)));

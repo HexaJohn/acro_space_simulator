@@ -68,6 +68,7 @@ import 'dart:collection';
 import 'dart:typed_data';
 
 import 'factory_catalog.dart';
+import 'factory_cleanup.dart';
 import 'factory_colony_port.dart';
 import 'factory_entities.dart';
 import 'factory_floor_state.dart';
@@ -154,6 +155,7 @@ bool _isBlank(FactoryLedger l) =>
     l.workerSeconds.isEmpty &&
     l.received.isEmpty &&
     l.shipped.isEmpty &&
+    l.scrapped.isEmpty &&
     l.equipmentSeconds.isEmpty;
 
 /// The pseudo-placement id of the floor pile on tile [t].
@@ -174,7 +176,7 @@ bool _driveMarking(EntityKind k) =>
     k == EntityKind.staging ||
     k == EntityKind.chargingBay;
 
-class FactoryFloor implements FactorySim {
+class FactoryFloor implements FactorySim, FloorCleanup {
   FactoryFloor._(this._bp, this.unlocks);
 
   /// A fresh floor running [bp] (copied; the blueprint stays untouched).
@@ -364,6 +366,51 @@ class FactoryFloor implements FactorySim {
   /// Items some hand-fed machine consumes: a hand-cleared output of one of
   /// these waits to be fetched rather than being pushed to a dock.
   Set<String> _handFedConsumes = const {};
+
+  /// Pile ids under a Clear order (hauled out even if a station wants the
+  /// goods); runtime-only. See [FloorCleanup].
+  final Set<int> _clearPiles = {};
+
+  /// Pile ids to dispose of through a shipping dock; runtime-only.
+  final Set<int> _disposePiles = {};
+
+  /// Tiles whose pile nothing could take at the last [_postRequests].
+  Set<TilePos> _stuck = {};
+
+  @override
+  Set<TilePos> get stuckPiles => Set.unmodifiable(_stuck);
+
+  @override
+  int clearPiles(TileRect area) {
+    var n = 0;
+    for (final e in _piles.entries) {
+      if (!area.contains(e.value.at)) continue;
+      _clearPiles.add(e.key);
+      n++;
+    }
+    return n;
+  }
+
+  @override
+  bool disposePile(TilePos tile, {bool scrap = false}) {
+    final id = _pileId(tile);
+    final pile = _piles[id];
+    if (pile == null) return false;
+    if (!scrap) {
+      _disposePiles.add(id);
+      return true;
+    }
+    for (final k in pile.items.keys) {
+      final def = FactoryItems.byId(k);
+      if (def != null) {
+        _ledger.addScrapped(def.commodity, pile.items[k] * def.commodityUnits);
+      }
+    }
+    _piles.remove(id);
+    _clearPiles.remove(id);
+    _disposePiles.remove(id);
+    return true;
+  }
 
   /// Staffed this sub-step, by machine id (transient).
   final Map<int, bool> _staffed = {};
@@ -1281,7 +1328,14 @@ class FactoryFloor implements FactorySim {
       if (ok || !pull) addOut(from, item, n);
     }
 
-    final providers = [for (final p in _providers) p.id, ..._piles.keys];
+    _clearPiles.removeWhere((id) => !_piles.containsKey(id));
+    _disposePiles.removeWhere((id) => !_piles.containsKey(id));
+    final stuck = <TilePos>{};
+    final providers = [
+      for (final p in _providers) p.id,
+      for (final id in _piles.keys)
+        if (!_clearPiles.contains(id) && !_disposePiles.contains(id)) id,
+    ];
 
     // Pull: hand-fed inputs fetch from the nearest provider someone can
     // serve (else the nearest at all, as a waiting signal).
@@ -1328,9 +1382,12 @@ class FactoryFloor implements FactorySim {
 
     // Push: a hand-cleared output (or a pile) nothing here consumes goes to
     // the nearest shipping dock, else chest (piles: else staging) with room.
-    void push(int src, String item, {required bool toStaging}) {
+    void push(int src, String item,
+        {required bool toStaging, bool shipOnly = false}) {
       var a = avail(src, item);
-      final tiers = [_shipList, _chestList, if (toStaging) _stagingList];
+      final tiers = shipOnly
+          ? [_shipList]
+          : [_shipList, _chestList, if (toStaging) _stagingList];
 
       /// The nearest store in [tier] with room ([servable]: that someone
       /// can also carry to), with its room.
@@ -1364,6 +1421,8 @@ class FactoryFloor implements FactorySim {
           }
           if (hit != null) {
             post(item, a < hit.$2 ? a : hit.$2, src, hit.$1.id, pull: false);
+          } else if (src < 0) {
+            stuck.add(_piles[src]!.at);
           }
           break;
         }
@@ -1386,10 +1445,13 @@ class FactoryFloor implements FactorySim {
       final pile = _piles[id];
       if (pile == null) continue;
       for (final item in pile.items.keys) {
-        if (_handFedConsumes.contains(item)) continue;
-        push(id, item, toStaging: true);
+        final forced = _clearPiles.contains(id) || _disposePiles.contains(id);
+        if (!forced && _handFedConsumes.contains(item)) continue;
+        push(id, item,
+            toStaging: true, shipOnly: _disposePiles.contains(id));
       }
     }
+    _stuck = stuck;
   }
 
   // ---- handlers ------------------------------------------------------------

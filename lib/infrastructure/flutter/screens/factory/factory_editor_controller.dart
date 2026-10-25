@@ -50,11 +50,12 @@ import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_scenario.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/factory_unlocks.dart';
+import '../../../../domain/colony/city/factory/factory_cleanup.dart';
 import 'floor_edit_history.dart';
 import 'floor_layout_index.dart';
 
 /// What a primary click on the floor does.
-enum FactoryTool { select, place, delete }
+enum FactoryTool { select, place, delete, clear }
 
 /// Diagnostic tints over the floor (§4 "Overlays").
 enum FactoryOverlay { power, staffing, bottleneck, traffic }
@@ -1180,6 +1181,68 @@ class FactoryEditorController extends ChangeNotifier {
     message = w == null ? null : '${refusalText(w)} ($kept kept)';
   }
 
+  // ---- Clearing floor piles (§10 item 17) ------------------------------
+
+  /// The floor pile picked with Select (Dispose acts on it), or null.
+  TilePos? selectedPile;
+
+  /// The box being dragged with the Clear tool, for the painter.
+  TileRect? clearRect;
+  TilePos? _clrStart;
+
+  FloorCleanup? get _cleanup {
+    final Object s = sim;
+    return s is FloorCleanup ? s : null;
+  }
+
+  /// Piles nothing could take (the painter's amber mark, the readout).
+  Set<TilePos> get stuckPiles => _cleanup?.stuckPiles ?? const {};
+
+  /// Whether this floor is the editor's free sandbox (scrap is allowed).
+  bool get sandbox => port is InfiniteColonyPort;
+
+  void _refreshClear() {
+    final s = _clrStart, h = hover;
+    if (tool != FactoryTool.clear || s == null || h == null) {
+      clearRect = null;
+      return;
+    }
+    clearRect = TileRect(math.min(s.x, h.x), math.min(s.y, h.y),
+        (s.x - h.x).abs() + 1, (s.y - h.y).abs() + 1);
+  }
+
+  /// Releases the Clear tool's box: hauls the piles in it to a store, or
+  /// with Shift disposes of them (shipped out; scrapped in the sandbox).
+  void _commitClear() {
+    final r = clearRect;
+    final cu = _cleanup;
+    if (r == null || cu == null) return;
+    if (_shift) {
+      var n = 0;
+      for (final p in sim.piles.map((p) => p.tile).toSet().toList()) {
+        if (r.contains(p) && cu.disposePile(p, scrap: sandbox)) n++;
+      }
+      message = n == 0
+          ? 'No piles there'
+          : (sandbox ? 'Scrapped $n pile(s)' : 'Disposing $n pile(s)');
+    } else {
+      final n = cu.clearPiles(r);
+      message = n == 0 ? 'No piles there' : 'Clearing $n pile(s)';
+    }
+  }
+
+  /// The Inspector's Dispose button: the selected pile, shipped out (or
+  /// scrapped in the sandbox).
+  void disposeSelectedPile() {
+    final t = selectedPile, cu = _cleanup;
+    if (t == null || cu == null) return;
+    cu.disposePile(t, scrap: sandbox);
+    message = sandbox ? 'Scrapped the pile' : 'Disposing of the pile';
+    if (!sim.piles.any((p) => p.tile == t)) selectedPile = null;
+    notifyListeners();
+    frame.value++;
+  }
+
   // ---- Pointer ---------------------------------------------------------
 
   int? _pointer;
@@ -1199,6 +1262,8 @@ class FactoryEditorController extends ChangeNotifier {
     _delMoved = false;
     deleteRect = null;
     deleteTargets = const [];
+    _clrStart = null;
+    clearRect = null;
   }
 
   void pointerHover(Offset local) {
@@ -1250,13 +1315,18 @@ class FactoryEditorController extends ChangeNotifier {
     switch (tool) {
       case FactoryTool.select:
         final hit = index.hit(t);
+        selectedPile = null;
         if (hit == null) {
           selectedId = null;
+          if (sim.piles.any((p) => p.tile == t)) selectedPile = t;
           _panning = true;
         } else {
           selectedId = hit.id;
         }
         notifyListeners();
+      case FactoryTool.clear:
+        _clrStart = t;
+        _refreshClear();
       case FactoryTool.delete:
         // A click deletes what it lands on, a drag the rectangle: which one
         // is known only on release.
@@ -1300,6 +1370,7 @@ class FactoryEditorController extends ChangeNotifier {
     if (_delStart != null && t != _delStart) _delMoved = true;
     _refreshGhost();
     _refreshDelete();
+    _refreshClear();
     frame.value++;
   }
 
@@ -1315,6 +1386,12 @@ class FactoryEditorController extends ChangeNotifier {
       if (_rectStart != null && t != _rectStart) _rectMoved = true;
       _refreshGhost();
       _commitGhost();
+    }
+    if (_clrStart != null) {
+      hover = t;
+      _refreshClear();
+      _commitClear();
+      notifyListeners();
     }
     final ds = _delStart;
     if (ds != null) {

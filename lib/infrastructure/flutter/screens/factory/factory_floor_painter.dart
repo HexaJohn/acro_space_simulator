@@ -52,6 +52,7 @@ import '../../../../domain/colony/city/factory/factory_handling.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import 'factory_editor_controller.dart';
+import 'floor_item_info.dart' show itemAbbrev;
 import 'floor_layout_index.dart';
 
 /// Below this zoom (px per tile) the grid is gone; it is fully drawn
@@ -68,6 +69,10 @@ const double kDynamicMinPx = 1.5;
 
 /// Machine labels need at least this zoom to be legible.
 const double kLabelMinPx = 9;
+
+/// Closest zoom (px per tile) at which belt items and piles carry a 2-3
+/// letter label (§10 item 18).
+const double kItemLabelMinPx = 36;
 
 /// Label font size, logical px.
 const double kLabelFont = 11;
@@ -477,6 +482,8 @@ class FactoryFloorPainter extends CustomPainter {
   static final Paint _deleteFill = _fill(kDeletePreview);
   static final Paint _deleteEdge = _stroke(const Color(0xFFFF5050), 0.12);
   static final Paint _unusedMark = _fill(const Color(0xFFFFB300));
+  static final Paint _clearFill = _fill(const Color(0x4026C6DA));
+  static final Paint _clearEdge = _stroke(const Color(0xFF26C6DA), 0.1);
 
   /// The hover-delete outline: red, as wide as the selection ring so it
   /// reads at any zoom, and drawn through [_T] as a FILLED ring.
@@ -521,6 +528,7 @@ class FactoryFloorPainter extends CustomPainter {
     if (c.overlays.contains(FactoryOverlay.traffic)) _paintHeat(canvas, vis);
     if (px >= kDynamicMinPx) {
       _paintPiles(canvas, vis);
+      _paintStuckPiles(canvas, vis);
       _paintBeltItems(canvas, ix, vis);
       _paintHandlers(canvas, ix, vis);
     }
@@ -528,9 +536,11 @@ class FactoryFloorPainter extends CustomPainter {
     _paintSelection(canvas, ix);
     _paintDeletePreview(canvas);
     _paintSweep(canvas);
+    _paintClearBox(canvas);
     _paintGhost(canvas);
     canvas.restore();
     if (px >= kLabelMinPx) _paintLabels(canvas, ix, vis, px);
+    if (px >= kItemLabelMinPx) _paintItemLabels(canvas, ix, vis);
     _paintEditLabels(canvas, px);
   }
 
@@ -662,6 +672,56 @@ class FactoryFloorPainter extends CustomPainter {
       final r = Rect.fromLTWH(p.tile.x + 0.1 + o, p.tile.y + 0.1, 0.5, 0.5);
       _T.rect(canvas, r, _itemPaint(p.item));
       _T.rect(canvas, r, _pileEdge);
+    }
+  }
+
+  /// An amber warning triangle in the corner of every pile nothing could
+  /// take (no store with room), as filled geometry (§10 item 17).
+  void _paintStuckPiles(Canvas canvas, TileRect vis) {
+    for (final t in c.stuckPiles) {
+      if (!vis.contains(t)) continue;
+      final x = t.x.toDouble(), y = t.y.toDouble();
+      canvas.drawPath(
+          Path()
+            ..moveTo(x + 0.6, y + 0.62)
+            ..lineTo(x + 0.98, y + 0.62)
+            ..lineTo(x + 0.79, y + 0.98)
+            ..close(),
+          _unusedMark);
+    }
+  }
+
+  /// The Clear tool's drag box: a teal wash with a filled edge ring.
+  void _paintClearBox(Canvas canvas) {
+    final r = c.clearRect;
+    if (r == null) return;
+    final box = Rect.fromLTWH(
+        r.x0.toDouble(), r.y0.toDouble(), r.w.toDouble(), r.h.toDouble());
+    _T.rect(canvas, box, _clearFill);
+    _T.rect(canvas, box, _clearEdge);
+  }
+
+  /// 2-3 letter names on belt items and piles at close zoom, screen space.
+  void _paintItemLabels(Canvas canvas, FloorLayoutIndex ix, TileRect vis) {
+    for (final b in c.sim.beltItems) {
+      if (!vis.contains(b.tile)) continue;
+      final d = ix.beltDirAt(b.tile) ?? Dir4.east;
+      final t = b.progress - 0.5;
+      final tp = _label(itemAbbrev(b.item));
+      final at = c.tileToLocal(
+          b.tile.x + 0.5 + d.dx * t, b.tile.y + 0.5 + d.dy * t);
+      tp.paint(canvas, at - Offset(tp.width / 2, tp.height / 2));
+    }
+    TilePos? at;
+    var n = 0;
+    for (final p in c.sim.piles) {
+      if (!vis.contains(p.tile)) continue;
+      n = p.tile == at ? n + 1 : 0;
+      at = p.tile;
+      final o = (n % 3) * 0.28;
+      final ctr = c.tileToLocal(p.tile.x + 0.35 + o, p.tile.y + 0.35);
+      final tp = _label('${itemAbbrev(p.item)}${p.count > 1 ? p.count : ''}');
+      tp.paint(canvas, ctr - Offset(tp.width / 2, tp.height / 2));
     }
   }
 
