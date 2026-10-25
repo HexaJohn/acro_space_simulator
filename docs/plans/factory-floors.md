@@ -479,6 +479,21 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
 16. **Searchable pickers.** Every item and recipe picker (arm filter, dock item, chest item,
     machine recipe, palette) gets type-to-search, as the product tree's picker already does.
 
+17. **Clean up items off the floor.** Floor piles (left by deletes, re-routed loads, removed
+    targets) should never be permanent clutter:
+    - a "Clear" area order: drag a box and handlers haul every pile in it to the nearest chest,
+      staging area or shipping dock, posted as ordinary move requests and shown in the queue;
+    - a "Dispose" option for unwanted goods: hauled to a shipping dock and shipped out (or
+      scrapped for nothing in the sandbox);
+    - piles that nothing can take (no store with room) are flagged on the floor and in the
+      readout, not silently stuck.
+18. **See what items ARE.**
+    - Hovering a belt tile, pile, chest, dock, machine or handler shows a tooltip with the items
+      it holds (name, count, load class).
+    - At closer zooms belt items and piles draw a small icon or short label, not just a coloured
+      square.
+    - A legend lists every item colour currently on the floor.
+
 **Defaults for the open questions** (2026-10-25; the user said go without picking, so these are
 the recommendations; revisit if they object):
 
