@@ -476,6 +476,9 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
     entry and a debug flag only). In game, the player sees either the raw materials an item needs
     in total, or its DIRECT components (one level). Never the whole chain.
 
+16. **Searchable pickers.** Every item and recipe picker (arm filter, dock item, chest item,
+    machine recipe, palette) gets type-to-search, as the product tree's picker already does.
+
 **Defaults for the open questions** (2026-10-25; the user said go without picking, so these are
 the recommendations; revisit if they object):
 
