@@ -42,6 +42,7 @@ import '../factory/floor_blueprint.dart';
 import 'economy_contracts.dart';
 import 'firm_policy.dart';
 import 'local_prices.dart';
+import 'markets.dart';
 
 /// Funds (`CitySim.funds`, the treasury's §) per economy credit.
 ///
@@ -76,10 +77,13 @@ import 'local_prices.dart';
 /// Refinery ≈ 0.3 §/s, Rations Plant ≈ 0.02, Arms ≈ 1.4, Electronics ≈ 5.4,
 /// Rocket Parts ≈ 120, Missile Plant ≈ 610. The last two are the spec
 /// recipes' value added at Earth prices (43 kg of tube and boards into
-/// 40 kg of $1,000/kg engine parts every colony second), not this constant;
-/// what reaches the treasury from any one plant is bounded at a few times
-/// its own workers' tax (`kCorporateTaxWorkerMultiple`, `city_economy.dart`)
-/// so those two can't swamp a colony's budget.
+/// 40 kg of $1,000/kg engine parts every colony second), not this constant.
+/// Since dynamic markets those rents fall as the plant floods its market
+/// (revenue counts only what sells, and Earth's price drops under its
+/// exports); what reaches the treasury from any one plant also saturates
+/// smoothly under a generous SAFETY ceiling, a multiple of its own workers'
+/// tax (`kCorporateTaxSafetyMultiple`, `city_economy.dart`), against a
+/// runaway bug.
 const double kCreditsToFunds = 0.015;
 
 /// Production multiplier a firm sets when it idles stations (firm policy's
@@ -189,6 +193,28 @@ class ColonyEconomy {
   final SplayTreeMap<String, double> demandUnits = SplayTreeMap();
   final SplayTreeMap<String, double> supplyUnits = SplayTreeMap();
 
+  /// Units of each commodity landed by booked freight this day so far: part
+  /// of [supplyUnits], and what the colony bought from Earth (Earth's
+  /// demand; never the colony's to re-export).
+  final SplayTreeMap<String, double> importUnits = SplayTreeMap();
+
+  /// The colony's own market: every traded good's price, stock and smoothed
+  /// flows (docs/plans/dynamic-markets.md phase 1). Empty until the first
+  /// day close seeds it from today's solve; saved with the rest.
+  Market colonyMarket = Market();
+
+  /// Earth's world market as this colony sees it: seeded once from
+  /// `kEarthPricePerKg`, then moved by world supply and demand plus this
+  /// colony's own trade with it. Each colony carries its own copy until
+  /// phase 5's inter-colony trade gives the world market a single owner.
+  Market earthMarket = Market();
+
+  /// Per good, the share of supply that sold at the last close
+  /// (`markets.dart` `sellThroughOf`): what revenue counts. Saved, so an
+  /// investment settled between a load and the next close values output
+  /// exactly as the unsaved colony would.
+  final SplayTreeMap<String, double> sellThrough = SplayTreeMap();
+
   /// Funds per second paid in / out over the current day: the last day's
   /// corporate tax and state-plant deficit, converted by [kCreditsToFunds].
   double corporateTaxFundsPerS = 0;
@@ -218,6 +244,14 @@ class ColonyEconomy {
       supplyUnits[commodity] = (supplyUnits[commodity] ?? 0) + perSec * dt;
     } else if (perSec < 0) {
       demandUnits[commodity] = (demandUnits[commodity] ?? 0) - perSec * dt;
+    }
+  }
+
+  /// Adds an import flow (units/s landed by freight) over [dt] seconds. The
+  /// caller records it as supply through [addFlow] too.
+  void addImport(String commodity, double perSec, double dt) {
+    if (perSec > 0) {
+      importUnits[commodity] = (importUnits[commodity] ?? 0) + perSec * dt;
     }
   }
 
@@ -257,6 +291,11 @@ class ColonyEconomy {
   /// Whether anything here outlives the day: a colony that never had a plant
   /// has only a day clock and the day's flows, which a save can drop (its
   /// next day starts fresh and nothing reads them but the price solve).
+  ///
+  /// The markets alone don't count: a plantless colony saves as it did before
+  /// the economy, and its markets re-seed from today's model on load (the
+  /// old-save path). No plant's books depend on them, and a plant placed
+  /// later starts the colony saving them with everything else.
   bool get hasState =>
       books.isNotEmpty ||
       throttle.isNotEmpty ||
@@ -287,6 +326,10 @@ class ColonyEconomy {
         'serial': firmSerial,
         if (demandUnits.isNotEmpty) 'dem': {...demandUnits},
         if (supplyUnits.isNotEmpty) 'sup': {...supplyUnits},
+        if (importUnits.isNotEmpty) 'imp': {...importUnits},
+        if (!colonyMarket.isEmpty) 'mkt': colonyMarket.toJson(),
+        if (!earthMarket.isEmpty) 'earthMkt': earthMarket.toJson(),
+        if (sellThrough.isNotEmpty) 'sell': {...sellThrough},
         'taxPs': corporateTaxFundsPerS,
         'defPs': industryDeficitFundsPerS,
         if (lastIndustrialSubsidy != 0) 'subLast': lastIndustrialSubsidy,
@@ -319,6 +362,12 @@ class ColonyEconomy {
     firmSerial = (j['serial'] as num?)?.toInt() ?? 1;
     m(j['dem']).forEach((k, v) => demandUnits[k] = d(v));
     m(j['sup']).forEach((k, v) => supplyUnits[k] = d(v));
+    m(j['imp']).forEach((k, v) => importUnits[k] = d(v));
+    // An old save has neither market: both stay empty and the next day
+    // close seeds them from today's model.
+    colonyMarket = Market.fromJson(m(j['mkt']));
+    earthMarket = Market.fromJson(m(j['earthMkt']));
+    m(j['sell']).forEach((k, v) => sellThrough[k] = d(v));
     corporateTaxFundsPerS = d(j['taxPs']);
     industryDeficitFundsPerS = d(j['defPs']);
     lastIndustrialSubsidy = d(j['subLast']);

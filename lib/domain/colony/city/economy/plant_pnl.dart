@@ -59,17 +59,28 @@ double corporateTaxRate(EconomyKind e) => switch (e) {
 /// Prices [ledger] at [book]. Units the ledger lists are colony commodity
 /// units (crates already converted at the dock). Commodities are summed in
 /// sorted order so the result does not depend on map insertion order.
+///
+/// **Revenue counts only what sold** (docs/plans/dynamic-markets.md §3
+/// "Consequences"): each good shipped is valued at its price times its
+/// [sellThrough], the share of the colony's supply of it that found a buyer
+/// (`markets.dart` `sellThroughOf`; a good not listed sold whole). The plant
+/// takes its pro-rata share of what sold: shipped × price × share. What
+/// didn't sell piles up in stock, where the market's cover term pushes the
+/// price down. Every unit shipped still pays its freight, and inputs are
+/// always paid for whole.
 PlantPnL pnlFor(
   FactoryLedger ledger,
   PriceBook book, {
   required Ownership owner,
   required EconomyKind economy,
   double logisticsPerUnit = kLogisticsFeePerUnit,
+  Map<String, double> sellThrough = const {},
 }) {
-  double valued(Map<String, double> units) {
+  double valued(Map<String, double> units, {bool sold = false}) {
     var sum = 0.0;
     for (final c in units.keys.toList()..sort()) {
-      sum += units[c]! * book.price(c);
+      final share = sold ? (sellThrough[c] ?? 1.0) : 1.0;
+      sum += units[c]! * book.price(c) * share;
     }
     return sum;
   }
@@ -86,7 +97,7 @@ PlantPnL pnlFor(
   for (final k in HandlerKind.values) {
     equipment += (ledger.equipmentSeconds[k] ?? 0) * equipmentWearPerS(k);
   }
-  final revenue = valued(ledger.shipped);
+  final revenue = valued(ledger.shipped, sold: true);
   final inputs = valued(ledger.received);
   final wages = ledger.totalWorkerSeconds * book.wagePerWorkerS;
   final power = ledger.energyKJ * book.powerPerKJ;

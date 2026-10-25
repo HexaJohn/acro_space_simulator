@@ -12,6 +12,13 @@
 /// prices make that plant structurally unprofitable: fix the calibration
 /// (this test found the Earth ore and rations prices, `earth_market.dart`),
 /// never the test.
+///
+/// Since dynamic markets (docs/plans/dynamic-markets.md phase 1) revenue
+/// counts only what SELLS, so "healthy" is asked of a plant whose goods are
+/// WANTED: the fixture's consumers that take its output are now recorded as
+/// the colony's demand (`holdStock`'s `wanted`). A plant nobody buys from is
+/// a different story, with its own test (markets_colony_test.dart: its
+/// price slides and its margin shrinks over weeks).
 library;
 
 import 'package:acro_space_simulator/domain/colony/city/city_economy.dart';
@@ -45,6 +52,16 @@ void main() {
         expect(sim.firmBookOf(lot)!.profitPerS, greaterThan(0));
         expect(sim.firmBookOf(lot)!.cash, greaterThan(0),
             reason: 'retained profit');
+        // Off-world, the only plant making a good used to SET its price at
+        // its own cost, which pinned the Steel Mill, Refinery and Rations
+        // margins at ~0.1-0.3% (factory-floors.md §9 open item 4). Supply
+        // and demand set the price now: a colony that takes every unit as it
+        // is made, with nothing on the shelf, pays above cost, so within a
+        // month those plants earn a real margin.
+        if (body != 'earth' && kPinnedOffWorld.contains(type)) {
+          expect(sim.firmBookOf(lot)!.margin, greaterThan(0.05),
+              reason: 'margin ${sim.firmBookOf(lot)!.margin}');
+        }
       });
     }
   }
@@ -53,7 +70,8 @@ void main() {
   // consumer for its goods, a plant's output piles up to the storage cap
   // and is refused. Its staff stand down and the day books nothing — it
   // used to book full wages against no revenue, and every such firm laid
-  // off to nothing.
+  // off to nothing. (On Earth what it does ship still sells: the world
+  // market buys whatever reaches it, at a price its exports push down.)
   for (final type in kFactoryPlantTypes) {
     test('a $type whose goods pile up stays healthy for 60 days', () {
       final sim = economyColony();
@@ -72,6 +90,14 @@ void main() {
 /// Units of each input the off-Earth runs hold: far beyond a month of the
 /// colony's draw, so no input reads as scarce.
 const double kWellStocked = 1e5;
+
+/// The templates whose off-world margins were pinned at ~0.1-0.3% when they
+/// set their own good's price at cost.
+const Set<String> kPinnedOffWorld = {
+  kSteelMillType,
+  'refinery',
+  'rationsfactory',
+};
 
 /// No cuts, no offer: the roster is the template's and every station runs.
 void expectHealthy(CitySim sim, String lot, Map<HandlerKind, int> roster) {

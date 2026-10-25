@@ -1770,7 +1770,12 @@ class CitySim {
     // The freighters the player has booked are supply too, if never local
     // ([bookedLifeImports]).
     final imports = bookedLifeImports();
-    imports.forEach((c, perSec) => flow(c, perSec, false));
+    imports.forEach((c, perSec) {
+      flow(c, perSec, false);
+      // ... and bought from Earth: the world market's demand
+      // (docs/plans/dynamic-markets.md, `closeEconomyDay`).
+      colonyEconomy.addImport(c, perSec, dt);
+    });
 
     emissionRate = pollutionRate;
     oxygenatorRun = towerRuns.oxygenator;

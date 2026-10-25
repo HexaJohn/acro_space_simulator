@@ -3,21 +3,29 @@
 // This work is licensed under the PolyForm Noncommercial License 1.0.0.
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
-/// Earth's reference prices: what each commodity costs on the world market
-/// at the bottom of Earth's gravity well (docs/plans/factory-floors.md §3
-/// "Prices are local and derived").
+/// Earth's SEED prices: what each commodity cost on the world market, at
+/// the bottom of Earth's gravity well, on the day the world economy starts
+/// (docs/plans/factory-floors.md §3 "Prices are local and derived";
+/// docs/plans/dynamic-markets.md §3 "Earth is a market like any other").
 ///
 /// Earth is the one market every colony can always buy from, so its price
 /// plus the cost of lifting the good out of Earth's well and landing it is
-/// the IMPORT CEILING on every off-world price (`local_prices.dart`). These
-/// numbers are therefore the anchor of the whole price system, and each is
-/// a real-world bulk or industrial price scaled by the commodity's unit
-/// mass (`commodity_mass.dart`).
+/// the IMPORT CEILING on every off-world price (`local_prices.dart`). Each
+/// number is a real-world bulk or industrial price scaled by the
+/// commodity's unit mass (`commodity_mass.dart`).
 ///
-/// Credits ≈ US dollars of the 2020s for now; integration (wave 3)
-/// calibrates credits against `CitySim.funds`. Off-Earth these are only a
-/// ceiling: a Martian colony's oxygen is priced from its own electrolysis
-/// plant, not from this table.
+/// **Only a seed.** Since dynamic markets, Earth's LIVE prices are a
+/// `Market` (`markets.dart`) seeded from this table once
+/// (`seedEarthMarket`) and then moved every day by the world's supply and
+/// demand. Nothing may read this table as a live price. What still reads it
+/// reads it as a fixed WEIGHT, never as what a good sells for: the
+/// joint-product cost split in `local_prices.dart`, the floor reward cap's
+/// value measure (`city_factory_port.dart`, `factory_floors.dart`), the
+/// methalox fallback a bare transport model prices propellant at, and a
+/// bare solve handed no live Earth market (a test).
+///
+/// Credits ≈ US dollars of the 2020s; `kCreditsToFunds` converts them to the
+/// treasury's §.
 library;
 
 import '../commodity.dart';

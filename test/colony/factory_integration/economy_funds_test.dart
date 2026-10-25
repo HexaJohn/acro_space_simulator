@@ -40,8 +40,14 @@ void main() {
     runDays(sim, 1.01, specs: [specOf('steelmill')]);
     final pnl = sim.colonyEconomy.lastPnl[lot]!;
     expect(pnl.tax, greaterThan(0));
-    expect(sim.corporateTaxRate,
-        closeTo(pnl.tax * kCreditsToFunds / kColonyDaySec, 1e-6));
+    // Through the smooth safety ceiling (economy_tax_cap_test.dart), which
+    // shaves a mill's tax by under 2%: the exact formula, not the raw rate.
+    expect(
+        sim.corporateTaxRate,
+        closeTo(
+            softTaxCeiling(pnl.tax * kCreditsToFunds / kColonyDaySec,
+                sim.corporateTaxCeilingFor(lot)),
+            1e-6));
     expect(
         sim.netFundsRate,
         closeTo(

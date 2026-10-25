@@ -12,12 +12,15 @@
 ///
 /// What the user decided, and where it lands:
 /// - **Shadow prices (Q8).** Once per colony day ([kColonyDaySec]) the
-///   colony's [MarketFacts] are read off the sim ([marketFacts]) and the
-///   local market is solved ([localMarket]). Each floor plant's ledger for
-///   the day is priced into a [PlantPnL] and folded into its operator's
-///   [FirmBook]. None of those credits are paid by anyone. The only money
-///   that reaches `funds` is corporate tax in and the state's industry
-///   deficit and subsidies out, through [kCreditsToFunds].
+///   colony's [MarketFacts] are read off the sim ([marketFacts]), today's
+///   costs are solved, and the colony's and Earth's markets step one day by
+///   supply against demand ([closeEconomyDay], docs/plans/dynamic-markets.md
+///   phase 1). Each floor plant's ledger for the day is priced into a
+///   [PlantPnL], revenue counting only what sold, and folded into its
+///   operator's [FirmBook]. None of those credits are paid by anyone. The
+///   only money that reaches `funds` is corporate tax in (under a smooth
+///   safety ceiling, [softTaxCeiling]) and the state's industry deficit and
+///   subsidies out, through [kCreditsToFunds].
 /// - **Ownership by economy.** A new plant is a private firm under capitalism
 ///   or a free market and state-owned under socialism or communism
 ///   ([defaultOwnerFor]); communism tolerates no private plant at all, so one
@@ -46,7 +49,9 @@ import 'economy/economy_clock.dart';
 import 'economy/economy_contracts.dart';
 import 'economy/firm_policy.dart';
 import 'economy/local_prices.dart';
+import 'economy/markets.dart';
 import 'economy/plant_pnl.dart';
+import 'economy/transport_cost.dart';
 import 'factory/factory_handling.dart';
 import 'factory/factory_sim_api.dart';
 import 'factory/floor_blueprint.dart';
@@ -74,23 +79,39 @@ const List<HandlerKind> kLayoffOrder = [
   HandlerKind.crane,
 ];
 
-/// The most corporate tax one private plant pays the treasury, as a multiple
-/// of the worker tax its nameplate jobs pay (§/s in a typical colony of this
-/// economy: [kCapHappiness], the default tax rate).
+/// The SAFETY ceiling on the corporate tax one private plant pays the
+/// treasury, as a multiple of the worker tax its nameplate jobs pay (§/s in
+/// a typical colony of this economy: [kCapHappiness], the default tax rate).
+/// The treasury's take saturates smoothly under it ([softTaxCeiling]).
 ///
-/// [kCreditsToFunds] puts a Steel Mill's tax at about its workers' own, but
-/// the high-value templates (Rocket Parts, Missile Plant) add Earth-priced
-/// value per second that converts to a hundred or more §/s: hundreds of a
-/// colony's whole worker tax from one building, after which taxes, laws and
-/// road upkeep stop mattering. Four times its workers' tax keeps a plant
-/// worth having for the budget (the mill sits near one) without letting any
-/// one plant swamp it. The firm's books still carry its full tax: only the
-/// treasury's take is bounded.
-const double kCorporateTaxWorkerMultiple = 4;
+/// It replaced a HARD cap at 4× (docs/plans/dynamic-markets.md §3
+/// "Corporate tax needs no cap"). That cap existed because revenue counted
+/// every unit shipped at a fixed Earth price, so a Missile Plant nobody
+/// bought from still booked hundreds of §/s. Now revenue counts only what
+/// sells and prices fall under a glut, so an unwanted plant earns little on
+/// its own, and the ceiling is only a guard against a runaway bug.
+///
+/// 30×, generous on purpose: at Earth prices the honest templates pay about
+/// 1× (Steel Mill, Refinery), 6× (Arms) and 21× (Electronics) their
+/// workers' tax, so the saturation shaves the mill ~2% and Electronics
+/// ~28%. Only a scarce-good rent like Rocket Parts' (~380×) or the Missile
+/// Plant's (~1,600×) at Earth's price reaches it, and those are the rents
+/// the market is meant to erode.
+const double kCorporateTaxSafetyMultiple = 30;
 
-/// The happiness the tax cap's reference colony has: the "typical" 60% the
-/// [kCreditsToFunds] calibration uses.
+/// The happiness the tax ceiling's reference colony has: the "typical" 60%
+/// the [kCreditsToFunds] calibration uses.
 const double kCapHappiness = 0.6;
+
+/// The treasury's take of a plant whose raw tax is [raw] §/s under a safety
+/// [ceiling]: ceiling · (1 − e^(−raw/ceiling)). Smooth, increasing, equal to
+/// [raw] to first order for a small tax (a plant at a tenth of the ceiling
+/// loses ~5% of its tax), and never above the ceiling. Zero for a zero or
+/// negative raw tax or ceiling.
+double softTaxCeiling(double raw, double ceiling) {
+  if (!(raw > 0) || !(ceiling > 0)) return 0;
+  return ceiling * (1 - math.exp(-raw / ceiling));
+}
 
 /// Most messages [ColonyEconomy.notices] holds: the newest few are what a
 /// HUD shows, and the list must not grow for a colony's whole life when no
@@ -147,14 +168,64 @@ extension CityEconomy on CitySim {
     );
   }
 
-  /// The last day's solved market (the "why this price" detail), solving now
-  /// when none has been yet (a fresh colony, a just-loaded save).
-  LocalMarket get localMarket =>
-      colonyEconomy.market ??= solveLocalMarket(marketFacts());
+  /// The last day's market (the "why this price" detail: its book carries
+  /// the colony's traded prices, its other fields the cost solve's anchors),
+  /// solving now when none has been yet (a fresh colony, a just-loaded save):
+  /// the saved prices laid over today's solve, or the solve alone before the
+  /// first close.
+  LocalMarket get localMarket => colonyEconomy.market ??= _withBook(
+      _solveCosts(),
+      (s) => overlayPrices(s.book, colonyEconomy.colonyMarket));
 
   /// The colony's local prices as of the last day close; null before the
   /// first one (a just-loaded save re-solves at its next day).
   PriceBook? get localPrices => colonyEconomy.market?.book;
+
+  /// The cost solve against Earth's LIVE market (seeded if this colony has
+  /// none yet), with propellant out of Earth's well at Earth's live methalox
+  /// price.
+  LocalMarket _solveCosts() {
+    final e = colonyEconomy;
+    if (e.earthMarket.isEmpty) e.earthMarket = seedEarthMarket();
+    final propellant = earthPropellantPerKgIn(e.earthMarket);
+    return solveLocalMarket(
+      marketFacts(),
+      earthPrices: e.earthMarket.prices,
+      transport: propellant == null
+          ? null
+          : DeltaVTransportModel(
+              propellantPricePerKg: {kEarthMarketId: propellant}),
+    );
+  }
+
+  /// [solved] with its book replaced by [book]'s.
+  static LocalMarket _withBook(
+          LocalMarket solved, PriceBook Function(LocalMarket) book) =>
+      LocalMarket(
+        book: book(solved),
+        localCost: solved.localCost,
+        sourceOf: solved.sourceOf,
+        scarcity: solved.scarcity,
+        iterations: solved.iterations,
+        converged: solved.converged,
+      );
+
+  /// The safety ceiling on [site]'s corporate tax to the treasury, §/s:
+  /// [kCorporateTaxSafetyMultiple] × the worker tax its nameplate jobs pay
+  /// in a reference colony of this economy. A reference colony, not this
+  /// one's mood of the day: a ceiling that followed happiness would let one
+  /// bad week (or a tax holiday) zero every plant's tax.
+  double corporateTaxCeilingFor(String site) {
+    final double jobs = siteSpec(site)?.jobs.toDouble() ??
+        factoryFloors[site]?.rates.jobs ??
+        0.0;
+    return jobs *
+        kCapHappiness *
+        CitySim.defaultTaxRate *
+        CitySim.taxPerWorkerPerSec *
+        economy.fundsMult *
+        kCorporateTaxSafetyMultiple;
+  }
 
   // ---- ownership ----------------------------------------------------------
 
@@ -295,25 +366,43 @@ extension CityEconomy on CitySim {
     if (e.dayClockS >= kColonyDaySec) closeEconomyDay();
   }
 
-  /// Closes the economy day now: solves prices from the day's flows, prices
-  /// every floor plant's ledger into its books, lets each private firm act,
-  /// and sets the next day's corporate-tax and industry-deficit rates.
+  /// Closes the economy day now (docs/plans/dynamic-markets.md phase 1):
+  /// - solves today's COSTS against Earth's live market ([_solveCosts]): the
+  ///   cost anchors, the trade band, the wage and the power price;
+  /// - steps the colony's market one day on the day's flows and stock
+  ///   ([closeColonyMarket]; a market it doesn't have yet — a fresh colony,
+  ///   an old save — is seeded at the solve's price), giving the day's
+  ///   prices and each good's sell-through;
+  /// - steps Earth's market on the world's depth plus this colony's trade
+  ///   with it (its booked imports, its exported surplus), which tomorrow's
+  ///   solve then reads;
+  /// - prices every floor plant's ledger into its books (revenue on what
+  ///   sold), lets each private firm act, and sets the next day's
+  ///   corporate-tax and industry-deficit rates.
+  ///
+  /// One close is one market day whatever its length (a fixed cadence: a
+  /// test's manual close mid-day steps prices a whole day).
   void closeEconomyDay() {
     final e = colonyEconomy;
-    final market = solveLocalMarket(marketFacts());
-    e.market = market;
-    final book = market.book;
+    final facts = marketFacts();
+    final solved = _solveCosts();
+    final daySoFar = e.dayClockS;
+    final imports = <String, double>{
+      if (daySoFar > 0)
+        for (final c in e.importUnits.keys) c: e.importUnits[c]! / daySoFar,
+    };
+    final close = closeColonyMarket(e.colonyMarket, solved, facts,
+        localImportsPerS: imports);
+    closeEarthDay(e.earthMarket,
+        importsPerS: imports, exportsPerS: close.exportsPerS);
+    e.market = _withBook(solved, (_) => close.book);
+    e.sellThrough
+      ..clear()
+      ..addAll(close.sellThrough);
+    final book = close.book;
     final econ = economyKind;
 
     final day = e.dayClockS > 0 ? e.dayClockS : kColonyDaySec;
-    // One nameplate job's worker tax, §/s, in a typical colony: the
-    // per-plant tax cap's unit. A reference colony, not this one's mood of
-    // the day: a cap that followed happiness would let one bad week (or a
-    // tax holiday) zero every plant's tax.
-    final workerTaxPerJob = kCapHappiness *
-        CitySim.defaultTaxRate *
-        CitySim.taxPerWorkerPerSec *
-        economy.fundsMult;
     var taxFunds = 0.0;
     var deficit = 0.0;
     for (final site in factoryFloors.siteIds) {
@@ -335,7 +424,8 @@ extension CityEconomy on CitySim {
       final ledger = factoryFloors.takeLedger(site);
       // A closed plant trades nothing; whatever it ran up is not booked.
       if (firm.isClosed) continue;
-      final pnl = pnlFor(ledger, book, owner: owner, economy: econ);
+      final pnl = pnlFor(ledger, book,
+          owner: owner, economy: econ, sellThrough: e.sellThrough);
       e.lastPnl[site] = pnl;
       // A day the colony never let the plant work (no inputs, or every
       // crate refused at a full warehouse) books nothing (the floor stands
@@ -350,11 +440,11 @@ extension CityEconomy on CitySim {
       if (owner.isState) {
         deficit += math.max(0.0, -pnl.preTax);
       } else {
-        // Paid over the next day at the rate the day ran up, bounded per
-        // plant ([kCorporateTaxWorkerMultiple]).
-        final jobs = siteSpec(site)?.jobs ?? rec.rates.jobs;
-        final cap = jobs * workerTaxPerJob * kCorporateTaxWorkerMultiple;
-        taxFunds += math.min(pnl.tax * kCreditsToFunds / day, cap);
+        // Paid over the next day at the rate the day ran up, saturating
+        // smoothly under the plant's safety ceiling
+        // ([kCorporateTaxSafetyMultiple]).
+        taxFunds += softTaxCeiling(
+            pnl.tax * kCreditsToFunds / day, corporateTaxCeilingFor(site));
       }
       // A firm back in health hires back whoever it let go.
       if (firm.health == FirmHealth.healthy && rec.live == null) {
@@ -375,6 +465,7 @@ extension CityEconomy on CitySim {
     e.dayClockS = 0;
     e.demandUnits.clear();
     e.supplyUnits.clear();
+    e.importUnits.clear();
   }
 
   /// The handler a layoff lets go: the cheapest kind with more than one on
@@ -441,15 +532,19 @@ extension CityEconomy on CitySim {
 
   /// Shadow profit per colony second, before tax, that a floor running at
   /// [rates] with [roster] would earn at [book]'s prices: the same lines as
-  /// [pnlFor], with equipment wear charged for every handler on the roster.
+  /// [pnlFor], with equipment wear charged for every handler on the roster,
+  /// and output valued only as far as it sells (the last close's
+  /// [ColonyEconomy.sellThrough]): a firm won't pay to make more of what
+  /// nobody buys.
   double ratesProfitPerS(
     MeasuredRates rates,
     PriceBook book, {
     Map<HandlerKind, int> roster = const {},
   }) {
+    final sold = colonyEconomy.sellThrough;
     var revenue = 0.0, inputs = 0.0, units = 0.0;
     for (final c in (rates.outPerS.keys.toList()..sort())) {
-      revenue += rates.outPerS[c]! * book.price(c);
+      revenue += rates.outPerS[c]! * book.price(c) * (sold[c] ?? 1.0);
       units += rates.outPerS[c]!;
     }
     for (final c in (rates.inPerS.keys.toList()..sort())) {

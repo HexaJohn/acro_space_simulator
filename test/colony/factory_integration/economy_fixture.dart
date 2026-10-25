@@ -48,13 +48,24 @@ String placePlant(CitySim sim, String type) =>
 ///
 /// [emptyOutputs] false leaves the outputs to pile up against the storage
 /// cap, as they do in a colony with no consumer for them.
+///
+/// Since dynamic markets revenue counts only what SELLS
+/// (docs/plans/dynamic-markets.md §3), so consumers that take everything
+/// must be seen by the market: with [wanted] (the default) the units
+/// emptied are recorded as the colony's demand, as a real consumer's draw
+/// is. [wanted] false empties them without a buyer, as if the goods were
+/// carted off unsold: shipped, but no sale.
 void holdStock(CitySim sim, CityBuildingSpec spec,
-    {double inputs = 300, bool emptyOutputs = true}) {
+    {double inputs = 300, bool emptyOutputs = true, bool wanted = true}) {
   for (final k in spec.inputs.keys) {
     sim.stock[k] = inputs;
   }
   if (!emptyOutputs) return;
   for (final k in spec.outputs.keys) {
+    final taken = sim.stockOf(k);
+    if (wanted && taken > 0) {
+      sim.colonyEconomy.addFlow(k, -taken / kEconTickS, kEconTickS);
+    }
     sim.stock[k] = 0;
   }
 }
@@ -76,13 +87,15 @@ void runDays(
   List<CityBuildingSpec> specs = const [],
   double inputs = 300,
   bool emptyOutputs = true,
+  bool wanted = true,
   bool Function()? after,
 }) {
   final ticks = (days * kColonyDaySec / kEconTickS).round();
   for (var i = 0; i < ticks; i++) {
     sim.population = kEconPopulation;
     for (final s in specs) {
-      holdStock(sim, s, inputs: inputs, emptyOutputs: emptyOutputs);
+      holdStock(sim, s,
+          inputs: inputs, emptyOutputs: emptyOutputs, wanted: wanted);
     }
     sim.advance(kEconTickS);
     if (after != null && after()) return;

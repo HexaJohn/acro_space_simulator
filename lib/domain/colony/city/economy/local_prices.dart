@@ -55,8 +55,16 @@
 /// share stays below one on every real Mars and Moon site down to barren
 /// (food 0.3, water 0.6). Only the volcano biome (food 0.2, water 0.3)
 /// passes one — a colony that cannot feed its own workers — and there
-/// prices pin at their import ceilings and the loop still stops. Joint products (a refinery's fuel and oxidizer) split their cost
-/// by FIXED Earth-value weights, which keeps the map monotone.
+/// prices pin at their import ceilings and the loop still stops. Joint
+/// products (a refinery's fuel and oxidizer) split their cost by FIXED
+/// Earth-value weights (the `kEarthPricePerKg` seed read as a weight, not
+/// as a price), which keeps the map monotone.
+///
+/// Since dynamic markets (docs/plans/dynamic-markets.md phase 1) this solve
+/// no longer IS a colony's price. It gives the cost anchor
+/// ([LocalMarket.localCost]), the trade band, the wage and the power price,
+/// and the price a colony's market is seeded at on its first day
+/// (`markets.dart`).
 ///
 /// Pure and deterministic: no RNG, maps iterated in fixed list order.
 library;
@@ -228,35 +236,45 @@ PriceBook solveLocalPrices(
   MarketFacts facts, {
   TransportCostModel? transport,
   Map<String, PriceBook>? otherMarkets,
+  Map<String, double>? earthPrices,
   int maxIterations = kDefaultMaxIterations,
   List<CityBuildingSpec>? recipes,
 }) =>
     solveLocalMarket(facts,
             transport: transport,
             otherMarkets: otherMarkets,
+            earthPrices: earthPrices,
             maxIterations: maxIterations,
             recipes: recipes)
         .book;
+
+/// Every good a market prices, in a fixed order: the colony commodities,
+/// then the factory intermediates no commodity names.
+List<String> marketGoods() => [
+      ...Commodity.ordered,
+      for (final k in kIntermediateBasis.keys)
+        if (!Commodity.ordered.contains(k)) k,
+    ];
 
 /// Solves the wage ↔ price fixed point for [facts].
 ///
 /// [transport] defaults to the real-Solar-System [DeltaVTransportModel].
 /// [otherMarkets] are other colonies' books, keyed by their body id; Earth's
-/// market is always a source. [recipes] defaults to the utility catalogue
-/// plus the zoned industry tiers.
+/// market is always a source. [earthPrices] are Earth's LIVE prices per unit
+/// (its market's state, `markets.dart`); a good it doesn't list, or a null
+/// map (a bare solve in a test), falls back to the `kEarthPricePerKg` seed.
+/// [recipes] defaults to the utility catalogue plus the zoned industry
+/// tiers.
 LocalMarket solveLocalMarket(
   MarketFacts facts, {
   TransportCostModel? transport,
   Map<String, PriceBook>? otherMarkets,
+  Map<String, double>? earthPrices,
   int maxIterations = kDefaultMaxIterations,
   List<CityBuildingSpec>? recipes,
 }) {
   final t = transport ?? _defaultTransport;
-  final goods = <String>[
-    ...Commodity.ordered,
-    for (final k in kIntermediateBasis.keys)
-      if (!Commodity.ordered.contains(k)) k,
-  ];
+  final goods = marketGoods();
   final air = _Air.of(facts);
   final specs = _eligible(recipes ?? _defaultRecipes, facts, air);
 
@@ -280,7 +298,7 @@ LocalMarket solveLocalMarket(
       if (outT.isFinite) lo = math.max(lo, price - outT * kg);
     }
 
-    source('earth', earthPrice(c));
+    source('earth', earthPrices?[c] ?? earthPrice(c));
     for (final id in marketIds) {
       final p = markets[id]!.prices[c];
       if (p != null && p > 0) source(id, p);
