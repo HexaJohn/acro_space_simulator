@@ -286,6 +286,12 @@ class FactoryEditorController extends ChangeNotifier {
   /// Item for new docks and chests.
   String? itemChoice;
 
+  /// The item last chosen for each placeable kind. One shared choice made a
+  /// shipping dock placed after a Tubes receiving dock a tubes-ONLY door that
+  /// silently refused every frame (found building the tutorial): a receiving
+  /// dock must name its item, a shipping dock and a chest default to any.
+  final Map<EntityKind, String?> _itemByKind = {};
+
   /// Facing of the next placement (R turns it).
   Dir4 ghostDir = Dir4.east;
 
@@ -313,9 +319,9 @@ class FactoryEditorController extends ChangeNotifier {
       station = st;
       recipeChoice = null;
     }
-    if (k == EntityKind.receivingDock && itemChoice == null) {
-      itemChoice = FactoryItems.ore.id;
-    }
+    itemChoice = _itemByKind.containsKey(k)
+        ? _itemByKind[k]
+        : (k == EntityKind.receivingDock ? FactoryItems.ore.id : null);
     _cancelDrag();
     _refreshGhost();
     notifyListeners();
@@ -340,6 +346,8 @@ class FactoryEditorController extends ChangeNotifier {
 
   void setItemChoice(String? id) {
     itemChoice = id;
+    final k = kind;
+    if (k != null) _itemByKind[k] = id;
     _refreshGhost();
     notifyListeners();
   }

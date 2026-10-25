@@ -698,12 +698,12 @@ FactoryScenario rocketPartsScenario() {
       TutorialStep(
         id: 'ship',
         title: 'Ship the frames',
-        body: 'Place a Shipping Dock on a wall with item Any item. Welded frames '
+        body: 'Place a Shipping Dock on a wall (it ships any item). Welded frames '
             'are PALLET loads, too heavy for a worker on foot, so hire a '
             'Pallet Jack (Handlers, +): it carries each frame from the cell '
             'to the dock.',
         hint: const ScenarioHint(
-            'DOCKS ▸ Shipping Dock (Any item), then HANDLERS ▸ Pallet Jack +',
+            'DOCKS ▸ Shipping Dock, then HANDLERS ▸ Pallet Jack +',
             {ScenarioHintTarget.shippingDock, ScenarioHintTarget.palletJack}),
         check: (sim, p) => _shipped(sim, frame) >= 1,
       ),
