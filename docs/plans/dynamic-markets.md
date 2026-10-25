@@ -109,6 +109,22 @@ against the skilled jobs posted, priced like any other good.
 3. **Labour market.** Skill tiers per recipe, and skilled supply from population and education
    coverage. Wages for each tier are priced by supply and demand like any good; a shortage raises
    wages and starves low-paying plants of staff.
+   *Built* (`economy/skill_tiers.dart`, `economy/labour_market.dart`, `economy/mature_cost.dart`).
+   Four tiers (unskilled, skilled, technical, engineering) at 1×, 1.4×, 1.8×, 2.8× the cost of
+   living; floors split by role (stations at their recipe's tier, handlers skilled, technicians
+   technical). Supply is the labour force × a skill mix that drifts (half a game-year time
+   constant) toward what school coverage and wage premiums aim it at; wages are a ratio to their
+   anchor, stepped daily by the goods' tâtonnement (half the gap in 30-37 days), floored at the
+   cost of living. Flat buildings are staffed first; floors bid for the rest (private firms by
+   margin, state plants at the fixed government scale), each taking a balanced crew.
+   Carry-over from phase 2: every manufactured good's mature cost is now derived bottom-up from
+   its recipe (inputs at Earth's mature prices, tier wages, energy, capital recovery, freight and
+   wear, a normal margin of a third over direct cost); raw goods keep a documented extraction
+   cost. The Rocket Parts and Missile plants' raw tax is now 17× → 7× and 10× → 2× their workers'
+   over a decade, no longer pinned at the 30× ceiling. Finding: the derived prices of
+   electronics, rocket parts and missiles land 16×, 40× and 190× under real-world, because their
+   flat recipes are far more productive per worker than the real trades; closing that is a recipe
+   retune, not a price.
 4. **Entrepreneurs.** When a good's local margin stays high, an AI firm founds a plant for it on
    a site the build snap finds (`CitySim.snapSiteCentre`), within the colony's rules (economy
    type, ore, unlocks).

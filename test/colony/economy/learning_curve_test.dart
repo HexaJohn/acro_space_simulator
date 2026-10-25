@@ -13,10 +13,10 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
-import 'package:acro_space_simulator/domain/colony/city/economy/earth_market.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/learning.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/markets.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/mature_cost.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Steps [tech]'s world and [earth] [days] colony days, with a colony
@@ -70,16 +70,17 @@ void main() {
         expect(ratio, closeTo(1 - s.learningRate, 1e-9), reason: '$g k=$k');
       }
     }
-    // The unit cost is mature × (1 + premium): rocket parts on day 0 are
-    // the seed, five times mature.
+    // The unit cost is mature × (1 + premium): rocket parts on day 0 cost
+    // five times mature. Since phase 3 the mature cost is DERIVED from the
+    // recipe (`mature_cost.dart`), no longer the old seed over five.
     final t = TechState();
     final mature = cat.maturePrice(Commodity.rocketParts)!;
+    expect(mature, earthMatureCost(Commodity.rocketParts));
     expect(t.earthUnitCost(Commodity.rocketParts),
-        earthPrice(Commodity.rocketParts));
-    expect(mature, closeTo(earthPrice(Commodity.rocketParts) / 5, 1e-6));
+        closeTo(mature * 5, mature * 1e-12));
     expect(mature * (1 + cat.premiumAt(Commodity.rocketParts,
             cat.worldQAtStart(Commodity.rocketParts))),
-        closeTo(earthPrice(Commodity.rocketParts), 1e-6));
+        closeTo(mature * 5, mature * 1e-9));
   });
 
   test('water and oxygen have no premium; advanced goods a large one', () {
@@ -104,13 +105,20 @@ void main() {
     expect(t.unavailableHere, isEmpty);
   });
 
-  test('day 0: Earth\'s market is exactly phase 1\'s seed', () {
-    final a = seedEarthMarketFor(TechState());
-    final b = seedEarthMarket();
-    expect(a.goods.keys, b.goods.keys);
+  // Since phase 3 Earth's day-0 market is DERIVED (`mature_cost.dart`):
+  // each good at its mature cost × (1 + the premium left today), never the
+  // old seed table (phase 1's seed, which this test used to pin).
+  test("day 0: Earth's market is the derived mature cost plus today's premium",
+      () {
+    final t = TechState();
+    final a = seedEarthMarketFor(t);
     for (final g in a.goods.keys) {
-      expect(a.priceOf(g), b.priceOf(g), reason: g);
-      expect(a.goods[g]!.anchor, b.goods[g]!.anchor, reason: g);
+      final s = t.catalog[g];
+      final mature = earthMatureCost(g)!;
+      final want =
+          s == null || !s.learns ? mature : mature * (1 + s.premiumToday);
+      expect(a.priceOf(g), closeTo(want, want * 1e-12), reason: g);
+      expect(a.goods[g]!.anchor, a.priceOf(g), reason: g);
     }
   });
 
@@ -219,8 +227,8 @@ void main() {
     expect((m1 - 1) / (m0 - 1), closeTo(1 - cat[g]!.learningRate, 1e-9),
         reason: 'one doubling, LR off the premium');
     expect(tech.localQOf(g), greaterThan(0));
-    // Earth's cost is the world's alone.
-    expect(tech.earthUnitCost(g), earthPrice(g));
+    // Earth's cost is the world's alone: still its day-0 point.
+    expect(tech.earthUnitCost(g), TechState().earthUnitCost(g));
     // A good that doesn't learn records nothing.
     tech.recordLocal({Commodity.water: 1e6});
     expect(tech.localQ.containsKey(Commodity.water), isFalse);
@@ -302,10 +310,15 @@ void main() {
     expect(jsonEncode(b.toJson()), jsonEncode(a.toJson()));
     expect(jsonEncode(eb.toJson()), jsonEncode(ea.toJson()));
 
-    // An old save has no learning state: day 0, every curve at its seed.
+    // An old save has no learning state: day 0, every curve at its seed
+    // (since phase 3 that is the derived mature cost × (1 + today's
+    // premium), `mature_cost.dart`).
     final fresh = TechState()..restore(null);
     expect(fresh.isFresh, isTrue);
-    expect(fresh.earthUnitCost(Commodity.missiles), earthPrice(Commodity.missiles));
+    final mature = earthMatureCost(Commodity.missiles)!;
+    expect(fresh.earthUnitCost(Commodity.missiles),
+        closeTo(mature * (1 + kTechSeeds[Commodity.missiles]!.premiumToday),
+            mature * 1e-12));
   });
 
   test('two worlds stepped alike are identical', () {

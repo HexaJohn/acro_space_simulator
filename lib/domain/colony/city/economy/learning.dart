@@ -13,8 +13,11 @@
 ///
 /// - `matureCost`: what the good costs once nobody has anything left to
 ///   learn. For a colony that is today's recipe cost (`local_prices.dart`:
-///   inputs, wages, energy, capital); for Earth it is calibrated from the
-///   seed price so that TODAY's seed is the curve's current point (below).
+///   inputs, wages, energy, capital); for Earth it is DERIVED bottom-up
+///   (`mature_cost.dart`, phase 3): its recipe's inputs at Earth's mature
+///   prices, labour at Earth's tier wages, energy, capital recovery and a
+///   normal margin, or a raw good's extraction cost. Earth's price on day 0
+///   is that mature cost times one plus the premium still left today.
 /// - `Q0`: the first production lot, the cumulative output the first-unit
 ///   premium is quoted at.
 /// - `P` ([TechSeed.firstUnitPremium]): what the first lot carries above
@@ -91,10 +94,10 @@ import 'dart:math' as math;
 
 import '../commodity.dart';
 import 'commodity_mass.dart';
-import 'earth_market.dart';
 import 'economy_clock.dart';
 import 'local_prices.dart';
 import 'markets.dart';
+import 'mature_cost.dart';
 
 // ---- tuning --------------------------------------------------------------------
 
@@ -143,10 +146,17 @@ const double kDefaultInventEarlyResearch = 250000;
 /// For a good invented before the game starts ([inventionDay] ≤ 0) the curve
 /// is calibrated, not typed: world Q today is [worldYearsToday] game-years of
 /// Earth's output at its market depth, the first lot Q0 is wherever the
-/// premium today comes out at [premiumToday], and the mature cost is the
-/// `kEarthPricePerKg` seed over (1 + [premiumToday]). So Earth's anchor on
-/// day 0 is exactly the seed price, and nothing jumps on the day a save
-/// gains learning curves.
+/// premium today comes out at [premiumToday], and the mature cost is
+/// DERIVED from the recipes (`mature_cost.dart` [earthMatureCost]). So
+/// Earth's anchor on day 0 is mature × (1 + [premiumToday]).
+///
+/// (Phase 2 took the mature cost as the old `kEarthPricePerKg` seed over
+/// (1 + [premiumToday]), which made Earth's day-0 price the seed exactly but
+/// left rocket parts' mature price eight times their inputs: a rent no cost
+/// explained. A save from phase 2 keeps its Earth prices; their anchors move
+/// to the derived curve, the cost ceiling (`kCostCeilingMultiple` × the
+/// anchor) brings any price far above it down on the first close, and the
+/// rest follows at the class half-life.)
 ///
 /// For a good invented later Q0 is [firstLotUnits] and the mature price
 /// [maturePrice], both required.
@@ -184,7 +194,7 @@ class TechSeed {
   final double? firstLotUnits;
 
   /// Mature cost per unit on Earth for a good invented after the start
-  /// (one invented before it is calibrated from its seed price).
+  /// (one invented before it is derived from its recipe, [earthMatureCost]).
   final double? maturePrice;
 
   /// Earth's output of the good at full depth, units per colony second;
@@ -364,15 +374,16 @@ class TechCatalog {
             .toDouble();
   }
 
-  /// Mature cost per unit on Earth: given for a later invention; for one
-  /// before the start, its seed price over (1 + the premium today).
+  /// Mature cost per unit on Earth: given (a later invention, or a test's
+  /// synthetic good); otherwise derived from its recipe or extraction cost
+  /// ([earthMatureCost], `mature_cost.dart`).
   double? maturePrice(String good) {
     final s = seeds[good];
     if (s == null) return null;
     final given = s.maturePrice;
     if (given != null) return given;
     if (s.inventionDay > 0) return null;
-    return earthPrice(good) / (1 + _premium(s, good, worldQAtStart(good)));
+    return earthMatureCost(good);
   }
 
   /// The premium (multiple of mature cost) at experience [q] units.
@@ -508,16 +519,17 @@ class TechState {
       };
 
   /// Earth's cost anchor for [good] today: mature × (1 + premium at world
-  /// Q); exactly the seed price on day 0. Null when Earth hasn't invented
-  /// it, or the good has no seed.
+  /// Q); mature × (1 + [TechSeed.premiumToday]) on day 0. Null when Earth
+  /// hasn't invented it, or the good has no seed.
   double? earthUnitCost(String good) {
     final s = catalog[good];
     if (s == null || !inventedOnEarth(good)) return null;
     final mature = catalog.maturePrice(good);
     if (mature == null) return null;
     final q = worldQOf(good);
-    if (s.inventionDay <= 0 && !worldQ.containsKey(good)) {
-      return earthPrice(good); // day 0: the seed exactly, no rounding
+    if (s.inventionDay <= 0 && !worldQ.containsKey(good) && s.learns) {
+      // Day 0: the premium exactly as seeded, no round trip through Q0.
+      return mature * (1 + s.premiumToday);
     }
     return mature * (1 + catalog.premiumAt(good, q));
   }
@@ -608,14 +620,18 @@ List<String> worldGoods(TechCatalog catalog) {
 }
 
 /// Earth's market as [tech] finds it: every invented, tradeable good at its
-/// cost anchor today ([TechState.earthUnitCost], the seed price on day 0,
-/// so this matches `seedEarthMarket` exactly then), flows balanced at its
-/// depth. A good Earth hasn't invented is not traded.
+/// cost anchor today ([TechState.earthUnitCost]; a good with no seed at its
+/// mature cost, [earthMatureCost]), flows balanced at its depth. A good
+/// Earth hasn't invented, or that nothing prices (waste), is not traded.
+///
+/// This is how Earth's market starts: its prices are derived, never read
+/// from the old seed table, and move with the world's supply and demand
+/// from then on (`markets.dart` [closeEarthDay]).
 Market seedEarthMarketFor(TechState tech) {
   final m = Market();
   for (final c in worldGoods(tech.catalog)) {
     if (!isShippable(c) || !tech.inventedOnEarth(c)) continue;
-    final p = tech.earthUnitCost(c) ?? earthPrice(c);
+    final p = tech.earthUnitCost(c) ?? earthMatureCost(c) ?? 0.0;
     if (!(p > 0) || !p.isFinite) continue;
     final w = worldFlowPerS(c);
     m.goods[c] = GoodMarket(

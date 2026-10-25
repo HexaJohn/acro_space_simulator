@@ -94,6 +94,35 @@ void main() {
         lessThan(corporateTaxRate(EconomyKind.communism)));
   });
 
+  /// Wages by skill tier (docs/plans/dynamic-markets.md phase 3): every
+  /// worker-second is split by the plant's labour profile and paid its
+  /// tier's market wage; the tiers sum to the wage line.
+  test("wages are paid by skill tier at the book's tier wages", () {
+    const tiered = PriceBook(
+      prices: {'ore': 6, 'steel': 30, 'tubes': 25},
+      wagePerWorkerS: 0.5,
+      powerPerKJ: 1e-4,
+      tierWages: {SkillTier.skilled: 0.7, SkillTier.engineering: 2.0},
+    );
+    final p = pnlFor(_ledger(), tiered,
+        owner: const Ownership.private('acme'),
+        economy: EconomyKind.capitalism,
+        labourShares: const {
+          SkillTier.skilled: 0.25,
+          SkillTier.engineering: 0.75,
+        });
+    // 3,000 worker-seconds: 750 skilled at 0.7, 2,250 engineering at 2.0.
+    expect(p.wagesByTier[SkillTier.skilled], closeTo(750 * 0.7, 1e-9));
+    expect(p.wagesByTier[SkillTier.engineering], closeTo(2250 * 2.0, 1e-9));
+    expect(p.wages, closeTo(750 * 0.7 + 2250 * 2.0, 1e-9));
+    // A single-wage book (no shares) pays everyone its one wage, as before.
+    final flat = pnlFor(_ledger(), _book,
+        owner: const Ownership.private('acme'),
+        economy: EconomyKind.capitalism);
+    expect(flat.wages, 3000 * 0.5);
+    expect(flat.wagesByTier, isEmpty);
+  });
+
   /// An empty ledger is an empty P&L, not NaN.
   test('an empty ledger prices to zero', () {
     final p = pnlFor(FactoryLedger(), _book,

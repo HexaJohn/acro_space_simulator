@@ -43,6 +43,28 @@ class Ownership {
           : Ownership.private(j['f'] as String);
 }
 
+/// How much training a job takes (docs/plans/dynamic-markets.md phase 3,
+/// the labour market). Ordered: a worker of a tier can take any job of a
+/// LOWER tier (an engineer can pack rations; a packer can't wire avionics),
+/// which is why the enum's order matters (`labour_market.dart` fills from
+/// the top down). Which tier each building and station needs, and what each
+/// tier is paid over the cost of living, is `skill_tiers.dart`.
+enum SkillTier {
+  /// No training beyond the job itself: farm hands, packers, miners.
+  unskilled,
+
+  /// A trade: welders, machine and crane operators, forklift drivers.
+  skilled,
+
+  /// Associate-professional training: process operators, maintenance
+  /// technicians, lab and clinic staff.
+  technical,
+
+  /// A degree: engineers, avionics and electronics assemblers, reactor
+  /// operators.
+  engineering,
+}
+
 /// The colony's ideology, as the economy needs it. Mirrors `CitySim`'s
 /// `Economy` enum by NAME (kept separate so this layer doesn't import the
 /// aggregate).
@@ -71,6 +93,7 @@ class MarketFacts {
     this.learningMult = const {},
     this.unavailable = const {},
     this.noEarthSource = const {},
+    this.wageRatio = const {},
   });
 
   /// `CelestialBody.id` the colony stands on ('earth', 'mars', 'moon' …).
@@ -139,6 +162,13 @@ class MarketFacts {
   /// Goods Earth doesn't trade yet (not invented on its timeline, though the
   /// colony may have invented one early): no import source from Earth.
   final Set<String> noEarthSource;
+
+  /// Each skill tier's market wage as a multiple of its anchor (the cost of
+  /// living × the tier's skill multiple, `skill_tiers.dart`), from the
+  /// colony's labour market (`labour_market.dart`); a tier not listed is at
+  /// its anchor. A ratio, not a wage, so the cost solve's wage stays the
+  /// fixed point of its own life-support prices and the map stays monotone.
+  final Map<SkillTier, double> wageRatio;
 }
 
 /// A colony's local prices: credits per commodity unit, plus the wage and
@@ -150,12 +180,26 @@ class PriceBook {
     required this.powerPerKJ,
     this.importCeiling = const {},
     this.exportFloor = const {},
+    this.tierWages = const {},
   });
 
   final Map<String, double> prices;
 
-  /// Credits per staffed worker-second.
+  /// Credits per staffed worker-second at the COST OF LIVING: the
+  /// subsistence basket plus marked-up housing, which is the unskilled
+  /// tier's anchor and the floor under every wage (`labour_market.dart`).
+  /// A book with no [tierWages] (one built by hand, from before the labour
+  /// market) pays every worker this.
   final double wagePerWorkerS;
+
+  /// Credits per staffed worker-second by skill tier: the labour market's
+  /// wages (docs/plans/dynamic-markets.md phase 3). Empty in a single-wage
+  /// book.
+  final Map<SkillTier, double> tierWages;
+
+  /// What a worker of [tier] costs per second: its market wage, or the one
+  /// wage of a single-wage book.
+  double wageOf(SkillTier tier) => tierWages[tier] ?? wagePerWorkerS;
 
   /// Credits per kilojoule of electricity.
   final double powerPerKJ;
@@ -178,6 +222,7 @@ class PlantPnL {
     required this.logistics,
     required this.equipment,
     required this.tax,
+    this.wagesByTier = const {},
   });
 
   static const PlantPnL zero = PlantPnL(
@@ -195,6 +240,11 @@ class PlantPnL {
   /// Corporate tax owed (private) — what moves into `funds`. Zero for state.
   final double tax;
 
+  /// [wages] by skill tier (the labour market's wage for each tier times
+  /// the hours the plant's profile puts in it); empty for a single-wage
+  /// book, where [wages] is all at the one wage.
+  final Map<SkillTier, double> wagesByTier;
+
   double get costs => inputs + wages + power + logistics + equipment;
   double get preTax => revenue - costs;
   double get profit => preTax - tax;
@@ -202,6 +252,8 @@ class PlantPnL {
   Map<String, Object?> toJson() => {
         's': seconds, 'rev': revenue, 'in': inputs, 'wage': wages,
         'pow': power, 'log': logistics, 'eq': equipment, 'tax': tax,
+        if (wagesByTier.isNotEmpty)
+          'wt': {for (final e in wagesByTier.entries) e.key.name: e.value},
       };
 }
 

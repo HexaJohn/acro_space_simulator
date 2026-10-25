@@ -48,10 +48,12 @@ import 'economy/colony_economy.dart';
 import 'economy/economy_clock.dart';
 import 'economy/economy_contracts.dart';
 import 'economy/firm_policy.dart';
+import 'economy/labour_market.dart';
 import 'economy/learning.dart';
 import 'economy/local_prices.dart';
 import 'economy/markets.dart';
 import 'economy/plant_pnl.dart';
+import 'economy/skill_tiers.dart';
 import 'economy/transport_cost.dart';
 import 'factory/factory_handling.dart';
 import 'factory/factory_sim_api.dart';
@@ -92,22 +94,21 @@ const List<HandlerKind> kLayoffOrder = [
 /// sells and prices fall under a glut, so an unwanted plant earns little on
 /// its own, and the ceiling is only a guard against a runaway bug.
 ///
-/// 30×, generous on purpose: at Earth prices the honest templates pay about
-/// 1× (Steel Mill, Refinery), 6× (Arms) and 21× (Electronics) their
-/// workers' tax, so the saturation shaves the mill ~2% and Electronics
-/// ~28%. Only a scarce-good rent like Rocket Parts' (~380×) or the Missile
-/// Plant's (~1,600×) at Earth's price reaches it, and those are the rents
-/// the market is meant to erode.
+/// 30×, generous on purpose. Since phase 3 of docs/plans/dynamic-markets.md
+/// every good's mature cost is derived from its recipe (`mature_cost.dart`),
+/// and at Earth's day-0 prices the templates pay 0.3× (Rations) to 3×
+/// (Refinery) their workers' tax, the Missile Plant 9.5× and Rocket Parts
+/// 17× (their goods' learning premium, the first mover's rent), so the
+/// saturation shaves the mill ~2% and Rocket Parts ~25%.
 ///
-/// Measured under learning curves (docs/plans/dynamic-markets.md phase 2,
-/// learning_tax_test.dart: an Earth colony's private plant, its output
-/// sold to Earth, the world fast-forwarded): Rocket Parts' raw tax falls
-/// 391× → 290× → 258× → 216× → 188× its workers' over years 0/1/2/5/10,
-/// the Missile Plant's 1,707× → 1,011× → 920× → 795× → 705×. Both still
-/// saturate the ceiling throughout. Not retuned: unpinning them would take
-/// a ceiling of ~200× and ~700×, which guards nothing; the rent left is the
-/// flat recipes' value added (rocket parts' MATURE price is still ~8× their
-/// inputs), for phase 4's entrepreneurs, or a recipe retune, to close.
+/// Measured under learning curves (learning_tax_test.dart: an Earth
+/// colony's private plant, its output sold to Earth, the world
+/// fast-forwarded): Rocket Parts' raw tax falls 17× → 12× → 10× → 8× → 7×
+/// its workers' over years 0/1/2/5/10, the Missile Plant's 10× → 3× → 3× →
+/// 2× → 2×. Neither is pinned at the ceiling any more. In phase 2, with the
+/// mature cost taken from the old seed table (rocket parts' mature price
+/// eight times their inputs), they were 391× → 188× and 1,707× → 705×,
+/// saturated for the whole decade.
 const double kCorporateTaxSafetyMultiple = 30;
 
 /// The happiness the tax ceiling's reference colony has: the "typical" 60%
@@ -179,6 +180,7 @@ extension CityEconomy on CitySim {
       learningMult: colonyEconomy.tech.localCostMultipliers(),
       unavailable: colonyEconomy.tech.unavailableHere,
       noEarthSource: colonyEconomy.tech.missingOnEarth,
+      wageRatio: colonyEconomy.labour.ratios,
     );
   }
 
@@ -211,6 +213,11 @@ extension CityEconomy on CitySim {
               propellantPricePerKg: {kEarthMarketId: propellant}),
     );
   }
+
+  /// Today's cost solve exactly as the next day close will run it (Earth's
+  /// live market, seeded first if this colony has none): what a fresh
+  /// colony's market is seeded at.
+  LocalMarket solveColonyCosts() => _solveCosts();
 
   /// [solved] with its book replaced by [book]'s.
   static LocalMarket _withBook(
@@ -295,6 +302,98 @@ extension CityEconomy on CitySim {
         'Earth: the colony is its only maker.');
     return true;
   }
+
+  // ---- labour ---------------------------------------------------------------
+
+  /// The share of the colony its schools serve, 0..1: `services['education']`
+  /// (people a School teaches) over the population. The only education
+  /// service the catalogue has; it drives the labour market's skill mix
+  /// (`labour_market.dart` [educationMix]). No community share: a village
+  /// raises its children, but nobody learns to wire avionics at the kitchen
+  /// table.
+  double get educationCoverage {
+    final pop = population;
+    if (!(pop > 0)) return 0;
+    return ((services['education'] ?? 0) / pop).clamp(0.0, 1.0).toDouble();
+  }
+
+  /// [site]'s floor's jobs by tier as shares of its total
+  /// (`skill_tiers.dart` [labourProfileOf] of its blueprint), cached by the
+  /// record's revision; a site with no floor, or one whose layout posts no
+  /// jobs, its spec's single tier.
+  Map<SkillTier, double> floorLabourShares(String site) {
+    final rec = factoryFloors[site];
+    if (rec == null) {
+      final type = siteSpec(site)?.type;
+      return type == null ? const {} : labourSharesOf(type);
+    }
+    final cache = colonyEconomy.labourShareCache;
+    final hit = cache[site];
+    if (hit != null && hit.$1 == rec.rev) return hit.$2;
+    var shares = sharesOf(labourProfileOf(rec.blueprint));
+    if (shares.isEmpty) {
+      final type = rec.blueprint.plantType ?? siteSpec(site)?.type;
+      shares = type == null ? const {} : labourSharesOf(type);
+    }
+    cache[site] = (rec.rev, shares);
+    return shares;
+  }
+
+  /// One tick of the labour market (docs/plans/dynamic-markets.md phase 3,
+  /// `labour_market.dart` [allocateLabour]): [labourForce] workers split by
+  /// the skill mix staff [flatJobs] (flat buildings' staffed jobs by tier,
+  /// after the colony's life-support-first throttles; [flatPosted] what
+  /// they post) first, then every floor plant in [floorPosted] (site → the
+  /// jobs it runs today) in bid order. Records the tick in the day's
+  /// tallies and returns each floor site's staffing share, never above
+  /// [floorStaff] (the colony-wide share `CitySim`'s throttles give the
+  /// rest of the colony, which still binds when the colony is short of
+  /// people altogether).
+  Map<String, double> labourTick({
+    required double labourForce,
+    required Map<SkillTier, double> flatJobs,
+    required Map<SkillTier, double> flatPosted,
+    required Map<String, double> floorPosted,
+    required double floorStaff,
+    required double dt,
+  }) {
+    final e = colonyEconomy;
+    final mix = e.labour.mixFor(educationCoverage);
+    final staff = floorStaff.clamp(0.0, 1.0).toDouble();
+    final employers = <LabourEmployer>[];
+    for (final site in (floorPosted.keys.toList()..sort())) {
+      final jobs = floorPosted[site]!;
+      if (!(jobs > 0)) continue;
+      final shares = floorLabourShares(site);
+      final book = e.books[site];
+      final owner = ownerOf(site);
+      employers.add(LabourEmployer(
+        site: site,
+        // A plant never gets more than the colony-wide share: posting for
+        // the rest would hold workers it can't use.
+        jobs: {for (final t in shares.keys) t: shares[t]! * jobs * staff},
+        bid: labourBid(isState: owner.isState, margin: book?.margin ?? 0),
+      ));
+    }
+    final a = allocateLabour(
+      labourForce: labourForce,
+      mix: mix,
+      flatJobs: flatJobs,
+      flatPosted: flatPosted,
+      employers: employers,
+    );
+    e.labour.record(a, dt);
+    e.labourShare
+      ..clear()
+      ..addAll({
+        for (final x in a.share.entries) x.key: x.value * staff,
+      });
+    return e.labourShare;
+  }
+
+  /// [site]'s staffing share from the last tick's labour allocation (1 when
+  /// it isn't a floor plant or none ran yet).
+  double labourShareOf(String site) => colonyEconomy.labourShare[site] ?? 1;
 
   // ---- ownership ----------------------------------------------------------
 
@@ -510,7 +609,10 @@ extension CityEconomy on CitySim {
       // A closed plant trades nothing; whatever it ran up is not booked.
       if (firm.isClosed) continue;
       final pnl = pnlFor(ledger, book,
-          owner: owner, economy: econ, sellThrough: e.sellThrough);
+          owner: owner,
+          economy: econ,
+          sellThrough: e.sellThrough,
+          labourShares: floorLabourShares(site));
       e.lastPnl[site] = pnl;
       // A day the colony never let the plant work (no inputs, or every
       // crate refused at a full warehouse) books nothing (the floor stands
@@ -547,6 +649,11 @@ extension CityEconomy on CitySim {
     // once.
     e.corporateTaxFundsPerS = taxFunds;
     e.industryDeficitFundsPerS = deficit * kCreditsToFunds / day;
+    // The labour market's day (docs/plans/dynamic-markets.md phase 3): each
+    // tier's wage steps on the day's posts against its workers, and the
+    // skill mix drifts toward what schooling and pay aim it at. Tomorrow's
+    // cost solve and books read the new wages.
+    e.labour.closeDay(coverage: educationCoverage);
     e.dayClockS = 0;
     e.demandUnits.clear();
     e.supplyUnits.clear();
@@ -622,10 +729,14 @@ extension CityEconomy on CitySim {
   /// and output valued only as far as it sells (the last close's
   /// [ColonyEconomy.sellThrough]): a firm won't pay to make more of what
   /// nobody buys.
+  ///
+  /// Its jobs are paid at the tier wages [labourShares] split them into (the
+  /// floor's labour profile, [floorLabourShares]); none, the book's one wage.
   double ratesProfitPerS(
     MeasuredRates rates,
     PriceBook book, {
     Map<HandlerKind, int> roster = const {},
+    Map<SkillTier, double> labourShares = const {},
   }) {
     final sold = colonyEconomy.sellThrough;
     var revenue = 0.0, inputs = 0.0, units = 0.0;
@@ -641,9 +752,17 @@ extension CityEconomy on CitySim {
     for (final k in HandlerKind.values) {
       wear += (roster[k] ?? 0) * equipmentWearPerS(k);
     }
+    var wage = 0.0;
+    if (labourShares.isEmpty) {
+      wage = book.wagePerWorkerS;
+    } else {
+      for (final t in SkillTier.values) {
+        wage += (labourShares[t] ?? 0) * book.wageOf(t);
+      }
+    }
     return revenue -
         inputs -
-        rates.jobs * book.wagePerWorkerS -
+        rates.jobs * wage -
         rates.powerKw * book.powerPerKJ -
         units * kLogisticsFeePerUnit -
         wear;
@@ -710,10 +829,13 @@ extension CityEconomy on CitySim {
     }
     if (!owner.isState) {
       final firm = e.books[site] ??= FirmBook(owner: owner);
+      final oldBp = stash?.blueprint ?? rec.blueprint;
       final savings = ratesProfitPerS(rec.rates, book,
-              roster: rec.blueprint.roster) -
+              roster: rec.blueprint.roster,
+              labourShares: floorLabourShares(site)) -
           ratesProfitPerS(stash?.rates ?? oldRates, book,
-              roster: stash?.blueprint.roster ?? rec.blueprint.roster);
+              roster: oldBp.roster,
+              labourShares: sharesOf(labourProfileOf(oldBp)));
       if (firm.cash >= capex &&
           firmWillBuild(capex: capex, savingsPerS: savings)) {
         firm.cash -= capex;

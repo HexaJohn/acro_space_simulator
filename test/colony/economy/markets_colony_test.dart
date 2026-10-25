@@ -14,7 +14,6 @@ import 'package:acro_space_simulator/domain/colony/city/city_economy.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
-import 'package:acro_space_simulator/domain/colony/city/economy/local_prices.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/markets.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/plant_pnl.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_ledger.dart';
@@ -117,7 +116,10 @@ void main() {
   test('a fresh colony\'s first prices are today\'s solved prices', () {
     final r = martianMill();
     runDays(r.sim, 0.5, specs: [specOf('steelmill')]);
-    final expected = solveLocalMarket(r.sim.marketFacts());
+    // The sim's own solve, against its live Earth market: since phase 3
+    // Earth's prices are derived (`mature_cost.dart`), no longer the seed a
+    // bare solve falls back on.
+    final expected = r.sim.solveColonyCosts();
     r.sim.closeEconomyDay();
     final got = r.sim.localPrices!;
     for (final c in r.sim.colonyEconomy.colonyMarket.goods.keys) {
@@ -170,11 +172,13 @@ void main() {
       ..remove('made');
     // Older than learning curves too (docs/plans/dynamic-markets.md phase 2).
     json.remove('tech');
+    // And than the labour market (phase 3).
+    json.remove('labour');
     final loaded = reload(json);
     expect(loaded.colonyEconomy.colonyMarket.isEmpty, isTrue);
     expect(loaded.colonyEconomy.earthMarket.isEmpty, isTrue);
 
-    final expected = solveLocalMarket(loaded.marketFacts());
+    final expected = loaded.solveColonyCosts();
     loaded.closeEconomyDay();
     final e = loaded.colonyEconomy;
     expect(e.colonyMarket.goods, isNotEmpty);

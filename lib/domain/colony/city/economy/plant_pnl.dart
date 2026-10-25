@@ -68,6 +68,17 @@ double corporateTaxRate(EconomyKind e) => switch (e) {
 /// didn't sell piles up in stock, where the market's cover term pushes the
 /// price down. Every unit shipped still pays its freight, and inputs are
 /// always paid for whole.
+///
+/// **Wages by skill tier** (docs/plans/dynamic-markets.md phase 3): every
+/// worker-second the ledger counts is split by [labourShares], the plant's
+/// labour profile (`skill_tiers.dart` `labourProfileOf`: stations at their
+/// recipe's tier, handlers skilled, technicians technical), and each part
+/// is paid its tier's market wage ([PriceBook.wageOf]). By profile rather
+/// than by the ledger's roles because an aggregate floor books every hour
+/// as station work (it knows the layout's job demand, not its role split),
+/// and a plant is staffed in its profile's proportions either way. With no
+/// shares (a hand-built book or ledger) every hour is paid the book's one
+/// wage.
 PlantPnL pnlFor(
   FactoryLedger ledger,
   PriceBook book, {
@@ -75,6 +86,7 @@ PlantPnL pnlFor(
   required EconomyKind economy,
   double logisticsPerUnit = kLogisticsFeePerUnit,
   Map<String, double> sellThrough = const {},
+  Map<SkillTier, double> labourShares = const {},
 }) {
   double valued(Map<String, double> units, {bool sold = false}) {
     var sum = 0.0;
@@ -99,7 +111,20 @@ PlantPnL pnlFor(
   }
   final revenue = valued(ledger.shipped, sold: true);
   final inputs = valued(ledger.received);
-  final wages = ledger.totalWorkerSeconds * book.wagePerWorkerS;
+  final ws = ledger.totalWorkerSeconds;
+  final byTier = <SkillTier, double>{};
+  var wages = 0.0;
+  if (labourShares.isEmpty) {
+    wages = ws * book.wagePerWorkerS;
+  } else {
+    for (final t in SkillTier.values) {
+      final s = labourShares[t];
+      if (s == null || !(s > 0)) continue;
+      final w = ws * s * book.wageOf(t);
+      byTier[t] = w;
+      wages += w;
+    }
+  }
   final power = ledger.energyKJ * book.powerPerKJ;
   final logistics =
       (unitsOf(ledger.received) + unitsOf(ledger.shipped)) * logisticsPerUnit;
@@ -116,5 +141,6 @@ PlantPnL pnlFor(
     logistics: logistics,
     equipment: equipment,
     tax: tax,
+    wagesByTier: Map.unmodifiable(byTier),
   );
 }

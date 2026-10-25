@@ -55,7 +55,9 @@ import 'site_access/site_access_book.dart';
 import 'sprawl_plan.dart';
 import 'commodity.dart';
 import 'economy/colony_economy.dart';
+import 'economy/economy_contracts.dart' show SkillTier;
 import 'economy/local_prices.dart' show kKjPerPowerUnitS, kNonRecipeTypes;
+import 'economy/skill_tiers.dart' show tierOfType;
 import 'factory/factory_floors.dart';
 import 'traffic/city_agents.dart';
 import '../../terrain/terrain_field.dart';
@@ -1474,6 +1476,23 @@ class CitySim {
     computeSupply = 0;
     computeDemand = 0;
     services.clear();
+    // Jobs by skill tier for the labour market (`economy/labour_market.dart`):
+    // flat buildings' posts, life support's apart (it is staffed first), and
+    // each floor plant's posts by site.
+    final flatLifeJobs = <SkillTier, double>{};
+    final flatRestJobs = <SkillTier, double>{};
+    final floorPosted = <String, double>{};
+    void postJobs(CityBuildingSpec s, double n, String? floorSite) {
+      if (!(n > 0)) return;
+      if (floorSite != null) {
+        floorPosted[floorSite] = (floorPosted[floorSite] ?? 0) + n;
+        return;
+      }
+      final to = isLifeSupport(s) ? flatLifeJobs : flatRestJobs;
+      final t = tierOfType(s.type);
+      to[t] = (to[t] ?? 0) + n;
+    }
+
     for (final e in active) {
       final s = e.value;
       // Grown zones contribute in proportion to their utilisation (small/med/
@@ -1496,6 +1515,7 @@ class CitySim {
       powerDraw += sDraw * (s.housing > 0 || sJobs > 0 ? uf : 1.0);
       housing += (s.housing * uf).round();
       jobs += (sJobs * uf).round();
+      postJobs(s, sJobs * uf, fr == null ? null : siteIdOfCell(e.key));
       computeSupply += s.computeOutput;
       computeDemand += s.computeDraw;
       s.services.forEach((k, v) => services[k] = (services[k] ?? 0) + v * uf);
@@ -1532,6 +1552,7 @@ class CitySim {
         powerDraw += sDraw * (s.housing > 0 || sJobs > 0 ? uf : 1.0);
         housing += (s.housing * uf).round();
         jobs += (sJobs * uf).round();
+        postJobs(s, sJobs * uf, fr == null ? null : parcel.id);
         computeSupply += s.computeOutput;
         computeDemand += s.computeDraw;
         s.services.forEach((k, v) => services[k] = (services[k] ?? 0) + v * uf);
@@ -1605,6 +1626,32 @@ class CitySim {
             .clamp(0.0, 1.0);
     lifeThrottle = math.min(lifePower, math.min(computeRatio, lifeStaff));
     restThrottle = math.min(restPower, math.min(computeRatio, restStaff));
+    // The labour market (docs/plans/dynamic-markets.md phase 3): the skill
+    // tiers' workers staff the flat buildings at the shares just found, then
+    // the floor plants in bid order. A floor plant's staffing is its share
+    // of that, never above [restStaff]; flat buildings' throttles are left
+    // exactly as they were. Infinite Robotics staffs every post.
+    final Map<String, double> floorStaff;
+    if (infiniteRobotics) {
+      floorStaff = const {};
+    } else {
+      final flatJobs = <SkillTier, double>{};
+      final flatPosted = <SkillTier, double>{};
+      for (final t in SkillTier.values) {
+        final life = flatLifeJobs[t] ?? 0, rest = flatRestJobs[t] ?? 0;
+        flatPosted[t] = life + rest;
+        flatJobs[t] = life * lifeStaff + rest * restStaff;
+      }
+      floorStaff = labourTick(
+        labourForce:
+            math.max(0, population.floor() - troopersAway) * commuteEff,
+        flatJobs: flatJobs,
+        flatPosted: flatPosted,
+        floorPosted: floorPosted,
+        floorStaff: restStaff,
+        dt: dt,
+      );
+    }
     // A Defiant colony strikes (secession §3.5): the farms and pumps are
     // still worked — the strikers eat too — and everything else slows.
     restThrottle *= loyalty.strikeThrottle;
@@ -1765,10 +1812,11 @@ class CitySim {
       final plantPower = math.min(restPower, computeRatio);
       for (final (site, s, sf) in floorRuns) {
         final atWork = loyalty.strikeThrottle * sf;
+        final staff = floorStaff[site] ?? restStaff;
         final r = stepFloorSite(site, s, dt,
             stockCap: cap,
             powerShare: plantPower * atWork,
-            staffingShare: restStaff * atWork);
+            staffingShare: staff * atWork);
         r.taken.forEach((k, u) => flow(k, -u / dt));
         r.given.forEach((k, u) {
           final made = u * biomeMult(k) * bountyMult * eventProductionMult / dt;
@@ -1778,7 +1826,7 @@ class CitySim {
         // A live floor reports no share: it smokes at the colony's throttle,
         // times the firm's own (an idled or closed plant makes less smoke).
         final run = r.live
-            ? math.min(plantPower, restStaff) * atWork * floorThrottleOf(site)
+            ? math.min(plantPower, staff) * atWork * floorThrottleOf(site)
             : r.share;
         pollutionRate += s.pollution * run * emissionCut;
       }
@@ -5659,6 +5707,11 @@ class CitySim {
         // every curve at its seed.
         'tech': ?colonyEconomy.techJson(
             withEarth: factoryFloors.isEmpty && !colonyEconomy.hasState),
+        // The labour market (`economy/labour_market.dart`): wages, skill
+        // mix and the day's tallies, its own key like 'tech'. An old save
+        // has none and seeds the wages at their anchors and the mix at what
+        // the colony's schooling aims for.
+        'labour': ?colonyEconomy.labour.toJsonOrNull(),
       };
 
   /// [fineCorridors] as saved: those of roads still in the layout.
@@ -5950,6 +6003,8 @@ class CitySim {
         .restore((j['plantEconomy'] as Map?)?.cast<String, Object?>());
     sim.colonyEconomy
         .restoreTech((j['tech'] as Map?)?.cast<String, Object?>());
+    sim.colonyEconomy.labour
+        .restore((j['labour'] as Map?)?.cast<String, Object?>());
     sim.reconcileFactoryFloors();
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and

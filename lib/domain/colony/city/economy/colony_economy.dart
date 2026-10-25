@@ -41,6 +41,7 @@ import '../factory/factory_sim_api.dart';
 import '../factory/floor_blueprint.dart';
 import 'economy_contracts.dart';
 import 'firm_policy.dart';
+import 'labour_market.dart';
 import 'learning.dart';
 import 'local_prices.dart';
 import 'markets.dart';
@@ -58,34 +59,41 @@ import 'markets.dart';
 ///
 /// The arithmetic (Earth starter colony, capitalism, the Steel Mill's
 /// template at its full flat rate, on Earth prices — an Earth colony trades
-/// at them, `earth_market.dart` — and the derived Earth wage of 0.395
-/// credits per worker-second, `local_prices.dart`):
-/// - revenue 1.5 steel × 80 + 0.4 tubes × 120 = 168 credits/s;
-/// - costs 2 ore × 40 = 80, wages 35 × 0.395 = 13.8, freight
-///   3.9 units × 0.5 = 1.95, power ≈ 0 (Earth power is nearly free at the
-///   derived price);
-/// - pre-tax profit ≈ 72.2 credits/s; corporate tax at the capitalist 21%
-///   ≈ 15.2 credits/s.
+/// at them — DERIVED from the recipes since phase 3 of
+/// docs/plans/dynamic-markets.md (`mature_cost.dart`: steel $0.66/kg, tube
+/// $1.23/kg on day 0), and the derived Earth wage of 0.395 credits per
+/// worker-second at the cost of living, its jobs at their skill tiers'
+/// wages, `skill_tiers.dart`), measured on the first day:
+/// - revenue 1.5 steel × 65.7 + 0.4 tubes × 98.5 ≈ 137 credits/s;
+/// - costs 2 ore × 40.4 = 80.3, wages 18.3 (29 skilled jobs at 1.4×, 6
+///   packers at 1×), freight 1.95, power ≈ 0 (Earth power is nearly free at
+///   the derived price): ≈ 100.6;
+/// - pre-tax profit ≈ 36.5 credits/s (the normal margin, a third over
+///   direct cost, `kNormalMargin`); corporate tax at the capitalist 21% ≈
+///   7.7 credits/s.
 /// - The same 35 workers' worker tax: 35 × 0.6 (typical happiness) × 0.15
 ///   (the default tax) × 0.05 §/worker-s (`taxPerWorkerPerSec`) × 1.4
 ///   (capitalism's fundsMult) ≈ 0.22 §/s.
-/// - 0.22 / 15.2 ≈ 0.0145, rounded to 0.015: the mill's corporate tax lands
-///   at ≈ 0.23 §/s, about what its workers pay again.
+/// - 0.22 / 7.7 ≈ 0.029, rounded to 0.03: the mill's corporate tax lands at
+///   ≈ 0.23 §/s, about what its workers pay again.
 /// `economy_funds_test.dart` re-derives both sides from a live colony and
-/// pins them within a factor of two of each other.
+/// pins them within a factor of two of each other. (Phase 2's 0.015 was
+/// calibrated on the mill's old 43% margin at the seed table's prices.)
 ///
-/// The other templates on the same scale (Earth, capitalism, full rate):
-/// Refinery ≈ 0.3 §/s, Rations Plant ≈ 0.02, Arms ≈ 1.4, Electronics ≈ 5.4,
-/// Rocket Parts ≈ 120, Missile Plant ≈ 610. The last two are the spec
-/// recipes' value added at Earth prices (43 kg of tube and boards into
-/// 40 kg of $1,000/kg engine parts every colony second), not this constant.
-/// Since dynamic markets those rents fall as the plant floods its market
-/// (revenue counts only what sells, and Earth's price drops under its
-/// exports); what reaches the treasury from any one plant also saturates
-/// smoothly under a generous SAFETY ceiling, a multiple of its own workers'
-/// tax (`kCorporateTaxSafetyMultiple`, `city_economy.dart`), against a
-/// runaway bug.
-const double kCreditsToFunds = 0.015;
+/// The other templates on the same scale (Earth, capitalism, full rate, as
+/// multiples of their own workers' tax): Rations Plant 0.3×, Arms 0.7×,
+/// Electronics 1.2×, Refinery 3.1× (its fuel and oxidizer sell at Earth's
+/// extraction cost, which its ore recipe undercuts), Missile Plant 9.5×,
+/// Rocket Parts 17×. The last two are the learning premium still on their
+/// goods (Earth's price is five and four times their mature cost on day 0,
+/// `learning.dart`), the first mover's rent the market erodes: revenue
+/// counts only what sells, Earth's price drops under a plant's exports, and
+/// the world's learning takes the premium down year on year. What reaches
+/// the treasury from any one plant also saturates smoothly under a generous
+/// SAFETY ceiling, a multiple of its own workers' tax
+/// (`kCorporateTaxSafetyMultiple`, `city_economy.dart`), against a runaway
+/// bug.
+const double kCreditsToFunds = 0.03;
 
 /// Production multiplier a firm sets when it idles stations (firm policy's
 /// second cut): half the floor stands, half its staff stay home.
@@ -213,6 +221,22 @@ class ColonyEconomy {
   /// test can give a colony a synthetic catalog.
   TechState tech = TechState();
 
+  /// The colony's labour market: each skill tier's wage, the skill mix and
+  /// the day's tallies (docs/plans/dynamic-markets.md phase 3,
+  /// `labour_market.dart`). Saved by `CitySim` under its own key ('labour'),
+  /// like [tech], so a colony with no plant keeps its wages across a load.
+  LabourMarket labour = LabourMarket();
+
+  /// Each floor site's labour shares by tier, with the record revision they
+  /// were read at (runtime cache of `labourProfileOf`, re-read when the
+  /// floor's layout or roster changes).
+  final SplayTreeMap<String, (int, Map<SkillTier, double>)> labourShareCache =
+      SplayTreeMap();
+
+  /// Each floor site's staffing share from the last tick's labour
+  /// allocation (runtime: the site panel's "understaffed" reading).
+  final SplayTreeMap<String, double> labourShare = SplayTreeMap();
+
   /// The colony's own market: every traded good's price, stock and smoothed
   /// flows (docs/plans/dynamic-markets.md phase 1). Empty until the first
   /// day close seeds it from today's solve; saved with the rest.
@@ -292,6 +316,9 @@ class ColonyEconomy {
     if (why != null) lastRevert[newId] = why;
     final p = lastPnl.remove(oldId);
     if (p != null) lastPnl[newId] = p;
+    labourShareCache.remove(oldId);
+    final ls = labourShare.remove(oldId);
+    if (ls != null) labourShare[newId] = ls;
     for (var i = 0; i < offers.length; i++) {
       if (offers[i].site == oldId) {
         offers[i] = FirmOffer(site: newId, options: offers[i].options);
@@ -307,6 +334,8 @@ class ColonyEconomy {
     laidOff.remove(site);
     lastRevert.remove(site);
     lastPnl.remove(site);
+    labourShareCache.remove(site);
+    labourShare.remove(site);
     offers.removeWhere((o) => o.site == site);
   }
 

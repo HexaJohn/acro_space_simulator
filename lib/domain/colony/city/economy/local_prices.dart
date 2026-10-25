@@ -72,6 +72,18 @@
 /// for the colony have no recipe and no import source
 /// ([MarketFacts.unavailable], [MarketFacts.noEarthSource]).
 ///
+/// Since the labour market (phase 3) a recipe's jobs are paid by SKILL
+/// TIER: each job costs the cost-of-living wage times its tier's skill
+/// multiple times the labour market's ratio for that tier
+/// ([MarketFacts.wageRatio], `skill_tiers.dart`, `labour_market.dart`), and
+/// the book carries every tier's wage ([PriceBook.tierWages]). The ratios
+/// are constants within a solve, so the map stays monotone.
+///
+/// The same solve, handed Earth's facts, no import source at all, the raw
+/// goods [pinned] at their extraction cost and a normal margin as
+/// [costMarkup], is how Earth's MATURE cost of every manufactured good is
+/// derived bottom-up (`mature_cost.dart`).
+///
 /// Pure and deterministic: no RNG, maps iterated in fixed list order.
 library;
 
@@ -89,6 +101,7 @@ import 'earth_market.dart';
 import 'economy_clock.dart';
 import 'economy_contracts.dart';
 import 'plant_pnl.dart';
+import 'skill_tiers.dart';
 import 'transport_cost.dart';
 
 // ---- life support and the wage -------------------------------------------
@@ -212,6 +225,10 @@ const String kSourceImport = 'import';
 /// Source tag for a good with no recipe and no market (waste).
 const String kSourceNone = 'none';
 
+/// Source tag for a good the solve was handed a fixed price for
+/// (`solveLocalMarket`'s `pinned`: a raw good's extraction cost).
+const String kSourcePinned = 'pinned';
+
 /// Everything a solve found, for tests and the UI's "why this price".
 class LocalMarket {
   const LocalMarket({
@@ -271,6 +288,13 @@ List<String> marketGoods() => [
 /// map (a bare solve in a test), falls back to the `kEarthPricePerKg` seed.
 /// [recipes] defaults to the utility catalogue plus the zoned industry
 /// tiers.
+///
+/// [pinned] goods are priced at the given credits per unit, not from any
+/// recipe or source (their cost is [LocalMarket.localCost] too), and every
+/// recipe's unit cost is multiplied by [costMarkup]: both exist for Earth's
+/// mature-cost solve (`mature_cost.dart`), where raw goods sit at their
+/// extraction cost and every maker earns a normal margin. A colony's solve
+/// passes neither.
 LocalMarket solveLocalMarket(
   MarketFacts facts, {
   TransportCostModel? transport,
@@ -278,6 +302,8 @@ LocalMarket solveLocalMarket(
   Map<String, double>? earthPrices,
   int maxIterations = kDefaultMaxIterations,
   List<CityBuildingSpec>? recipes,
+  Map<String, double> pinned = const {},
+  double costMarkup = 1,
 }) {
   final t = transport ?? _defaultTransport;
   final goods = marketGoods();
@@ -341,6 +367,13 @@ LocalMarket solveLocalMarket(
   var iterations = 0;
   var converged = false;
   final capexPerS = 1 / (kCapitalRecoveryYears * kGameYearSec);
+  // Each recipe's labour as a multiple of the cost-of-living wage: its
+  // jobs' skill tiers at the labour market's ratios (`skill_tiers.dart`).
+  // Constant within the solve, so the map stays monotone.
+  final labourMult = <String, double>{
+    for (final s in specs)
+      s.type: wageMultipleOf(labourSharesOf(s.type), facts.wageRatio),
+  };
 
   while (iterations < maxIterations) {
     iterations++;
@@ -352,7 +385,7 @@ LocalMarket solveLocalMarket(
     // prices aren't pinned to Earth's. Both apply to floor plants only,
     // the only buildings that pay them.
     double running(CityBuildingSpec s) {
-      var cost = s.jobs * wage +
+      var cost = s.jobs * wage * (labourMult[s.type] ?? 1.0) +
           s.powerDraw * powerUnit +
           s.computeDraw * computeUnit +
           s.buildCost * (p[Commodity.ore] ?? 0) * capexPerS +
@@ -400,8 +433,11 @@ LocalMarket solveLocalMarket(
         // puts the premium its inexperience still carries on top
         // (`learning.dart`). A constant factor ≥ 1, so the map stays
         // monotone and the fixed point still converges from below.
-        final unit =
-            c * share / rate * (facts.learningMult[e.key] ?? 1.0);
+        final unit = c *
+            share /
+            rate *
+            (facts.learningMult[e.key] ?? 1.0) *
+            costMarkup;
         final had = cost[e.key];
         if (had == null || unit < had) {
           cost[e.key] = unit;
@@ -415,6 +451,13 @@ LocalMarket solveLocalMarket(
 
     final next = <String, double>{};
     for (final c in goods) {
+      final fixed = pinned[c];
+      if (fixed != null) {
+        next[c] = fixed;
+        cost[c] = fixed;
+        from[c] = kSourcePinned;
+        continue;
+      }
       final hi = ceiling[c] ?? double.infinity;
       final lo = floor[c] ?? 0;
       var local = cost[c];
@@ -471,6 +514,10 @@ LocalMarket solveLocalMarket(
       powerPerKJ: powerUnit / kKjPerPowerUnitS,
       importCeiling: Map.unmodifiable(ceiling),
       exportFloor: Map.unmodifiable(floor),
+      tierWages: Map.unmodifiable({
+        for (final t in SkillTier.values)
+          t: wage * skillMultipleOf(t) * (facts.wageRatio[t] ?? 1.0),
+      }),
     ),
     localCost: Map.unmodifiable(localCost),
     sourceOf: Map.unmodifiable(sourceOf),

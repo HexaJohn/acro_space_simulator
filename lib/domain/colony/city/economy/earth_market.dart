@@ -14,15 +14,20 @@
 /// number is a real-world bulk or industrial price scaled by the
 /// commodity's unit mass (`commodity_mass.dart`).
 ///
-/// **Only a seed.** Since dynamic markets, Earth's LIVE prices are a
-/// `Market` (`markets.dart`) seeded from this table once
-/// (`seedEarthMarket`) and then moved every day by the world's supply and
-/// demand. Nothing may read this table as a live price. What still reads it
-/// reads it as a fixed WEIGHT, never as what a good sells for: the
-/// joint-product cost split in `local_prices.dart`, the floor reward cap's
-/// value measure (`city_factory_port.dart`, `factory_floors.dart`), the
-/// methalox fallback a bare transport model prices propellant at, and a
-/// bare solve handed no live Earth market (a test).
+/// **No longer a price at all** (docs/plans/dynamic-markets.md phase 3).
+/// Phase 1 seeded Earth's live market from this table, and phase 2 took
+/// each good's mature cost from it. Now Earth's market is seeded at costs
+/// DERIVED from the recipes (`mature_cost.dart`: inputs, tier wages,
+/// energy, capital and a normal margin; raw goods at their extraction cost)
+/// and moved every day by the world's supply and demand. What still reads
+/// this table reads it as a fixed WEIGHT, never as what a good sells for:
+/// the joint-product cost split in `local_prices.dart` (how a mill's cost
+/// divides between its steel and its tube, not how big it is), the floor
+/// reward cap's value measure (`city_factory_port.dart`,
+/// `factory_floors.dart`), the methalox fallback a bare transport model
+/// prices propellant at, and a bare solve handed no live Earth market (a
+/// test). The tests also keep it as the real-world sanity reference the
+/// derived prices are checked against (mature_cost_test.dart).
 ///
 /// Credits ≈ US dollars of the 2020s; `kCreditsToFunds` converts them to the
 /// treasury's §.

@@ -71,6 +71,7 @@ MarketFacts matureFacts(MarketFacts f) => MarketFacts(
       canExport: f.canExport,
       unavailable: f.unavailable,
       noEarthSource: f.noEarthSource,
+      wageRatio: f.wageRatio,
     );
 
 /// [runDays] at [population] people: the rocket parts recipe opens at 400,
@@ -209,7 +210,13 @@ void main() {
     // Dear: made at nearly the first lot's 21× premium.
     final mult = e.tech.localCostMultiplier(kRp);
     expect(mult, greaterThan(10));
-    final mature = solveLocalMarket(matureFacts(sim.marketFacts())).localCost[kRp]!;
+    // Against the colony's own Earth market: since phase 3 Earth's prices
+    // are derived (`mature_cost.dart`), and a bare solve's fallback, the
+    // old seed table, would price the inputs far dearer than the colony
+    // pays.
+    final mature = solveLocalMarket(matureFacts(sim.marketFacts()),
+            earthPrices: e.earthMarket.prices)
+        .localCost[kRp]!;
     expect(book.price(kRp), greaterThan(mature * 5),
         reason: 'the first mover\'s price is far above its mature cost');
     expect(e.tech.localQOf(kRp), greaterThan(0));

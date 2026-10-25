@@ -520,25 +520,9 @@ double worldFlowPerS(String commodity) {
   return kg > 0 ? paramsOf(commodity).worldFlowKgPerS / kg : 0;
 }
 
-/// Earth's market on the day the world economy starts: every tradeable good
-/// at its `kEarthPricePerKg` seed, which is also its cost anchor, with
-/// world demand and supply balanced at [worldFlowPerS].
-///
-/// This is the ONLY place the seed table is read as a price. Afterwards
-/// Earth's prices are this market's state and move with the world's supply
-/// and demand ([closeEarthDay]).
-Market seedEarthMarket() {
-  final m = Market();
-  for (final c in marketGoods()) {
-    if (!isShippable(c)) continue;
-    final p = earthPrice(c);
-    if (!(p > 0)) continue;
-    final w = worldFlowPerS(c);
-    m.goods[c] = GoodMarket(
-        price: p, anchor: p, stock: 0, demandPerS: w, supplyPerS: w);
-  }
-  return m;
-}
+// Earth's market on the day the world economy starts is
+// `learning.dart` `seedEarthMarketFor`: every good at its DERIVED cost
+// anchor (`mature_cost.dart`, phase 3), never the old seed table.
 
 /// Closes one day of Earth's market: world demand is Earth's depth plus
 /// what colonies bought from it ([importsPerS], units/s), world supply its
@@ -679,6 +663,7 @@ ColonyClose closeColonyMarket(
       powerPerKJ: book.powerPerKJ,
       importCeiling: book.importCeiling,
       exportFloor: book.exportFloor,
+      tierWages: book.tierWages,
     ),
     sellThrough: Map.unmodifiable(sell),
     exportsPerS: Map.unmodifiable(exports),
@@ -696,5 +681,6 @@ PriceBook overlayPrices(PriceBook solved, Market colony) {
     powerPerKJ: solved.powerPerKJ,
     importCeiling: solved.importCeiling,
     exportFloor: solved.exportFloor,
+    tierWages: solved.tierWages,
   );
 }

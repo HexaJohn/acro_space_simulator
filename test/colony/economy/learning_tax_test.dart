@@ -9,6 +9,16 @@
 /// Earth's price for their goods never fell. Now it does, as the world
 /// makes more; this measures how far over game years.
 ///
+/// Since phase 3 the mature cost under every curve is DERIVED from the
+/// recipes (`mature_cost.dart`), not the old seed over the premium, so the
+/// rent left once the premium is gone is the normal margin, not the old
+/// table's eight-times value added. Measured (an Earth colony's private
+/// plant, its output sold to Earth): Rocket Parts' raw tax is 17×, 12×,
+/// 10×, 8×, 7× its workers' over years 0/1/2/5/10 (it was 391× → 188×),
+/// the Missile Plant's 10×, 3×, 3×, 2×, 2× (it was 1,707× → 705×). Neither
+/// is pinned at the 30× safety ceiling any more: the treasury gets 43% →
+/// 21% and 28% → 7% of it.
+///
 /// Years of a live colony would take minutes, so the WORLD is fast-forwarded
 /// headless between checkpoints (Earth's market and the colony's copy of the
 /// world's learning stepped day by day, with the plant's output sold to
@@ -95,7 +105,8 @@ void main() {
     ('rocketfactory', Commodity.rocketParts),
     ('missilefactory', Commodity.missiles),
   ]) {
-    test('$type: its rent erodes with world learning; the ceiling holds', () {
+    test('$type: its rent erodes with world learning, well under the ceiling',
+        () {
       final pts = measure(type, good);
       for (var i = 1; i < pts.length; i++) {
         expect(pts[i].earthPrice, lessThan(pts[i - 1].earthPrice),
@@ -103,12 +114,16 @@ void main() {
         expect(pts[i].rawMultiple, lessThan(pts[i - 1].rawMultiple),
             reason: 'and so does the plant\'s rent');
       }
-      // The measured finding (see the phase 2 report): learning takes the
-      // rent down by about half in a decade, but the flat recipes' value
-      // added is so large (rocket parts' mature price is still ~8× its
-      // inputs) that both plants stay pinned at the ceiling. It stays as a
-      // guard; the gap is the recipes', not the ceiling's.
-      expect(pts.last.saturation, greaterThan(0.99));
+      // Phase 2 measured both plants pinned at the ceiling for a decade
+      // (saturation > 0.99) because their mature cost came from the seed
+      // table. Derived bottom-up (phase 3) the rent is the scarcity premium
+      // plus the normal margin, so the ceiling no longer binds anywhere:
+      // under it from year 0, and falling every year.
+      for (final p in pts) {
+        expect(p.rawMultiple, lessThan(kCorporateTaxSafetyMultiple),
+            reason: 'year ${p.years}: ${p.rawMultiple}x workers tax');
+        expect(p.saturation, lessThan(0.5), reason: 'year ${p.years}');
+      }
     });
   }
 }

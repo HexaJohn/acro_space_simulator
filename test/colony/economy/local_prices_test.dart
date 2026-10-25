@@ -12,6 +12,7 @@ import 'package:acro_space_simulator/domain/colony/city/economy/earth_market.dar
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/local_prices.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/skill_tiers.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/plant_pnl.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
@@ -254,7 +255,12 @@ void main() {
     final power = m.book.powerPerKJ * kKjPerPowerUnitS;
     final capex = harvester.buildCost * m.book.price(Commodity.ore) /
         (kCapitalRecoveryYears * kGameYearSec);
-    final unit = (harvester.jobs * w + harvester.powerDraw * power + capex) /
+    // Its jobs at their skill tier's wage (phase 3, `skill_tiers.dart`).
+    final unit = (harvester.jobs *
+                w *
+                wageMultipleOf(labourSharesOf('o2harvester')) +
+            harvester.powerDraw * power +
+            capex) /
         harvester.outputs[Commodity.oxygen]!;
     expect(m.localCost[Commodity.oxygen], closeTo(unit, unit * 1e-6));
 

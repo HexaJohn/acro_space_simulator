@@ -16,10 +16,11 @@ import 'dart:math' as math;
 
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/commodity_mass.dart';
-import 'package:acro_space_simulator/domain/colony/city/economy/earth_market.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/local_prices.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/learning.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/markets.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/mature_cost.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// [days] closes of a good bid up (demand 10, supply 1, empty shelves) or
@@ -142,14 +143,19 @@ void main() {
   });
 
   group('Earth', () {
-    test('is seeded once from kEarthPricePerKg, and holds without trade', () {
-      final earth = seedEarthMarket();
+    // Seeded at its DERIVED anchors (`mature_cost.dart`, phase 3; it was
+    // the kEarthPricePerKg seed before), and holds there without trade.
+    test('is seeded once at its derived anchors, and holds without trade', () {
+      final tech = TechState();
+      final earth = seedEarthMarketFor(tech);
+      final day0 = <String, double>{};
       for (final c in marketGoods()) {
-        final p = earthPrice(c);
+        final p = tech.earthUnitCost(c) ?? earthMatureCost(c) ?? 0.0;
         if (!isShippable(c) || !(p > 0)) {
           expect(earth.goods[c], isNull, reason: c);
           continue;
         }
+        day0[c] = p;
         expect(earth.priceOf(c), p, reason: c);
         expect(earth.goods[c]!.anchor, p, reason: c);
       }
@@ -157,7 +163,7 @@ void main() {
         closeEarthDay(earth);
       }
       for (final e in earth.goods.entries) {
-        expect(e.value.price, closeTo(earthPrice(e.key), earthPrice(e.key) * 1e-9),
+        expect(e.value.price, closeTo(day0[e.key]!, day0[e.key]! * 1e-9),
             reason: e.key);
       }
     });
@@ -167,8 +173,9 @@ void main() {
     // toward 1.5^(1/1.5) ≈ 1.31× and lets it slide back when it stops; a
     // seller flooding it pushes it down. Earth is a market like any other.
     test('moves with world supply and demand, and reverts to its anchor', () {
-      final earth = seedEarthMarket();
-      final seed = earthPrice(Commodity.rocketParts);
+      final earth = seedEarthMarketFor(TechState());
+      final seed = earth.priceOf(Commodity.rocketParts)!;
+      final steel = earth.priceOf(Commodity.steel)!;
       final w = worldFlowPerS(Commodity.rocketParts);
       final demand = {Commodity.rocketParts: w / 2};
       final eq = math.pow(1.5, 1 / paramsOf(Commodity.rocketParts).elasticity);
@@ -182,7 +189,7 @@ void main() {
       // after 90 days, more than three quarters of it.
       expect(math.log(after90) / math.log(eq), greaterThan(0.75));
       // Steel didn't move: nobody traded it.
-      expect(earth.priceOf(Commodity.steel), closeTo(earthPrice(Commodity.steel), 1e-12));
+      expect(earth.priceOf(Commodity.steel), closeTo(steel, 1e-12));
       // The buyer leaves: back toward the seed.
       for (var d = 0; d < 365; d++) {
         closeEarthDay(earth);
@@ -199,13 +206,14 @@ void main() {
     // follows it, not the seed table.
     test('a colony\'s import ceiling follows Earth\'s live price', () {
       const facts = MarketFacts(bodyId: 'mars', economy: EconomyKind.capitalism);
-      final seeded = solveLocalMarket(facts);
+      final base = seedEarthMarketFor(TechState()).prices;
+      final seeded = solveLocalMarket(facts, earthPrices: base);
       final live = {
-        for (final e in seedEarthMarket().prices.entries)
+        for (final e in base.entries)
           e.key: e.key == Commodity.rocketParts ? e.value * 2 : e.value,
       };
       final moved = solveLocalMarket(facts, earthPrices: live);
-      final rp = earthPrice(Commodity.rocketParts);
+      final rp = base[Commodity.rocketParts]!;
       expect(
           moved.book.importCeiling[Commodity.rocketParts]! -
               seeded.book.importCeiling[Commodity.rocketParts]!,
