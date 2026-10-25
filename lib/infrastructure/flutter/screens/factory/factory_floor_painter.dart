@@ -148,8 +148,11 @@ const Map<HandlerKind, Color> kHandlerColor = {
 
 const Map<MachineStatus, Color> kStatusColor = {
   MachineStatus.working: Color(0xFF7FE0A0),
-  MachineStatus.starved: Color(0xFFFFD54F),
-  MachineStatus.blocked: Color(0xFFFF6B6B),
+  // Starved reads red (the line is broken upstream: nothing arrives), blocked
+  // reads yellow (it works, but its output has nowhere to go) — the user's
+  // call, 2026-10-25.
+  MachineStatus.starved: Color(0xFFFF6B6B),
+  MachineStatus.blocked: Color(0xFFFFD54F),
   MachineStatus.unstaffed: Color(0xFFFF8C66),
   MachineStatus.unpowered: Color(0xFFB388FF),
   MachineStatus.idle: Color(0xFF8499AE),
@@ -572,8 +575,8 @@ class FactoryFloorPainter extends CustomPainter {
       Color? tint;
       if (neck) {
         tint = switch (s) {
-          MachineStatus.starved => const Color(0x80FFD54F),
-          MachineStatus.blocked => const Color(0x90FF6B6B),
+          MachineStatus.starved => const Color(0x90FF6B6B),
+          MachineStatus.blocked => const Color(0x80FFD54F),
           MachineStatus.broken => const Color(0xA0E53935),
           MachineStatus.working => const Color(0x307FE0A0),
           _ => null,
