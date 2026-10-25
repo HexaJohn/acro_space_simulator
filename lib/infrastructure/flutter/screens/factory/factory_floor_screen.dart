@@ -34,19 +34,25 @@
 /// filters buttons itself — primary edits (or pans empty floor with the
 /// Select tool), middle pans, and the right button does nothing at all.
 ///
-/// "Product tree" in the header opens [ProductTreePanel] over the right of
-/// the body: the full flow from raw material to any good, across plants.
-/// It is stacked as a SIBLING above the canvas row (never inside the
-/// canvas [Listener]) for the same reason, and owns the keyboard while it
-/// has focus, so typing in its search never rotates or deletes on the
-/// floor.
+/// "Recipe info" in the header opens [RecipeInfoPanel] over the right of
+/// the body: for one item, the recipes that make it (one level) or the raw
+/// materials a unit costs in total, never the chain between (§10 item 15).
+/// "Product tree" opens the full [ProductTreePanel] instead, and exists
+/// only with [FactoryFloorScreen.debugTools]: the user judged the whole
+/// solved chain too strong for the game. Both are stacked as SIBLINGS
+/// above the canvas row (never inside the canvas [Listener]) for the same
+/// reason, and keep their typing away from the floor's keys.
+///
+/// Every item and recipe choice (palette, inspector, Recipe info) is the
+/// shared type-to-search [SearchablePicker] (§10 item 16).
 ///
 /// Keys (docs/plans/factory-floors.md §10; the table is on
 /// [FactoryEditorController.handleKey]): R / Shift+R rotate, Ctrl+Z /
 /// Ctrl+Y undo and redo every edit (also the header's arrows), M cycles the
 /// belt-and-aisle run shape (the chips under those tools), F flips an L,
-/// Shift held straightens a run or adds floor markings to an area delete.
-/// None of them fire while a text field has the keyboard ([_typing]).
+/// Shift held straightens a run or adds floor markings to an area delete,
+/// X held deletes whatever the cursor sweeps over (one undo step, §10 item
+/// 12). None of them fire while a text field has the keyboard ([_typing]).
 ///
 /// Given a [FactoryFloorScreen.scenario], the screen also hosts the
 /// [TutorialPanel] card in the canvas area's top-left corner (again a
@@ -71,11 +77,14 @@ import '../../../../domain/colony/city/factory/factory_scenario.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/factory_unlocks.dart';
 import '../../../../domain/colony/city/factory/floor_blueprint.dart';
+import '../../../../domain/colony/city/factory/product_tree.dart';
 import '../app_theme.dart';
 import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
 import 'floor_layout_index.dart';
 import 'product_tree_panel.dart';
+import 'recipe_info_panel.dart';
+import 'searchable_picker.dart';
 import 'tutorial_panel.dart';
 
 /// Width of the palette column, logical px.
@@ -95,7 +104,14 @@ class FactoryFloorScreen extends StatefulWidget {
     this.drivesSim = true,
     this.onClose,
     this.scenario,
+    this.debugTools = false,
   });
+
+  /// Shows the debug-only tools: today the full product tree, which solves
+  /// a whole production chain and is too strong for the game (§10 item 15;
+  /// the game has Recipe info instead). The dev entry passes true; every
+  /// game mode, the tutorial included, leaves it false.
+  final bool debugTools;
 
   final FactorySim sim;
 
@@ -165,10 +181,34 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   /// Static-layer builds so far (a test checks the cache holds).
   int get layerBuilds => _cache.builds;
 
-  /// The product tree panel is showing.
+  /// The product tree panel is showing (only ever with debugTools).
   bool treeOpen = false;
 
-  void openProductTree() => setState(() => treeOpen = true);
+  /// The Recipe info panel is showing. It and the tree share the right of
+  /// the body, so opening one closes the other.
+  bool infoOpen = false;
+
+  void openProductTree() {
+    if (!widget.debugTools) return;
+    setState(() {
+      treeOpen = true;
+      infoOpen = false;
+    });
+  }
+
+  void openRecipeInfo() {
+    if (treeOpen) controller.setHighlightRecipe(null);
+    setState(() {
+      infoOpen = true;
+      treeOpen = false;
+    });
+  }
+
+  void closeRecipeInfo() {
+    if (!infoOpen) return;
+    setState(() => infoOpen = false);
+    _focus.requestFocus();
+  }
 
   /// Closes the panel, drops its floor highlight, and hands the keyboard
   /// back to the editor (the panel held it).
@@ -192,12 +232,16 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
   }
 
   KeyEventResult _onKey(KeyEvent e) {
-    if (_typing()) return KeyEventResult.ignored;
+    if (_typing()) {
+      // X held as focus moved into a field: its key-up won't come here.
+      controller.keyboardLost();
+      return KeyEventResult.ignored;
+    }
     // Esc closes the topmost thing first: an open panel, then the tool.
-    if (treeOpen &&
+    if ((treeOpen || infoOpen) &&
         e is KeyDownEvent &&
         e.logicalKey == LogicalKeyboardKey.escape) {
-      closeProductTree();
+      treeOpen ? closeProductTree() : closeRecipeInfo();
       return KeyEventResult.handled;
     }
     return controller.handleKey(e)
@@ -270,6 +314,11 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
           focusNode: _focus,
           autofocus: true,
           onKeyEvent: (_, e) => _onKey(e),
+          // Focus left the editor (a dialog, another panel): a held X's
+          // key-up will go elsewhere, so close the sweep now.
+          onFocusChange: (has) {
+            if (!has) controller.keyboardLost();
+          },
           child: Column(
             children: [
               _TopBar(
@@ -277,8 +326,12 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
                   title: widget.title,
                   onBack: widget.onClose,
                   treeOpen: treeOpen,
-                  onProductTree: () =>
-                      treeOpen ? closeProductTree() : openProductTree(),
+                  infoOpen: infoOpen,
+                  onProductTree: widget.debugTools
+                      ? () => treeOpen ? closeProductTree() : openProductTree()
+                      : null,
+                  onRecipeInfo: () =>
+                      infoOpen ? closeRecipeInfo() : openRecipeInfo(),
                   onSave: widget.onSaveBlueprint == null
                       ? null
                       : () => widget.onSaveBlueprint!(
@@ -313,6 +366,17 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
                             onClose: closeProductTree,
                             onItem: runner?.noteProductTree),
                       ),
+                    if (infoOpen)
+                      Positioned(
+                        top: 0,
+                        bottom: 0,
+                        right: 0,
+                        width: kRecipeInfoWidth,
+                        child: RecipeInfoPanel(
+                            c: controller,
+                            onClose: closeRecipeInfo,
+                            onItem: runner?.noteRecipeInfo),
+                      ),
                   ],
                 ),
               ),
@@ -331,7 +395,12 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
       return Stack(
         fit: StackFit.expand,
         children: [
-          Listener(
+          // MouseRegion only for its exit (no gesture arena): the cursor
+          // leaving the floor clears the hover, so X over a panel deletes
+          // nothing.
+          MouseRegion(
+            onExit: (_) => c.pointerExit(),
+            child: Listener(
             key: const Key('factory-canvas'),
             behavior: HitTestBehavior.opaque,
             onPointerDown: (e) {
@@ -353,6 +422,7 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
                 size: Size.infinite,
               ),
             ),
+          ),
           ),
           Positioned(
             left: 8,
@@ -427,13 +497,69 @@ String _itemChoiceLabel(FactoryEditorController c, String id) {
 }
 
 /// The items a picker lists: those used on this floor first (what the
-/// player most likely wants), then the rest, each group by id.
+/// player most likely wants), then the rest by picker group (goods, packs,
+/// intermediates) so each group's heading appears once, each by id.
 List<String> _pickerItems(FactoryEditorController c) {
   final used = c.index.consumedItems;
   final ids = FactoryItems.table.keys.toList()..sort();
+  final rest = ids.where((i) => !used.contains(i)).toList()
+    ..sort((a, b) {
+      final g = productGroupOf(a).index.compareTo(productGroupOf(b).index);
+      return g != 0 ? g : a.compareTo(b);
+    });
+  return [...ids.where(used.contains), ...rest];
+}
+
+/// The picker id of "Any item" (no item id contains a space or a star).
+const String kAnyItemOption = '*any';
+
+/// The heading of the items a machine on this floor takes.
+const String kUsedHereGroup = 'USED ON THIS FLOOR';
+
+String _itemGroupLabel(ProductGroup g) => switch (g) {
+      ProductGroup.good => 'GOODS',
+      ProductGroup.packed => 'PACKED FOR SHIPPING',
+      ProductGroup.intermediate => 'INTERMEDIATES',
+    };
+
+/// Every item as a [SearchablePicker] option ([_pickerItems] order),
+/// headed "Any item" when [any] (an arm, chest or shipping dock may take
+/// anything; a receiving dock must name what it brings in).
+List<PickerOption<String?>> _itemOptions(FactoryEditorController c,
+    {required bool any}) {
+  final used = c.index.consumedItems;
   return [
-    ...ids.where(used.contains),
-    ...ids.where((i) => !used.contains(i)),
+    if (any)
+      const PickerOption<String?>(
+          value: null, id: kAnyItemOption, label: 'Any item'),
+    for (final id in _pickerItems(c))
+      PickerOption<String?>(
+          value: id,
+          id: id,
+          label: _itemChoiceLabel(c, id),
+          group: used.contains(id)
+              ? kUsedHereGroup
+              : _itemGroupLabel(productGroupOf(id))),
+  ];
+}
+
+/// [recipes] as picker options, grouped by station, each with its
+/// "inputs → outputs · time" line so the search result says what it does.
+List<PickerOption<String>> _recipeOptions(List<FactoryRecipe> recipes) {
+  String side(List<ItemQty> qs) =>
+      qs.map((q) => '${q.count} ${q.def?.label ?? q.item}').join(' + ');
+  final sorted = [...recipes]..sort((a, b) {
+      final g = a.station.index.compareTo(b.station.index);
+      return g != 0 ? g : a.id.compareTo(b.id);
+    });
+  return [
+    for (final r in sorted)
+      PickerOption<String>(
+          value: r.id,
+          id: r.id,
+          label: r.label,
+          group: _stationLabel(r.station).toUpperCase(),
+          note: '${side(r.inputs)} → ${side(r.outputs)} · ${r.seconds}s'),
   ];
 }
 
@@ -452,7 +578,9 @@ class _TopBar extends StatelessWidget {
       required this.title,
       required this.onSave,
       required this.treeOpen,
+      required this.infoOpen,
       required this.onProductTree,
+      required this.onRecipeInfo,
       this.onBack});
   final FactoryEditorController c;
   final String title;
@@ -460,7 +588,13 @@ class _TopBar extends StatelessWidget {
 
   /// The product tree panel is open (its button shows pressed).
   final bool treeOpen;
-  final VoidCallback onProductTree;
+
+  /// Null hides the button (no debugTools: the tree is debug-only).
+  final VoidCallback? onProductTree;
+
+  /// The Recipe info panel is open (its button shows pressed).
+  final bool infoOpen;
+  final VoidCallback onRecipeInfo;
 
   /// The host's close; null pops the route.
   final VoidCallback? onBack;
@@ -539,17 +673,30 @@ class _TopBar extends StatelessWidget {
               ),
             ),
             HintPulse(
-              on: c.hinted(ScenarioHintTarget.productTree),
+              on: c.hinted(ScenarioHintTarget.recipeInfo),
               child: TextButton.icon(
-                key: const Key('product-tree-button'),
-                onPressed: onProductTree,
-                icon: Icon(Icons.account_tree,
-                    color: treeOpen ? AppTheme.accent : AppTheme.text),
-                label: Text('Product tree',
+                key: const Key('recipe-info-button'),
+                onPressed: onRecipeInfo,
+                icon: Icon(Icons.info_outline,
+                    color: infoOpen ? AppTheme.accent : AppTheme.text),
+                label: Text('Recipe info',
                     style: TextStyle(
-                        color: treeOpen ? AppTheme.accent : AppTheme.text)),
+                        color: infoOpen ? AppTheme.accent : AppTheme.text)),
               ),
             ),
+            if (onProductTree case final open?)
+              HintPulse(
+                on: c.hinted(ScenarioHintTarget.productTree),
+                child: TextButton.icon(
+                  key: const Key('product-tree-button'),
+                  onPressed: open,
+                  icon: Icon(Icons.account_tree,
+                      color: treeOpen ? AppTheme.accent : AppTheme.text),
+                  label: Text('Product tree (debug)',
+                      style: TextStyle(
+                          color: treeOpen ? AppTheme.accent : AppTheme.text)),
+                ),
+              ),
             IconButton(
               key: const Key('undo'),
               tooltip: c.history.canUndo
@@ -696,6 +843,7 @@ class _Palette extends StatelessWidget {
               padding: EdgeInsets.fromLTRB(10, 14, 10, 0),
               child: Text(
                   'R / Shift+R rotate · Del delete · Esc select\n'
+                  'Hold X and sweep: delete under the cursor\n'
                   'Ctrl+Z undo · Ctrl+Y redo\n'
                   'Drag to lay belts, aisles, staging and crane bays.\n'
                   'M run shape (Straight / L / Free) · F flip the L ·\n'
@@ -725,16 +873,11 @@ class _Palette extends StatelessWidget {
     }
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 10, 4),
-      child: DropdownButton<String>(
+      child: SearchablePicker<String>(
         key: const Key('palette-recipe'),
-        isExpanded: true,
-        dropdownColor: AppTheme.panelLight,
-        value: c.effectiveRecipe,
-        style: AppTheme.body,
-        items: [
-          for (final r in all)
-            DropdownMenuItem(value: r.id, child: Text(r.label)),
-        ],
+        title: '${_stationLabel(c.station)} recipe',
+        selectedId: c.effectiveRecipe,
+        options: _recipeOptions(all),
         onChanged: c.setRecipeChoice,
       ),
     );
@@ -757,22 +900,11 @@ class _Palette extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          DropdownButton<String?>(
+          SearchablePicker<String?>(
             key: const Key('palette-item'),
-            isExpanded: true,
-            dropdownColor: AppTheme.panelLight,
-            value: shown,
-            style: AppTheme.body,
-            items: [
-              if (anyOk)
-                const DropdownMenuItem<String?>(
-                    value: null, child: Text('Any item')),
-              for (final id in ids)
-                DropdownMenuItem<String?>(
-                    value: id,
-                    child: Text(_itemChoiceLabel(c, id),
-                        overflow: TextOverflow.ellipsis)),
-            ],
+            title: '${_kindLabel(c.kind ?? EntityKind.chest)} item',
+            selectedId: shown ?? kAnyItemOption,
+            options: _itemOptions(c, any: anyOk),
             onChanged: c.setItemChoice,
           ),
           if (unused)
@@ -920,20 +1052,13 @@ class _Inspector extends StatelessWidget {
           if (choices.isEmpty)
             const Text('No recipes registered', style: AppTheme.dim)
           else
-            DropdownButton<String>(
+            SearchablePicker<String>(
               key: const Key('inspect-recipe'),
-              isExpanded: true,
-              dropdownColor: AppTheme.panelLight,
-              style: AppTheme.body,
-              value: recipe == null ? null : rid,
-              hint: const Text('Choose recipe', style: AppTheme.dim),
-              items: [
-                for (final r in choices)
-                  DropdownMenuItem(value: r.id, child: Text(r.label)),
-              ],
-              onChanged: (v) {
-                if (v != null) c.setMachineRecipe(p.id, v);
-              },
+              title: 'Recipe',
+              hint: 'Choose recipe',
+              selectedId: recipe == null ? null : rid,
+              options: _recipeOptions(choices),
+              onChanged: (v) => c.setMachineRecipe(p.id, v),
             ),
           const SizedBox(height: 6),
           Wrap(spacing: 6, children: [
@@ -987,22 +1112,12 @@ class _ArmFilter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ids = _pickerItems(c);
     final cur = arm.item;
-    return DropdownButton<String?>(
+    return SearchablePicker<String?>(
       key: const Key('inspect-arm-item'),
-      isExpanded: true,
-      dropdownColor: AppTheme.panelLight,
-      style: AppTheme.body,
-      value: cur != null && ids.contains(cur) ? cur : null,
-      items: [
-        const DropdownMenuItem<String?>(value: null, child: Text('Any item')),
-        for (final id in ids)
-          DropdownMenuItem<String?>(
-              value: id,
-              child: Text(_itemChoiceLabel(c, id),
-                  overflow: TextOverflow.ellipsis)),
-      ],
+      title: 'Arm picks',
+      selectedId: cur ?? kAnyItemOption,
+      options: _itemOptions(c, any: true),
       onChanged: (v) => c.setArmFilter(arm.id, v),
     );
   }

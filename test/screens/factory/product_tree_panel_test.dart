@@ -26,7 +26,9 @@ void main() {
     t.view.devicePixelRatio = 1;
     addTearDown(t.view.reset);
     floor = FactoryFloor.fromBlueprint(factoryTemplateFor('steelmill')!);
-    await t.pumpWidget(MaterialApp(home: FactoryFloorScreen(sim: floor)));
+    // The full tree is a debug tool (§10 item 15): only with debugTools.
+    await t.pumpWidget(MaterialApp(
+        home: FactoryFloorScreen(sim: floor, debugTools: true)));
     await t.pump();
     c = t.state<FactoryFloorScreenState>(find.byType(FactoryFloorScreen))
         .controller;

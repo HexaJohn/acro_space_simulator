@@ -170,11 +170,16 @@ void main() {
     expect(stepId(), 'read');
     run.noteBottlenecks(true);
     runFor(1);
-    expect(stepId(), 'read', reason: 'tree not opened yet');
-    run.noteProductTree('steel');
+    expect(stepId(), 'read', reason: 'Recipe info not opened yet');
+    run.noteRecipeInfo('steel');
     runFor(1);
     expect(stepId(), 'read', reason: 'opened on the wrong product');
+    // The full product tree is debug-only (§10 item 15): it no longer
+    // counts for the step.
     run.noteProductTree('rocketParts');
+    runFor(1);
+    expect(stepId(), 'read', reason: 'the debug tree is not the step');
+    run.noteRecipeInfo('rocketParts');
     runFor(1);
     expect(run.inGoals, isTrue);
     return {...run.progress.stepDoneAt};

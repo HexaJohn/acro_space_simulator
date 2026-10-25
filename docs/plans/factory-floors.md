@@ -531,6 +531,19 @@ the recommendations; revisit if they object):
 - **Docks:** a 4 m door with a 4×6 m loading area inside and the truck outside. Handlers unload
   trucks; a dock conveyor is a paid upgrade.
 
+**Built (2026-10-25): items 12, 15, 16.**
+
+- X held deletes what the cursor is over and everything it sweeps across (tiles between pointer
+  events filled in); a floor marking needs Shift+X, like the area delete. One sweep = one undo step
+  (`FloorEditHistory.beginGroup` / `endGroup`), goods pile as with any delete, a red ring marks the
+  cursor while X is down, and the cursor leaving the canvas clears the hover.
+- The full product tree is debug-only (`FactoryFloorScreen.debugTools`, true only in
+  `main_factory_dev.dart`). The game gets Recipe info (`recipe_info_panel.dart`): Components (the
+  item's recipes, one level) and Raw total (`summarizeProductTree(...).rawPerS` at 1/s, nothing
+  between). The tutorial's "Read the floor" step wants Recipe info on Rocket Parts.
+- Every item and recipe picker is `searchable_picker.dart`: a dialog route (outside the canvas
+  Listener and the editor's focus chain), label-or-id substring, grouped, arrows / Enter / Esc.
+
 **Built (2026-10-25): items 1, 2, 6 (picker part), 7, 8, 9, 10.**
 
 - Keys: R / Shift+R rotate cw / ccw; Ctrl+Z undo, Ctrl+Y or Ctrl+Shift+Z redo (also header arrows);

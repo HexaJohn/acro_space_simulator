@@ -161,6 +161,9 @@ class FactoryDevAppState extends State<FactoryDevApp> {
               sim: floor,
               title: floor.blueprint.name,
               scenario: scenario,
+              // The dev entry is the debug harness: the full product tree
+              // lives here (and behind this flag), never in a game mode.
+              debugTools: true,
               onSaveBlueprint: (bp) =>
                   debugPrint('blueprint: ${jsonEncode(bp.toJson())}'),
             ),

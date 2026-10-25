@@ -235,7 +235,7 @@ void main() {
     await t.tap(find.byKey(const Key('inspect-recipe')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
-    await t.tap(find.text('Press Two').last);
+    await t.tap(find.byKey(const Key('picker-option-test:press2')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
     expect(sim.recipes, [(1, 'test:press2')]);
@@ -455,12 +455,11 @@ void main() {
     await t.tap(find.byKey(const Key('inspect-arm-item')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
-    // Items are listed by id and every plant chain's items are registered,
-    // so 'ore' sits well down the menu: scroll it into view.
-    await t.dragUntilVisible(find.text(FactoryItems.ore.pickerLabel),
-        find.byType(Scrollable).last, const Offset(0, -200));
+    // Every plant chain's items are registered, so 'ore' sits well down
+    // the list: search for it (§10 item 16).
+    await t.enterText(find.byKey(const Key('picker-search')), 'ore');
     await t.pump();
-    await t.tap(find.text(FactoryItems.ore.pickerLabel).last);
+    await t.tap(find.byKey(Key('picker-option-${FactoryItems.ore.id}')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
     expect(sim.removed, [1]);
@@ -477,12 +476,9 @@ void main() {
     await t.tap(find.byKey(const Key('inspect-arm-item')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
-    // The menu opens scrolled to the current pick; with every colony good in
-    // the item table "Any item" sits off the top until scrolled to.
-    await t.dragUntilVisible(find.text('Any item'),
-        find.byType(Scrollable).last, const Offset(0, 300));
+    await t.enterText(find.byKey(const Key('picker-search')), 'any');
     await t.pump();
-    await t.tap(find.text('Any item').last);
+    await t.tap(find.byKey(const Key('picker-option-*any')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
     expect(sim.removed, [1, sel]);

@@ -163,20 +163,40 @@ class FloorEditHistory {
   /// [label]. Nested groups fold into the outermost. A group that edited
   /// nothing leaves no step.
   void group(String label, void Function() body) {
+    beginGroup(label);
+    try {
+      body();
+    } finally {
+      endGroup();
+    }
+  }
+
+  /// Opens a step that stays open ACROSS events, for a player action that
+  /// isn't one synchronous call: the hover-delete sweep (hold X and move
+  /// the mouse, docs/plans/factory-floors.md §10 item 12) deletes one tile
+  /// per pointer event, yet the player thinks of the whole sweep as one
+  /// edit, so one Ctrl+Z must bring all of it back. Every [beginGroup]
+  /// needs its [endGroup]; nesting folds into the outermost like [group].
+  void beginGroup(String label) {
     if (_depth++ == 0) {
       _open = [];
       _openLabel = label;
     }
-    try {
-      body();
-    } finally {
-      if (--_depth == 0) {
-        final ops = _open!;
-        _open = null;
-        _push(_FloorEdit(_openLabel, ops));
-      }
+  }
+
+  /// Closes the step [beginGroup] opened (a no-op when none is open, so a
+  /// lost key-up can be closed defensively more than once).
+  void endGroup() {
+    if (_depth == 0) return;
+    if (--_depth == 0) {
+      final ops = _open!;
+      _open = null;
+      _push(_FloorEdit(_openLabel, ops));
     }
   }
+
+  /// A [beginGroup] step is open (a sweep in progress).
+  bool get grouping => _depth > 0;
 
   void _record(_Op op, String label) {
     final open = _open;

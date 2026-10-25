@@ -10,7 +10,7 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_scenario
 import 'package:acro_space_simulator/domain/colony/city/factory/templates/rocketfactory_template.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/factory/factory_editor_controller.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/factory/factory_floor_screen.dart';
-import 'package:acro_space_simulator/infrastructure/flutter/screens/factory/product_tree_panel.dart';
+import 'package:acro_space_simulator/infrastructure/flutter/screens/factory/recipe_info_panel.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/factory/tutorial_panel.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -183,20 +183,27 @@ void main() {
     expect(find.byKey(const Key('tutorial-panel')), findsOneWidget);
   });
 
-  testWidgets('opening the product tree on Rocket Parts sets the flag',
+  testWidgets('opening Recipe info on Rocket Parts sets the flag',
       (t) async {
     await open(t);
-    await t.tap(find.byKey(const Key('product-tree-button')));
+    // A game mode never offers the full product tree (§10 item 15).
+    expect(find.byKey(const Key('product-tree-button')), findsNothing);
+    await t.tap(find.byKey(const Key('recipe-info-button')));
     await t.pump();
     await t.pump();
     final first =
-        t.state<ProductTreePanelState>(find.byType(ProductTreePanel)).item;
-    expect(run.progress.treeItemsSeen, {first});
-    await t.enterText(find.byKey(const Key('ptree-search')), 'rocket');
+        t.state<RecipeInfoPanelState>(find.byType(RecipeInfoPanel)).item;
+    expect(run.progress.recipeInfoSeen, {first});
+    await t.tap(find.byKey(const Key('rinfo-item')));
     await t.pump();
-    await t.tap(find.byKey(const Key('ptree-pick-rocketParts')));
+    await t.pump(const Duration(milliseconds: 400));
+    await t.enterText(find.byKey(const Key('picker-search')), 'rocket');
     await t.pump();
-    expect(run.progress.treeItemsSeen, contains('rocketParts'));
+    await t.tap(find.byKey(const Key('picker-option-rocketParts')));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 400));
+    expect(run.progress.recipeInfoSeen, contains('rocketParts'));
+    expect(run.progress.treeItemsSeen, isEmpty);
     // And the Bottlenecks overlay, through the header chip.
     await t.tap(find.byKey(const Key('overlay-bottleneck')));
     await live(t);

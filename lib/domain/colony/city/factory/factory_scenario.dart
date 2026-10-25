@@ -24,9 +24,12 @@
 ///
 /// **Who calls what.** The host (the editor's tutorial panel, or a test)
 /// steps the floor, then calls [ScenarioRunner.update] with it. UI events
-/// the floor can't see (the product tree opened, an overlay switched on)
-/// come in through [ScenarioRunner.noteProductTree] and
-/// [ScenarioRunner.noteBottlenecks].
+/// the floor can't see (Recipe info opened on an item, an overlay switched
+/// on) come in through [ScenarioRunner.noteRecipeInfo] and
+/// [ScenarioRunner.noteBottlenecks]. ([ScenarioRunner.noteProductTree] is
+/// still recorded, for the debug-only product tree, but no step reads it:
+/// a game mode never shows the full tree, docs/plans/factory-floors.md §10
+/// item 15.)
 library;
 
 import 'dart:collection';
@@ -138,7 +141,12 @@ enum ScenarioHintTarget {
   palletJack,
   crane,
   bottlenecks,
+
+  /// The debug-only full product tree (no shipped step points here).
   productTree,
+
+  /// The in-game Recipe info panel (direct components / raw total).
+  recipeInfo,
 }
 
 /// Where to look for the tool a step needs, and which on-screen controls
@@ -273,8 +281,12 @@ class ScenarioProgress {
   /// tutorial is over (finished or skipped): goal mode.
   int step = 0;
 
-  /// Products the player has opened the product tree on.
+  /// Products the player has opened the (debug) product tree on.
   final SplayTreeSet<String> treeItemsSeen = SplayTreeSet();
+
+  /// Items the player has opened Recipe info on (the "Read the floor"
+  /// step wants Rocket Parts here).
+  final SplayTreeSet<String> recipeInfoSeen = SplayTreeSet();
 
   /// The Bottlenecks overlay has been switched on at least once.
   bool bottlenecksSeen = false;
@@ -468,8 +480,11 @@ class ScenarioRunner {
       ..shippedAtGoalStart = {...sim.lifetime.shipped};
   }
 
-  /// The UI saw the product tree open on [item].
+  /// The UI saw the (debug) product tree open on [item].
   void noteProductTree(String item) => progress.treeItemsSeen.add(item);
+
+  /// The UI saw Recipe info open on [item].
+  void noteRecipeInfo(String item) => progress.recipeInfoSeen.add(item);
 
   /// The UI's Bottlenecks overlay is [on].
   void noteBottlenecks(bool on) {
@@ -779,20 +794,21 @@ FactoryScenario rocketPartsScenario() {
         id: 'read',
         title: 'Read the floor',
         body: 'Turn on Bottlenecks in the header: each machine is tinted by '
-            'what holds it up (starved, blocked, unstaffed). Then open the '
-            'Product tree on Rocket Parts: it lists every station a target '
-            'rate needs, in this plant and others.',
-        hint: const ScenarioHint('Header ▸ Bottlenecks, then Product tree',
-            {ScenarioHintTarget.bottlenecks, ScenarioHintTarget.productTree}),
+            'what holds it up (starved, blocked, unstaffed). Then open '
+            'Recipe info on Rocket Parts: Components shows what one recipe '
+            'takes in and puts out, Raw total what a part costs in raw '
+            'materials. Working out the steps between is up to you.',
+        hint: const ScenarioHint('Header ▸ Bottlenecks, then Recipe info',
+            {ScenarioHintTarget.bottlenecks, ScenarioHintTarget.recipeInfo}),
         check: (sim, p) =>
-            p.bottlenecksSeen && p.treeItemsSeen.contains(_rocketParts),
+            p.bottlenecksSeen && p.recipeInfoSeen.contains(_rocketParts),
       ),
     ],
     freePlayTitle: 'Free play: build a plant that makes rocket parts',
     freePlayBody: 'The line you built works, but slowly. Grow it into a real '
         'plant: the colony\'s Rocket Parts Factory makes 0.4 parts a second '
-        'with 50 jobs. Belts and arms cost no crew; the Product tree sizes '
-        'each step.',
+        'with 50 jobs. Belts and arms cost no crew; Recipe info shows what '
+        'each step takes.',
     goals: [
       ScenarioGoal(
         id: 'ship20',
@@ -829,8 +845,8 @@ FactoryScenario rocketPartsScenario() {
         detail: 'Switch the supply to Ore only, then ship '
             '${kDeepChainGoal.toStringAsFixed(0)} rocket parts. Tubes come '
             'from the steel chain (smelt ore; press the slag) and electronics '
-            'from the electronics chain: open the Product tree on Tubes and '
-            'Electronics to size them. Ore is a PALLET load.',
+            'from the electronics chain: open Recipe info on Tubes and '
+            'Electronics to see what each takes. Ore is a PALLET load.',
         read: (sim, p) {
           if (p.supplyOptionId != kOreOnlySupply) {
             return const GoalReading(

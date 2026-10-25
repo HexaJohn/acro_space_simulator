@@ -38,11 +38,13 @@ void main() {
   FloorBlueprint hall([List<Placement>? pl]) => FloorBlueprint(
       name: 'Test Hall', hall: const HallSize(40, 30), placements: pl);
 
-  Future<void> open(WidgetTester t, FactorySim s) async {
+  Future<void> open(WidgetTester t, FactorySim s,
+      {bool debugTools = false}) async {
     t.view.physicalSize = const Size(1600, 1000);
     t.view.devicePixelRatio = 1;
     addTearDown(t.view.reset);
-    await t.pumpWidget(MaterialApp(home: FactoryFloorScreen(sim: s)));
+    await t.pumpWidget(MaterialApp(
+        home: FactoryFloorScreen(sim: s, debugTools: debugTools)));
     await t.pump();
     c = t.state<FactoryFloorScreenState>(find.byType(FactoryFloorScreen))
         .controller;
@@ -168,13 +170,20 @@ void main() {
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
     final used = '${FactoryItems.steel.pickerLabel} · used here';
-    // The menu opens scrolled to the current pick (ore); used items lead.
-    await t.dragUntilVisible(find.text(used), find.byType(Scrollable).last,
-        const Offset(0, 300));
-    await t.pump();
-    expect(find.text(used), findsWidgets,
+    // Used items lead, under their own heading.
+    final opts = find.descendant(
+        of: find.byKey(const Key('picker-list')),
+        matching: find.byWidgetPredicate((w) =>
+            w.key is ValueKey<String> &&
+            (w.key! as ValueKey<String>).value.startsWith('picker-option-')));
+    expect((t.widget(opts.first).key! as ValueKey<String>).value,
+        'picker-option-${FactoryItems.steel.id}',
         reason: 'the packer takes steel, listed first');
-    await t.tap(find.text(used).last);
+    expect(find.text(used), findsOneWidget);
+    // The list opens scrolled to the current pick (ore), further down.
+    await t.ensureVisible(find.text(used));
+    await t.pump();
+    await t.tap(find.text(used));
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
     expect(c.itemChoice, FactoryItems.steel.id);
@@ -503,7 +512,7 @@ void main() {
     final sim = FakeFactorySim(hall([
       const Placement(id: 1, kind: EntityKind.belt, pos: TilePos(5, 5)),
     ]));
-    await open(t, sim);
+    await open(t, sim, debugTools: true);
     await click(t, const TilePos(5, 5));
     await t.sendKeyEvent(LogicalKeyboardKey.keyR); // reaches the editor
     await t.pump();

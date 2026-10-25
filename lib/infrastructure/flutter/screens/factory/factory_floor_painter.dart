@@ -93,6 +93,9 @@ const Color kArmDropColor = Color(0xFFFFB74D);
 /// The Delete tool's area preview (§10 item 9).
 const Color kDeletePreview = Color(0x80FF3030);
 
+/// The hover-delete (X held) target outline (§10 item 12).
+const Color kSweepOutline = Color(0xFFFF3B3B);
+
 /// Appends a filled arrow from [a] to [b] onto [path]: a [shaft]-wide bar
 /// to the neck, then a [headLen] × [headWidth] triangle whose point is
 /// [b]. Both are closed polygons for a FILL paint: a stroked arrow smears
@@ -437,6 +440,10 @@ class FactoryFloorPainter extends CustomPainter {
   String? deleteLabel;
   int unusedDockMarks = 0;
 
+  /// The hover-delete outline last painted (X held, §10 item 12), in tile
+  /// units; null when none was drawn.
+  Rect? sweepRect;
+
   static final Paint _bg = _fill(kFactoryBg);
   static final Paint _grid = _stroke(const Color(0xFFFFFFFF), 0);
   static final Paint _gridFill = Paint();
@@ -467,6 +474,11 @@ class FactoryFloorPainter extends CustomPainter {
   static final Paint _deleteFill = _fill(kDeletePreview);
   static final Paint _deleteEdge = _stroke(const Color(0xFFFF5050), 0.12);
   static final Paint _unusedMark = _fill(const Color(0xFFFFB300));
+
+  /// The hover-delete outline: red, as wide as the selection ring so it
+  /// reads at any zoom, and drawn through [_T] as a FILLED ring.
+  static final Paint _sweepEdge = _stroke(kSweepOutline, 0.15);
+  static final Paint _sweepFill = _fill(kSweepOutline.withValues(alpha: 0.18));
   static final Map<String, Paint> _itemPaints = {};
   static final Map<String, TextPainter> _labels = {};
 
@@ -512,6 +524,7 @@ class FactoryFloorPainter extends CustomPainter {
     _paintUnusedDocks(canvas, ix, vis);
     _paintSelection(canvas, ix);
     _paintDeletePreview(canvas);
+    _paintSweep(canvas);
     _paintGhost(canvas);
     canvas.restore();
     if (px >= kLabelMinPx) _paintLabels(canvas, ix, vis, px);
@@ -846,6 +859,32 @@ class FactoryFloorPainter extends CustomPainter {
         Rect.fromLTWH(box.x0.toDouble(), box.y0.toDouble(), box.w.toDouble(),
             box.h.toDouble()),
         _deleteEdge);
+  }
+
+  /// While X is held, a small red outline under the cursor (§10 item 12):
+  /// the "eraser" the player is sweeping with. Around the footprint of what
+  /// X would remove there, else around the hover tile itself. A solid is
+  /// removed the instant the sweep reaches it, so most of the time the ring
+  /// sits on the tile just cleared, which is exactly the feedback wanted:
+  /// X is live, and this is where it bites.
+  void _paintSweep(Canvas canvas) {
+    sweepRect = null;
+    if (!c.sweeping) return;
+    final h = c.hover;
+    if (h == null) return;
+    final p = c.sweepTarget;
+    final Rect r;
+    if (p == null) {
+      r = _tileRect(h).deflate(0.08);
+    } else {
+      final f = p.footprint;
+      r = Rect.fromLTWH(f.x0.toDouble(), f.y0.toDouble(), f.w.toDouble(),
+              f.h.toDouble())
+          .inflate(0.08);
+      _T.rect(canvas, r, _sweepFill);
+    }
+    sweepRect = r;
+    _T.rect(canvas, r, _sweepEdge);
   }
 
   /// A warning mark on every receiving dock whose item no machine here

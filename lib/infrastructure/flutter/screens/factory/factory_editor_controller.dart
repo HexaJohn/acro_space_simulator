@@ -579,14 +579,118 @@ class FactoryEditorController extends ChangeNotifier {
   /// piles stay piles (floor_edit_history.dart).
   void undo() {
     if (_pointer != null) return; // never mid-drag: the ghost is the edit
+    endSweep(); // a sweep in progress is a step: close it, then take it back
     _afterHistory(history.undo(), 'undo');
   }
 
   /// Ctrl+Y (or Ctrl+Shift+Z): re-does the last undone edit.
   void redo() {
     if (_pointer != null) return;
+    endSweep();
     _afterHistory(history.redo(), 'redo');
   }
+
+  // ---- Hover delete (X) ------------------------------------------------
+
+  /// X is held: every tile the cursor rests on or crosses has what stands
+  /// on it removed (docs/plans/factory-floors.md §10 item 12).
+  ///
+  /// Why a held key and not a tool: clearing a few belts mid-layout used to
+  /// mean Delete tool, click, click, back to Belt (or select, Del, select,
+  /// Del). The player's hand is already on the mouse; X under the other
+  /// hand removes what the cursor points at with no mode to leave. The
+  /// whole sweep, press to release, is ONE undo step ([FloorEditHistory.
+  /// beginGroup]), because that is the one thing the player did.
+  ///
+  /// Every removal is a plain `remove` through the history, so goods a
+  /// station held drop as floor piles exactly as any other delete.
+  bool sweeping = false;
+
+  /// The tile the sweep last deleted on (crossings between it and the
+  /// next hover are filled in, so a fast flick doesn't skip tiles).
+  TilePos? _sweepLast;
+
+  /// What X would remove on [t]: the solid object there; a floor marking
+  /// (aisle, staging, crane bay) only while Shift is held. That is the area
+  /// delete's rule, and for the same reason: sweeping along a belt laid on
+  /// an aisle must not eat the aisle in the gaps between belt tiles.
+  Placement? sweepTargetAt(TilePos t) {
+    final s = index.solidAt(t);
+    if (s != null) return s;
+    if (!_shift) return null;
+    return index.hit(t);
+  }
+
+  /// What a held X points at right now (the painter's red outline), or
+  /// null when X isn't held or nothing deletable is under the cursor.
+  Placement? get sweepTarget {
+    final h = hover;
+    if (!sweeping || h == null) return null;
+    return sweepTargetAt(h);
+  }
+
+  /// X pressed: opens the sweep's undo step and deletes under the cursor.
+  /// Ignored mid-drag (the drag's ghost is the edit in progress).
+  void startSweep() {
+    if (sweeping || _pointer != null) return;
+    sweeping = true;
+    history.beginGroup('Delete sweep');
+    final h = hover;
+    _sweepLast = null;
+    if (h != null) _sweepTo(h);
+    frame.value++;
+    notifyListeners();
+  }
+
+  /// X released (or the keyboard went elsewhere): closes the undo step.
+  void endSweep() {
+    if (!sweeping) return;
+    sweeping = false;
+    _sweepLast = null;
+    history.endGroup();
+    _refreshGhost();
+    frame.value++;
+    notifyListeners();
+  }
+
+  /// Deletes along the straight tile walk from the last swept tile to [t].
+  void _sweepTo(TilePos t) {
+    final from = _sweepLast;
+    final tiles = from == null ? [t] : _walk(from, t).skip(1);
+    for (final at in tiles) {
+      final p = sweepTargetAt(at);
+      if (p == null) continue;
+      final r = history.remove(p);
+      if (r.ok) {
+        if (selectedId == p.id) selectedId = null;
+        message = null;
+      } else {
+        _report(r);
+      }
+    }
+    _sweepLast = t;
+  }
+
+  /// Orthogonal steps from [a] to [b] inclusive, the longer axis first at
+  /// each step (the same walk a dragged freeform belt takes).
+  static List<TilePos> _walk(TilePos a, TilePos b) {
+    final out = [a];
+    var c = a;
+    var guard = 0;
+    while (c != b && guard++ < 4096) {
+      final dx = b.x - c.x, dy = b.y - c.y;
+      c = dx.abs() >= dy.abs()
+          ? TilePos(c.x + dx.sign, c.y)
+          : TilePos(c.x, c.y + dy.sign);
+      out.add(c);
+    }
+    return out;
+  }
+
+  /// The keyboard left the editor (a text field took it, or the window
+  /// lost focus) while X was down: its key-up will never come here, so
+  /// the sweep must not stay open swallowing later edits into its step.
+  void keyboardLost() => endSweep();
 
   // ---- Run modes -------------------------------------------------------
 
@@ -645,8 +749,22 @@ class FactoryEditorController extends ChangeNotifier {
   /// | M                | cycle the run mode (Straight, L, Freeform) |
   /// | F                | flip the L-shape's corner                  |
   /// | Shift (held)     | Straight while dragging; area delete also takes floor markings |
+  /// | X (held)         | delete what the cursor is over, along the sweep; one undo step |
   bool handleKey(KeyEvent e) {
     final k = e.logicalKey;
+    // X is a HELD key: down opens the sweep, up closes it. Handled before
+    // the Ctrl and repeat filters below so its key-up is never dropped.
+    if (k == LogicalKeyboardKey.keyX) {
+      if (e is KeyUpEvent) {
+        endSweep();
+        return true;
+      }
+      if (e is KeyRepeatEvent) return true;
+      final kb = HardwareKeyboard.instance;
+      if (kb.isControlPressed || kb.isMetaPressed) return false;
+      startSweep();
+      return true;
+    }
     // Shift changes what a drag in progress previews, pressed or released,
     // without the pointer moving. Never consumed: it is a modifier.
     if (_isShiftKey(k) && e is! KeyRepeatEvent) {
@@ -1087,6 +1205,28 @@ class FactoryEditorController extends ChangeNotifier {
     final t = localToTile(local);
     if (t == hover) return;
     hover = t;
+    if (sweeping) {
+      // The key-up can be lost (focus jumped while X was down); the
+      // keyboard's own state is the truth.
+      if (!HardwareKeyboard.instance.logicalKeysPressed
+          .contains(LogicalKeyboardKey.keyX)) {
+        endSweep();
+      } else {
+        _sweepTo(t);
+        notifyListeners();
+      }
+    }
+    _refreshGhost();
+    frame.value++;
+  }
+
+  /// The mouse left the canvas: nothing is under the cursor any more, so a
+  /// later X (pressed over a panel) must not delete the last floor tile it
+  /// happened to rest on. Kept during a drag, which still owns the tile.
+  void pointerExit() {
+    if (_pointer != null || hover == null) return;
+    hover = null;
+    _sweepLast = null;
     _refreshGhost();
     frame.value++;
   }
