@@ -410,7 +410,7 @@ and no existing file is modified.
   5. A road edit that drops a designed floor only posts a notice.
   6. Firm offers show in the flight view only while the editor overlay is open.
 
-## 10. Playtest feedback backlog (user, 2026-10-25; do not build until the user says go)
+## 10. Playtest feedback backlog (user, 2026-10-25; GO given 2026-10-25, after dynamic markets)
 
 From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dart`):
 
@@ -456,3 +456,14 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
       markets later).
     - **Toggleable:** an "Unlimited supply" sandbox switch, and the goal tracker marks runs that
       used it.
+
+**Defaults for the open questions** (2026-10-25; the user said go without picking, so these are
+the recommendations; revisit if they object):
+
+- **Clock:** the floor runs in REAL time (8 h shifts), with speeds 1/4/16/60×, skip to next shift
+  and auto-skip. In a colony, shifts map onto thirds of the colony's 120 s day until the colony
+  clock is revisited.
+- **Undo:** covers EVERY floor edit (Ctrl+Z / Ctrl+Y). It restores structure, not goods dropped as
+  piles.
+- **Docks:** a 4 m door with a 4×6 m loading area inside and the truck outside. Handlers unload
+  trucks; a dock conveyor is a paid upgrade.
