@@ -41,6 +41,13 @@
 /// has focus, so typing in its search never rotates or deletes on the
 /// floor.
 ///
+/// Keys (docs/plans/factory-floors.md §10; the table is on
+/// [FactoryEditorController.handleKey]): R / Shift+R rotate, Ctrl+Z /
+/// Ctrl+Y undo and redo every edit (also the header's arrows), M cycles the
+/// belt-and-aisle run shape (the chips under those tools), F flips an L,
+/// Shift held straightens a run or adds floor markings to an area delete.
+/// None of them fire while a text field has the keyboard ([_typing]).
+///
 /// Given a [FactoryFloorScreen.scenario], the screen also hosts the
 /// [TutorialPanel] card in the canvas area's top-left corner (again a
 /// sibling above the canvas [Listener]), trades through the scenario's
@@ -67,6 +74,7 @@ import '../../../../domain/colony/city/factory/floor_blueprint.dart';
 import '../app_theme.dart';
 import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
+import 'floor_layout_index.dart';
 import 'product_tree_panel.dart';
 import 'tutorial_panel.dart';
 
@@ -171,7 +179,20 @@ class FactoryFloorScreenState extends State<FactoryFloorScreen>
     _focus.requestFocus();
   }
 
+  /// The keyboard is in a text field somewhere under this screen (the
+  /// product tree's search, a future name box). Typing an R or a Ctrl+Z
+  /// there edits the TEXT; it must never rotate or undo on the floor. The
+  /// product tree already swallows its own keys, but this guard holds for
+  /// any field, so a new one can't reopen the bug.
+  static bool _typing() {
+    final ctx = FocusManager.instance.primaryFocus?.context;
+    if (ctx == null) return false;
+    return ctx.widget is EditableText ||
+        ctx.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
   KeyEventResult _onKey(KeyEvent e) {
+    if (_typing()) return KeyEventResult.ignored;
     // Esc closes the topmost thing first: an open panel, then the tool.
     if (treeOpen &&
         e is KeyDownEvent &&
@@ -393,20 +414,28 @@ ScenarioHintTarget? _handlerHint(HandlerKind k) => switch (k) {
 bool _isHinted(FactoryEditorController c, ScenarioHintTarget? t) =>
     t != null && c.hinted(t);
 
-String _kindLabel(EntityKind k) => switch (k) {
-      EntityKind.machine => 'Machine',
-      EntityKind.belt => 'Belt',
-      EntityKind.arm => 'Arm',
-      EntityKind.chest => 'Chest',
-      EntityKind.receivingDock => 'Receiving Dock',
-      EntityKind.shippingDock => 'Shipping Dock',
-      EntityKind.aisle => 'Aisle',
-      EntityKind.crossing => 'Crossing',
-      EntityKind.craneBay => 'Crane Bay',
-      EntityKind.rack => 'Rack',
-      EntityKind.chargingBay => 'Charging Bay',
-      EntityKind.staging => 'Staging',
-    };
+String _kindLabel(EntityKind k) => entityKindLabel(k);
+
+/// An item as the pickers name it: loose vs packed spelt out
+/// ([FactoryItem.pickerLabel]), and "· used here" when a machine on this
+/// floor takes it as an input (§10 item 6), so the right one of
+/// "Electronics" and "Electronics ×10" is the obvious pick.
+String _itemChoiceLabel(FactoryEditorController c, String id) {
+  final it = FactoryItems.byId(id);
+  final name = it?.pickerLabel ?? id;
+  return c.index.consumedItems.contains(id) ? '$name · used here' : name;
+}
+
+/// The items a picker lists: those used on this floor first (what the
+/// player most likely wants), then the rest, each group by id.
+List<String> _pickerItems(FactoryEditorController c) {
+  final used = c.index.consumedItems;
+  final ids = FactoryItems.table.keys.toList()..sort();
+  return [
+    ...ids.where(used.contains),
+    ...ids.where((i) => !used.contains(i)),
+  ];
+}
 
 String _stationLabel(StationKind s) =>
     s.name[0].toUpperCase() + s.name.substring(1);
@@ -522,6 +551,24 @@ class _TopBar extends StatelessWidget {
               ),
             ),
             IconButton(
+              key: const Key('undo'),
+              tooltip: c.history.canUndo
+                  ? 'Undo ${c.history.undoLabel!.toLowerCase()} (Ctrl+Z)'
+                  : 'Nothing to undo',
+              onPressed: c.history.canUndo ? c.undo : null,
+              icon: Icon(Icons.undo,
+                  color: c.history.canUndo ? AppTheme.text : AppTheme.textDim),
+            ),
+            IconButton(
+              key: const Key('redo'),
+              tooltip: c.history.canRedo
+                  ? 'Redo ${c.history.redoLabel!.toLowerCase()} (Ctrl+Y)'
+                  : 'Nothing to redo',
+              onPressed: c.history.canRedo ? c.redo : null,
+              icon: Icon(Icons.redo,
+                  color: c.history.canRedo ? AppTheme.text : AppTheme.textDim),
+            ),
+            IconButton(
               key: const Key('fit-hall'),
               tooltip: 'Fit hall',
               onPressed: c.fitHall,
@@ -621,6 +668,9 @@ class _Palette extends StatelessWidget {
               _recipePicker(),
             _head('TRANSPORT'),
             _kindEntry(EntityKind.belt, Icons.double_arrow),
+            if (c.tool == FactoryTool.place &&
+                (c.kind == EntityKind.belt || c.kind == EntityKind.crossing))
+              _runModes(),
             _kindEntry(EntityKind.arm, Icons.call_split),
             _kindEntry(EntityKind.chest, Icons.inventory_2_outlined),
             if (c.tool == FactoryTool.place && c.kind == EntityKind.arm)
@@ -636,6 +686,8 @@ class _Palette extends StatelessWidget {
               _itemPicker(),
             _head('FLOOR'),
             _kindEntry(EntityKind.aisle, Icons.view_stream_outlined),
+            if (c.tool == FactoryTool.place && c.kind == EntityKind.aisle)
+              _runModes(),
             _kindEntry(EntityKind.staging, Icons.crop_square),
             _kindEntry(EntityKind.craneBay, Icons.view_week_outlined),
             _kindEntry(EntityKind.rack, Icons.shelves),
@@ -643,10 +695,15 @@ class _Palette extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.fromLTRB(10, 14, 10, 0),
               child: Text(
-                  'R rotate · Del delete · Esc select\n'
+                  'R / Shift+R rotate · Del delete · Esc select\n'
+                  'Ctrl+Z undo · Ctrl+Y redo\n'
                   'Drag to lay belts, aisles, staging and crane bays.\n'
+                  'M run shape (Straight / L / Free) · F flip the L ·\n'
+                  'hold Shift for a straight run.\n'
+                  'Drag a belt over a belt to re-point it (items stay).\n'
                   'A belt across an aisle is laid as a crossing; a\n'
                   'crossing laid on a belt replaces it.\n'
+                  'Delete: drag a box; Shift also takes floor markings.\n'
                   'Middle-drag or drag empty floor to pan; wheel zooms.',
                   style: AppTheme.dim),
             ),
@@ -684,28 +741,72 @@ class _Palette extends StatelessWidget {
   }
 
   Widget _itemPicker() {
-    final ids = FactoryItems.table.keys.toList()..sort();
+    final ids = _pickerItems(c);
     final anyOk = c.kind != EntityKind.receivingDock;
     final value = c.itemChoice;
+    final shown = value != null && ids.contains(value)
+        ? value
+        : (anyOk ? null : ids.first);
+    // A receiving dock bringing in what no machine here takes: say so
+    // while the player is still choosing (§10 item 6).
+    final unused = c.kind == EntityKind.receivingDock &&
+        shown != null &&
+        !c.index.consumedItems.contains(shown);
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 10, 4),
-      child: DropdownButton<String?>(
-        key: const Key('palette-item'),
-        isExpanded: true,
-        dropdownColor: AppTheme.panelLight,
-        value: value != null && ids.contains(value)
-            ? value
-            : (anyOk ? null : ids.first),
-        style: AppTheme.body,
-        items: [
-          if (anyOk)
-            const DropdownMenuItem<String?>(value: null, child: Text('Any item')),
-          for (final id in ids)
-            DropdownMenuItem<String?>(
-                value: id, child: Text(FactoryItems.byId(id)!.label)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          DropdownButton<String?>(
+            key: const Key('palette-item'),
+            isExpanded: true,
+            dropdownColor: AppTheme.panelLight,
+            value: shown,
+            style: AppTheme.body,
+            items: [
+              if (anyOk)
+                const DropdownMenuItem<String?>(
+                    value: null, child: Text('Any item')),
+              for (final id in ids)
+                DropdownMenuItem<String?>(
+                    value: id,
+                    child: Text(_itemChoiceLabel(c, id),
+                        overflow: TextOverflow.ellipsis)),
+            ],
+            onChanged: c.setItemChoice,
+          ),
+          if (unused)
+            Text('No machine here uses this yet',
+                key: const Key('palette-item-unused'),
+                style: AppTheme.dim.copyWith(color: AppTheme.warn)),
         ],
-        onChanged: c.setItemChoice,
       ),
+    );
+  }
+
+  /// Straight / L / Freeform for belt runs and aisles (§10 item 10), shown
+  /// under the Belt, Crossing or Aisle entry while it is the tool. M cycles
+  /// them from the keyboard, F flips an L, Shift forces Straight.
+  Widget _runModes() {
+    Widget chip(RunMode m, String label, String tip) => Tooltip(
+          message: tip,
+          child: ChoiceChip(
+            key: Key('run-mode-${m.name}'),
+            visualDensity: VisualDensity.compact,
+            label: Text(label, style: const TextStyle(fontSize: 11)),
+            selected: c.runMode == m,
+            onSelected: (_) => c.setRunMode(m),
+          ),
+        );
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 10, 4),
+      child: Wrap(spacing: 4, runSpacing: 2, children: [
+        chip(RunMode.straight, 'Straight', 'One axis-locked leg (M; hold '
+            'Shift while dragging)'),
+        chip(RunMode.lShape, c.lFlip ? 'L ↕' : 'L ↔',
+            'One corner; F flips which leg comes first'),
+        chip(RunMode.freeform, 'Free', 'Follows the cursor'),
+      ]),
     );
   }
 }
@@ -770,7 +871,14 @@ class _Inspector extends StatelessWidget {
             child: Text('${_kindLabel(p.kind).toUpperCase()} #${p.id}',
                 style: AppTheme.heading),
           ),
-          if (!kSpannedKinds.contains(p.kind))
+          if (!kSpannedKinds.contains(p.kind)) ...[
+            IconButton(
+              key: const Key('inspect-rotate-ccw'),
+              tooltip: 'Rotate counter-clockwise (Shift+R)',
+              onPressed: () => c.rotateSelected(ccw: true),
+              icon: const Icon(Icons.rotate_left, color: AppTheme.text,
+                  size: 18),
+            ),
             IconButton(
               key: const Key('inspect-rotate'),
               tooltip: 'Rotate (R)',
@@ -778,6 +886,7 @@ class _Inspector extends StatelessWidget {
               icon: const Icon(Icons.rotate_right, color: AppTheme.text,
                   size: 18),
             ),
+          ],
           IconButton(
             key: const Key('inspect-delete'),
             tooltip: 'Delete (Del)',
@@ -787,8 +896,25 @@ class _Inspector extends StatelessWidget {
           ),
         ]),
         Text('at ${p.pos} facing ${p.dir.name}'
-            '${p.item == null ? '' : ' · ${FactoryItems.byId(p.item!)?.label ?? p.item}'}',
+            '${p.item == null ? '' : ' · ${FactoryItems.byId(p.item!)?.pickerLabel ?? p.item}'}',
             style: AppTheme.dim),
+        // A receiving dock whose goods nothing here consumes (§10 item 6):
+        // the playtest's crate dock beside a bench that wanted loose parts.
+        if (c.index.unusedDocks.any((d) => d.id == p.id))
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Chip(
+              key: const Key('dock-unused-warning'),
+              visualDensity: VisualDensity.compact,
+              backgroundColor: AppTheme.panelLight,
+              side: const BorderSide(color: AppTheme.warn),
+              avatar: const Icon(Icons.warning_amber,
+                  size: 16, color: AppTheme.warn),
+              label: Text('No machine on this floor uses '
+                  '${FactoryItems.byId(p.item ?? '')?.label ?? p.item}',
+                  style: AppTheme.dim.copyWith(color: AppTheme.warn)),
+            ),
+          ),
         if (p.kind == EntityKind.machine) ...[
           const SizedBox(height: 8),
           if (choices.isEmpty)
@@ -861,7 +987,7 @@ class _ArmFilter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final ids = FactoryItems.table.keys.toList()..sort();
+    final ids = _pickerItems(c);
     final cur = arm.item;
     return DropdownButton<String?>(
       key: const Key('inspect-arm-item'),
@@ -873,7 +999,9 @@ class _ArmFilter extends StatelessWidget {
         const DropdownMenuItem<String?>(value: null, child: Text('Any item')),
         for (final id in ids)
           DropdownMenuItem<String?>(
-              value: id, child: Text(FactoryItems.byId(id)!.label)),
+              value: id,
+              child: Text(_itemChoiceLabel(c, id),
+                  overflow: TextOverflow.ellipsis)),
       ],
       onChanged: (v) => c.setArmFilter(arm.id, v),
     );

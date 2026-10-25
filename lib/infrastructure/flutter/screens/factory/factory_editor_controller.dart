@@ -50,6 +50,7 @@ import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_scenario.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/factory_unlocks.dart';
+import 'floor_edit_history.dart';
 import 'floor_layout_index.dart';
 
 /// What a primary click on the floor does.
@@ -99,14 +100,39 @@ const double kHeatDecay = 0.977;
 /// aisle's width, square.
 const (int, int) kDefaultSpan = (2, 2);
 
+/// How a dragged belt (or crossing) run, or an aisle, follows the cursor
+/// (docs/plans/factory-floors.md §10 item 10).
+///
+/// Freeform grows the run tile by tile along the path the cursor actually
+/// took — great for snaking around machines, maddening for a long straight
+/// line, where a wobble of the hand puts a kink in it. So the editor also
+/// offers the two shapes nearly every run really is.
+enum RunMode {
+  /// One leg, locked to the drag's dominant axis.
+  straight,
+
+  /// Two legs with one corner; F flips which leg comes first.
+  lShape,
+
+  /// Follows the cursor's path (the original behaviour).
+  freeform,
+}
+
 /// One tile (or one piece) of the placement preview.
 class GhostPiece {
-  const GhostPiece(this.placement, this.rect, this.check, {this.replaces});
+  const GhostPiece(this.placement, this.rect, this.check,
+      {this.replaces, this.redirects});
   final Placement placement;
 
   /// A belt this piece swaps out (a crossing laid over an existing belt
   /// tile): committed as remove-then-place, restored if the place fails.
   final int? replaces;
+
+  /// An existing belt or crossing this piece RE-POINTS instead of placing
+  /// anything (a run redrawn over a run, §10 item 8): committed as
+  /// `setDir`, so the items riding on it stay on it. [placement] is that
+  /// belt as it will be (same id, kind and tile, the run's new facing).
+  final int? redirects;
 
   /// Tiles the piece would cover (for a machine with no recipe yet, the
   /// station's footprint, so the player sees the space it needs).
@@ -407,6 +433,13 @@ class FactoryEditorController extends ChangeNotifier {
 
   // ---- Edits through the sim -------------------------------------------
 
+  /// Every edit the editor makes goes through here, so each is undoable
+  /// (Ctrl+Z / Ctrl+Y) and still judged by the sim (see floor_edit_history
+  /// .dart: undo restores structure, not goods). One player action — a
+  /// dragged run, an area delete, an arm's filter change — is grouped into
+  /// one undo step.
+  late final FloorEditHistory history = FloorEditHistory(sim);
+
   void _report(EditResult r) {
     final why = r.refusal;
     message = why == null ? null : refusalText(why);
@@ -416,7 +449,7 @@ class FactoryEditorController extends ChangeNotifier {
   /// refuses for policy ([EditRefusal.notAllowed]: not unlocked), so that
   /// refusal is worded as "locked".
   void hire(HandlerKind k, int delta) {
-    final r = sim.hire(k, delta);
+    final r = history.hire(k, delta);
     if (delta > 0 && r.refusal == EditRefusal.notAllowed) {
       message = '${kHandlerSpecs[k]!.label} is locked: '
           'not unlocked by this colony yet';
@@ -427,7 +460,10 @@ class FactoryEditorController extends ChangeNotifier {
   }
 
   void setMachineRecipe(int id, String recipe) {
-    _report(sim.setRecipe(id, recipe));
+    final p = index.byId(id);
+    _report(p == null
+        ? const EditResult.refused(EditRefusal.noSuchPlacement)
+        : history.setRecipe(p, recipe));
     frame.value++;
     notifyListeners();
   }
@@ -436,7 +472,7 @@ class FactoryEditorController extends ChangeNotifier {
   /// has no setItem, so this is an edit like any other: the arm is removed
   /// and placed again with the filter (same tile, same facing), and put
   /// back as it was if the new one is refused. The selection follows the
-  /// re-placed arm's new id.
+  /// re-placed arm's new id. One undo step either way.
   void setArmFilter(int id, String? item) {
     final old = index.byId(id);
     if (old == null || old.kind != EntityKind.arm) {
@@ -445,30 +481,34 @@ class FactoryEditorController extends ChangeNotifier {
       return;
     }
     if (old.item == item) return;
-    final gone = sim.remove(id);
-    if (!gone.ok) {
-      _report(gone);
-      notifyListeners();
-      return;
-    }
-    final next = Placement(id: 0, kind: EntityKind.arm, pos: old.pos,
-        dir: old.dir, item: item);
-    final r = sim.place(next);
-    if (r.ok) {
-      _report(r);
-      if (selectedId == id) selectedId = r.placementId;
-    } else {
-      final back = sim.place(Placement(id: 0, kind: EntityKind.arm,
-          pos: old.pos, dir: old.dir, item: old.item));
-      if (selectedId == id) selectedId = back.placementId;
-      _report(r);
-    }
+    history.group('Arm filter', () {
+      final gone = history.remove(old);
+      if (!gone.ok) {
+        _report(gone);
+        return;
+      }
+      final next = Placement(id: 0, kind: EntityKind.arm, pos: old.pos,
+          dir: old.dir, item: item);
+      final r = history.place(next);
+      if (r.ok) {
+        _report(r);
+        if (selectedId == id) selectedId = r.placementId;
+      } else {
+        final back = history.place(Placement(id: 0, kind: EntityKind.arm,
+            pos: old.pos, dir: old.dir, item: old.item));
+        if (selectedId == id) selectedId = back.placementId;
+        _report(r);
+      }
+    });
     frame.value++;
     notifyListeners();
   }
 
   void setMachineMode(int id, MachineMode mode) {
-    final r = sim.setMode(id, mode);
+    final p = index.byId(id);
+    final r = p == null
+        ? const EditResult.refused(EditRefusal.noSuchPlacement)
+        : history.setMode(p, mode);
     if (r.refusal == EditRefusal.notAllowed) {
       message = '${mode.name[0].toUpperCase()}${mode.name.substring(1)} '
           'stations are locked: not unlocked by this colony yet';
@@ -479,10 +519,14 @@ class FactoryEditorController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void rotateSelected() {
+  /// Turns the selected object clockwise, or counter-clockwise with [ccw].
+  void rotateSelected({bool ccw = false}) {
     final id = selectedId;
     if (id == null) return;
-    _report(sim.rotate(id));
+    final p = index.byId(id);
+    _report(p == null
+        ? const EditResult.refused(EditRefusal.noSuchPlacement)
+        : history.rotate(p, ccw: ccw));
     frame.value++;
     notifyListeners();
   }
@@ -490,29 +534,151 @@ class FactoryEditorController extends ChangeNotifier {
   void removeSelected() {
     final id = selectedId;
     if (id == null) return;
-    _report(sim.remove(id));
+    final p = index.byId(id);
+    _report(p == null
+        ? const EditResult.refused(EditRefusal.noSuchPlacement)
+        : history.remove(p));
     selectedId = null;
     frame.value++;
     notifyListeners();
   }
 
-  /// R: turns the ghost while placing, else the selected object.
-  void rotate() {
+  /// R: turns the ghost while placing, else the selected object; [ccw]
+  /// (Shift+R) turns the other way (§10 item 7).
+  void rotate({bool ccw = false}) {
     if (tool == FactoryTool.place) {
-      ghostDir = ghostDir.turnCw;
+      ghostDir = ccw ? ghostDir.turnCcw : ghostDir.turnCw;
       _refreshGhost();
       frame.value++;
       notifyListeners();
     } else {
-      rotateSelected();
+      rotateSelected(ccw: ccw);
     }
   }
 
+  /// After an undo or redo: the selection may name something that is gone
+  /// (an undone placement) and every cached verdict is stale.
+  void _afterHistory(HistoryOutcome? o, String verb) {
+    if (o == null) {
+      message = 'Nothing to $verb';
+    } else if (o.ok) {
+      message = null;
+    } else {
+      message = "Couldn't fully $verb ${o.label.toLowerCase()}: "
+          'the floor refused ${o.failed} step${o.failed == 1 ? '' : 's'}';
+    }
+    final id = selectedId;
+    if (id != null && index.byId(id) == null) selectedId = null;
+    _refreshGhost();
+    _refreshDelete();
+    frame.value++;
+    notifyListeners();
+  }
+
+  /// Ctrl+Z: takes back the last edit's STRUCTURE. Goods it set down as
+  /// piles stay piles (floor_edit_history.dart).
+  void undo() {
+    if (_pointer != null) return; // never mid-drag: the ghost is the edit
+    _afterHistory(history.undo(), 'undo');
+  }
+
+  /// Ctrl+Y (or Ctrl+Shift+Z): re-does the last undone edit.
+  void redo() {
+    if (_pointer != null) return;
+    _afterHistory(history.redo(), 'redo');
+  }
+
+  // ---- Run modes -------------------------------------------------------
+
+  /// How belt runs and aisles follow a drag (§10 item 10).
+  RunMode runMode = RunMode.freeform;
+
+  /// L-shape: false = along the drag's x first, then y; true = y first.
+  bool lFlip = false;
+
+  void setRunMode(RunMode m) {
+    if (m == runMode) return;
+    runMode = m;
+    _onRunShapeChanged();
+  }
+
+  /// M cycles Straight → L-shape → Freeform.
+  void cycleRunMode() =>
+      setRunMode(RunMode.values[(runMode.index + 1) % RunMode.values.length]);
+
+  /// F flips which leg of an L comes first.
+  void flipL() {
+    lFlip = !lFlip;
+    _onRunShapeChanged();
+  }
+
+  void _onRunShapeChanged() {
+    _updateRun();
+    _refreshGhost();
+    frame.value++;
+    notifyListeners();
+  }
+
+  /// Shift is down (forces Straight while dragging a run; adds floor
+  /// markings to an area delete).
+  bool get _shift => HardwareKeyboard.instance.isShiftPressed;
+
+  /// The run shape in force right now: Shift held mid-drag forces
+  /// Straight whatever the toggle says.
+  RunMode get effectiveRunMode =>
+      _placing && _shift ? RunMode.straight : runMode;
+
+  static bool _isShiftKey(LogicalKeyboardKey k) =>
+      k == LogicalKeyboardKey.shiftLeft ||
+      k == LogicalKeyboardKey.shiftRight ||
+      k == LogicalKeyboardKey.shift;
+
+  /// The editor's keys:
+  ///
+  /// | key              | does                                       |
+  /// |------------------|--------------------------------------------|
+  /// | R / Shift+R      | rotate ghost or selection cw / ccw         |
+  /// | Del, Backspace   | delete the selection                       |
+  /// | Esc              | back to Select                             |
+  /// | Ctrl+Z           | undo                                       |
+  /// | Ctrl+Y, Ctrl+Shift+Z | redo                                   |
+  /// | M                | cycle the run mode (Straight, L, Freeform) |
+  /// | F                | flip the L-shape's corner                  |
+  /// | Shift (held)     | Straight while dragging; area delete also takes floor markings |
   bool handleKey(KeyEvent e) {
-    if (e is! KeyDownEvent) return false;
     final k = e.logicalKey;
+    // Shift changes what a drag in progress previews, pressed or released,
+    // without the pointer moving. Never consumed: it is a modifier.
+    if (_isShiftKey(k) && e is! KeyRepeatEvent) {
+      _updateRun();
+      _refreshGhost();
+      _refreshDelete();
+      frame.value++;
+      return false;
+    }
+    if (e is! KeyDownEvent && e is! KeyRepeatEvent) return false;
+    final kb = HardwareKeyboard.instance;
+    final ctrl = kb.isControlPressed || kb.isMetaPressed;
+    if (ctrl && k == LogicalKeyboardKey.keyZ) {
+      kb.isShiftPressed ? redo() : undo();
+      return true;
+    }
+    if (ctrl && k == LogicalKeyboardKey.keyY) {
+      redo();
+      return true;
+    }
+    if (ctrl) return false;
+    if (e is KeyRepeatEvent) return false;
     if (k == LogicalKeyboardKey.keyR) {
-      rotate();
+      rotate(ccw: kb.isShiftPressed);
+      return true;
+    }
+    if (k == LogicalKeyboardKey.keyM) {
+      cycleRunMode();
+      return true;
+    }
+    if (k == LogicalKeyboardKey.keyF) {
+      flipL();
       return true;
     }
     if (k == LogicalKeyboardKey.delete || k == LogicalKeyboardKey.backspace) {
@@ -531,8 +697,14 @@ class FactoryEditorController extends ChangeNotifier {
   TilePos? hover;
   List<GhostPiece> ghost = const [];
 
-  /// Tiles of a belt (or crossing) run being dragged, in order.
+  /// Tiles of a belt (or crossing) run being dragged, in order, in the
+  /// shape [effectiveRunMode] gives it (rebuilt by [_updateRun]).
   final List<TilePos> beltPath = [];
+
+  /// The tiles the cursor actually crossed: Freeform's run, and the start
+  /// tile every other shape is drawn from. Kept even while Shift forces
+  /// Straight, so letting go of Shift gives the freehand path back.
+  final List<TilePos> _freePath = [];
   TilePos? _rectStart;
 
   /// True once a spanned-kind drag has left its start tile; until then the
@@ -541,6 +713,9 @@ class FactoryEditorController extends ChangeNotifier {
 
   /// Kinds laid by dragging a directed run.
   static bool _isRunKind(EntityKind? k) =>
+      k == EntityKind.belt || k == EntityKind.crossing;
+
+  static bool _isBeltLike(EntityKind k) =>
       k == EntityKind.belt || k == EntityKind.crossing;
 
   /// Is [t] on a walkway (an aisle marking)? A belt run laid across one
@@ -602,14 +777,26 @@ class FactoryEditorController extends ChangeNotifier {
       final p = Placement(id: 0, kind: k, pos: t, span: kDefaultSpan);
       return GhostPiece(p, p.footprint, _check(p));
     }
+    final under = index.solidAt(t);
+    final claimed = pending?.contains(t.key) ?? false;
+    if (_isBeltLike(k) &&
+        under != null &&
+        _isBeltLike(under.kind) &&
+        !claimed &&
+        !(k == EntityKind.crossing && under.kind == EntityKind.belt)) {
+      // A run redrawn over a run (§10 item 8): the belt (or crossing —
+      // its walkway stays) already there takes the new direction. Nothing
+      // is placed, so the items riding on it stay on it. A crossing laid
+      // on a plain belt still swaps it, below.
+      final p = under.copyWith(dir: dir);
+      return GhostPiece(p, p.footprint, EditResult.ok(under.id),
+          redirects: under.id);
+    }
     if (k == EntityKind.crossing) {
       // A crossing is a walkable belt tile: laid over an existing belt it
       // takes that belt's place and keeps its direction, so the line still
       // flows and walkers gain a way over it.
-      final under = index.solidAt(t);
-      if (under != null &&
-          under.kind == EntityKind.belt &&
-          !(pending?.contains(t.key) ?? false)) {
+      if (under != null && under.kind == EntityKind.belt && !claimed) {
         final p = Placement(id: 0, kind: k, pos: t, dir: under.dir);
         // The sim's only objection may be the belt it replaces.
         final r = _simCheck(p);
@@ -667,6 +854,18 @@ class FactoryEditorController extends ChangeNotifier {
     }
     final rs = _rectStart;
     if (kSpannedKinds.contains(k) && rs != null && h != null && _rectMoved) {
+      final m = effectiveRunMode;
+      if (k == EntityKind.aisle && m != RunMode.freeform) {
+        ghost = [
+          for (final r in aisleStrips(rs, h, m, flip: lFlip))
+            () {
+              final p = Placement(id: 0, kind: k, pos: TilePos(r.x0, r.y0),
+                  span: (r.w, r.h));
+              return GhostPiece(p, p.footprint, _check(p));
+            }(),
+        ];
+        return;
+      }
       final x0 = math.min(rs.x, h.x), y0 = math.min(rs.y, h.y);
       final w = (rs.x - h.x).abs() + 1, hh = (rs.y - h.y).abs() + 1;
       final p = Placement(id: 0, kind: k, pos: TilePos(x0, y0), span: (w, hh));
@@ -695,23 +894,172 @@ class FactoryEditorController extends ChangeNotifier {
     return fallback;
   }
 
-  /// Grows the dragged run to [t], one orthogonal step at a time (the
+  /// The tiles of a run from [a] to [b] in [mode]'s shape: Straight locks
+  /// to the drag's dominant axis (a tie goes along x), L-shape turns one
+  /// corner — x first, or y first with [flip]. Freeform has no shape of its
+  /// own (it is the cursor's path), so it is answered as Straight here.
+  static List<TilePos> runPath(TilePos a, TilePos b, RunMode mode,
+      {bool flip = false}) {
+    if (mode == RunMode.lShape) {
+      final corner = flip ? TilePos(a.x, b.y) : TilePos(b.x, a.y);
+      return [..._line(a, corner), ..._line(corner, b).skip(1)];
+    }
+    final alongX = (b.x - a.x).abs() >= (b.y - a.y).abs();
+    return _line(a, alongX ? TilePos(b.x, a.y) : TilePos(a.x, b.y));
+  }
+
+  /// Every tile from [a] to [b] inclusive; the two share a row or column.
+  static List<TilePos> _line(TilePos a, TilePos b) {
+    final dx = (b.x - a.x).sign, dy = (b.y - a.y).sign;
+    final out = [a];
+    var t = a;
+    while (t != b) {
+      t = TilePos(t.x + dx, t.y + dy);
+      out.add(t);
+    }
+    return out;
+  }
+
+  /// The aisle strips a Straight or L drag from [a] to [b] lays: each leg
+  /// is [width] tiles wide (an aisle is laid as wide as a click lays one),
+  /// anchored on the run's tiles the way a click's square is, and the
+  /// second leg of an L stops where the first one's corner square begins,
+  /// so no tile is paid for twice.
+  static List<TileRect> aisleStrips(TilePos a, TilePos b, RunMode mode,
+      {bool flip = false, int width = 2}) {
+    TileRect leg(TilePos p, TilePos q) => TileRect(
+        math.min(p.x, q.x),
+        math.min(p.y, q.y),
+        (p.x - q.x).abs() + width,
+        (p.y - q.y).abs() + width);
+    if (mode != RunMode.lShape) {
+      final path = runPath(a, b, RunMode.straight);
+      return [leg(path.first, path.last)];
+    }
+    final corner = flip ? TilePos(a.x, b.y) : TilePos(b.x, a.y);
+    final first = leg(a, corner);
+    if (corner == b) return [first];
+    final second = _minus(leg(corner, b), first);
+    return [first, ?second];
+  }
+
+  /// [r] (a strip crossing [cut] at one end) without its part inside
+  /// [cut]; null when nothing is left.
+  static TileRect? _minus(TileRect r, TileRect cut) {
+    if (!r.overlaps(cut)) return r;
+    if (cut.x0 <= r.x0 && cut.x1 >= r.x1) {
+      if (cut.y0 <= r.y0) {
+        final y0 = cut.y1;
+        return y0 < r.y1 ? TileRect(r.x0, y0, r.w, r.y1 - y0) : null;
+      }
+      return TileRect(r.x0, r.y0, r.w, cut.y0 - r.y0);
+    }
+    if (cut.y0 <= r.y0 && cut.y1 >= r.y1) {
+      if (cut.x0 <= r.x0) {
+        final x0 = cut.x1;
+        return x0 < r.x1 ? TileRect(x0, r.y0, r.x1 - x0, r.h) : null;
+      }
+      return TileRect(r.x0, r.y0, cut.x0 - r.x0, r.h);
+    }
+    return r;
+  }
+
+  /// Grows the cursor's path to [t], one orthogonal step at a time (the
   /// longer axis first), cutting back when the drag doubles back on itself.
   void _extendBelt(TilePos t) {
     var guard = 0;
-    while (beltPath.last != t && guard++ < 4096) {
-      final last = beltPath.last;
+    while (_freePath.last != t && guard++ < 4096) {
+      final last = _freePath.last;
       final dx = t.x - last.x, dy = t.y - last.y;
       final next = dx.abs() >= dy.abs()
           ? TilePos(last.x + dx.sign, last.y)
           : TilePos(last.x, last.y + dy.sign);
-      final at = beltPath.indexOf(next);
+      final at = _freePath.indexOf(next);
       if (at >= 0) {
-        beltPath.removeRange(at + 1, beltPath.length);
+        _freePath.removeRange(at + 1, _freePath.length);
       } else {
-        beltPath.add(next);
+        _freePath.add(next);
       }
     }
+  }
+
+  /// Re-derives [beltPath] from the cursor's path and the run shape in
+  /// force (the shape, Shift, F or the cursor may have changed).
+  void _updateRun() {
+    final h = hover;
+    if (_freePath.isEmpty) {
+      beltPath.clear();
+      return;
+    }
+    final m = effectiveRunMode;
+    final next = m == RunMode.freeform || h == null
+        ? [..._freePath]
+        : runPath(_freePath.first, h, m, flip: lFlip);
+    beltPath
+      ..clear()
+      ..addAll(next);
+  }
+
+  // ---- Area delete -----------------------------------------------------
+
+  TilePos? _delStart;
+  bool _delMoved = false;
+
+  /// The Delete tool's dragged rectangle (null: no area drag), and what
+  /// releasing it would delete — the red preview (§10 item 9). Solids
+  /// whose footprint touches the rectangle; floor markings too only while
+  /// Shift is held, so sweeping a line off an aisle keeps the aisle.
+  TileRect? deleteRect;
+  List<Placement> deleteTargets = const [];
+
+  void _refreshDelete() {
+    final s = _delStart, h = hover;
+    if (tool != FactoryTool.delete || s == null || h == null || !_delMoved) {
+      deleteRect = null;
+      deleteTargets = const [];
+      return;
+    }
+    final r = TileRect(math.min(s.x, h.x), math.min(s.y, h.y),
+        (s.x - h.x).abs() + 1, (s.y - h.y).abs() + 1);
+    deleteRect = r;
+    deleteTargets = index.overlapping(r, markings: _shift);
+  }
+
+  /// The preview's counts, most numerous first: "3 Belt · 1 Arm".
+  String get deleteSummary {
+    final n = <EntityKind, int>{};
+    for (final p in deleteTargets) {
+      n[p.kind] = (n[p.kind] ?? 0) + 1;
+    }
+    if (n.isEmpty) return 'Nothing to delete';
+    final ks = n.keys.toList()
+      ..sort((a, b) {
+        final c = n[b]!.compareTo(n[a]!);
+        return c != 0 ? c : a.index.compareTo(b.index);
+      });
+    return 'Delete ${ks.map((k) => '${n[k]} ${entityKindLabel(k)}').join(' · ')}';
+  }
+
+  /// Deletes every previewed target as ONE undo step. Each goes through
+  /// `remove`, so what a station held is set down as a floor pile exactly
+  /// as a single delete does.
+  void _commitDelete() {
+    final targets = deleteTargets;
+    var kept = 0;
+    EditRefusal? why;
+    history.group('Delete area', () {
+      for (final p in targets) {
+        final r = history.remove(p);
+        if (r.ok) {
+          if (selectedId == p.id) selectedId = null;
+        } else {
+          kept++;
+          why ??= r.refusal;
+        }
+      }
+    });
+    final w = why;
+    message = w == null ? null : '${refusalText(w)} ($kept kept)';
   }
 
   // ---- Pointer ---------------------------------------------------------
@@ -726,8 +1074,13 @@ class FactoryEditorController extends ChangeNotifier {
     _panning = false;
     _placing = false;
     beltPath.clear();
+    _freePath.clear();
     _rectStart = null;
     _rectMoved = false;
+    _delStart = null;
+    _delMoved = false;
+    deleteRect = null;
+    deleteTargets = const [];
   }
 
   void pointerHover(Offset local) {
@@ -765,20 +1118,17 @@ class FactoryEditorController extends ChangeNotifier {
         }
         notifyListeners();
       case FactoryTool.delete:
-        final hit = index.hit(t);
-        if (hit == null) {
-          message = refusalText(EditRefusal.noSuchPlacement);
-        } else {
-          _report(sim.remove(hit.id));
-          if (selectedId == hit.id) selectedId = null;
-        }
-        notifyListeners();
+        // A click deletes what it lands on, a drag the rectangle: which one
+        // is known only on release.
+        _delStart = t;
+        _delMoved = false;
       case FactoryTool.place:
         _placing = true;
         if (_isRunKind(kind)) {
-          beltPath
+          _freePath
             ..clear()
             ..add(t);
+          _updateRun();
         } else if (kind != null && kSpannedKinds.contains(kind)) {
           _rectStart = t;
           _rectMoved = false;
@@ -802,25 +1152,47 @@ class FactoryEditorController extends ChangeNotifier {
     final t = localToTile(local);
     if (t == hover) return;
     hover = t;
-    if (_placing && _isRunKind(kind) && beltPath.isNotEmpty) {
+    if (_placing && _isRunKind(kind) && _freePath.isNotEmpty) {
       _extendBelt(t);
+      _updateRun();
     }
     if (_placing && _rectStart != null && t != _rectStart) _rectMoved = true;
+    if (_delStart != null && t != _delStart) _delMoved = true;
     _refreshGhost();
+    _refreshDelete();
     frame.value++;
   }
 
   void pointerUp(int pointer, Offset local) {
     if (pointer != _pointer) return;
+    final t = localToTile(local);
     if (_placing) {
-      final t = localToTile(local);
       hover = t;
-      if (_isRunKind(kind) && beltPath.isNotEmpty) {
+      if (_isRunKind(kind) && _freePath.isNotEmpty) {
         _extendBelt(t);
+        _updateRun();
       }
       if (_rectStart != null && t != _rectStart) _rectMoved = true;
       _refreshGhost();
       _commitGhost();
+    }
+    final ds = _delStart;
+    if (ds != null) {
+      hover = t;
+      if (t != ds) _delMoved = true;
+      if (_delMoved) {
+        _refreshDelete();
+        _commitDelete();
+      } else {
+        final hit = index.hit(ds);
+        if (hit == null) {
+          message = refusalText(EditRefusal.noSuchPlacement);
+        } else {
+          _report(history.remove(hit));
+          if (selectedId == hit.id) selectedId = null;
+        }
+      }
+      notifyListeners();
     }
     _cancelDrag();
     _refreshGhost();
@@ -837,37 +1209,55 @@ class FactoryEditorController extends ChangeNotifier {
   void scroll(Offset local, double dy) =>
       zoomAt(local, math.exp(-dy / kWheelZoomScale));
 
-  /// Places every valid piece of the ghost; refused pieces are reported,
-  /// never sent (the preview already said no).
+  /// Places every valid piece of the ghost as ONE undo step; refused pieces
+  /// are reported, never sent (the preview already said no). A piece over
+  /// an existing belt is a `setDir` on it, not a placement (§10 item 8).
   void _commitGhost() {
     var placed = 0, refused = 0;
     EditRefusal? why;
-    for (final g in ghost) {
-      if (!g.check.ok) {
-        refused++;
-        why ??= g.check.refusal;
-        continue;
-      }
-      final swap = g.replaces;
-      final old = swap == null ? null : index.byId(swap);
-      if (swap != null) {
-        final gone = sim.remove(swap);
-        if (!gone.ok) {
+    final k = kind;
+    history.group(k == null ? 'Place' : 'Place ${entityKindLabel(k)}', () {
+      for (final g in ghost) {
+        if (!g.check.ok) {
           refused++;
-          why ??= gone.refusal;
+          why ??= g.check.refusal;
           continue;
         }
-        if (selectedId == swap) selectedId = null;
+        final re = g.redirects;
+        if (re != null) {
+          final cur = index.byId(re);
+          final r = cur == null
+              ? const EditResult.refused(EditRefusal.noSuchPlacement)
+              : history.setDir(cur, g.placement.dir);
+          if (r.ok) {
+            placed++;
+          } else {
+            refused++;
+            why ??= r.refusal;
+          }
+          continue;
+        }
+        final swap = g.replaces;
+        final old = swap == null ? null : index.byId(swap);
+        if (old != null) {
+          final gone = history.remove(old);
+          if (!gone.ok) {
+            refused++;
+            why ??= gone.refusal;
+            continue;
+          }
+          if (selectedId == old.id) selectedId = null;
+        }
+        final r = history.place(g.placement);
+        if (r.ok) {
+          placed++;
+        } else {
+          if (old != null) history.place(old.copyWith(id: 0));
+          refused++;
+          why ??= r.refusal;
+        }
       }
-      final r = sim.place(g.placement);
-      if (r.ok) {
-        placed++;
-      } else {
-        if (old != null) sim.place(old.copyWith(id: 0));
-        refused++;
-        why ??= r.refusal;
-      }
-    }
+    });
     final w = why;
     message = w == null
         ? null

@@ -44,6 +44,28 @@ class FactoryItem {
   final double commodityUnits;
 
   bool get isCrate => commodityUnits > 1;
+
+  /// The name an item picker shows, making loose vs packed obvious
+  /// (docs/plans/factory-floors.md §10 item 6): "Electronics (loose ·
+  /// hand)" next to "Electronics ×10 (crate · pallet)".
+  ///
+  /// The playtest found "Electronics" and "Electronics Crate" side by side
+  /// read as the same thing, and a dock set to the crate fed a bench that
+  /// wanted loose boards. So the name is DERIVED from what actually differs
+  /// — [commodityUnits] and [loadClass] — never hand-written per item, and
+  /// a pack is named after the loose good it holds (its [commodity]'s own
+  /// label) with the pack word taken from its id prefix ("crate:",
+  /// "tote:", "pack:").
+  String get pickerLabel {
+    final lc = loadClass.name;
+    if (!isCrate) return '$label (loose · $lc)';
+    final base = FactoryItems.byId(commodity)?.label ?? label;
+    final cut = id.indexOf(':');
+    final pack = cut > 0 ? id.substring(0, cut) : 'pack';
+    final u = commodityUnits;
+    final n = u == u.roundToDouble() ? u.toInt().toString() : u.toString();
+    return '$base ×$n ($pack · $lc)';
+  }
 }
 
 /// The item table. Provisional entries for the Steel Mill chain (phase 1);

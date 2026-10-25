@@ -2355,9 +2355,11 @@ class FactoryFloor implements FactorySim {
   }
 
   @override
-  EditResult place(Placement p) {
+  EditResult place(Placement p, {bool restore = false}) {
     final q = p.copyWith(id: _bp.nextId);
-    final bad = _placeRefusal(q);
+    // An undo putting back what the floor had skips only the unlock gate
+    // (see FactoryFloorEditor): the layout rules still judge it.
+    final bad = restore ? _check(q) : _placeRefusal(q);
     if (bad != null) return bad;
     _bp.placements.add(q);
     _initState(q);
@@ -2382,10 +2384,22 @@ class FactoryFloor implements FactorySim {
   }
 
   @override
-  EditResult rotate(int placementId) {
+  EditResult rotate(int placementId, {bool ccw = false}) {
     final p = _byId[placementId];
     if (p == null) return const EditResult.refused(EditRefusal.noSuchPlacement);
-    final q = p.copyWith(dir: p.dir.turnCw);
+    return setDir(placementId, ccw ? p.dir.turnCcw : p.dir.turnCw);
+  }
+
+  /// Re-points a placement in place. Its runtime state is keyed by id and
+  /// untouched, so a belt keeps the items riding on it (they carry on in
+  /// the new direction) and an arm keeps the load in its hand: nothing is
+  /// evicted, so the floor's conservation holds by construction.
+  @override
+  EditResult setDir(int placementId, Dir4 dir) {
+    final p = _byId[placementId];
+    if (p == null) return const EditResult.refused(EditRefusal.noSuchPlacement);
+    if (p.dir == dir) return EditResult.ok(p.id);
+    final q = p.copyWith(dir: dir);
     final bad = _check(q, ignoreId: p.id);
     if (bad != null) return bad;
     _replace(q);
@@ -2419,13 +2433,14 @@ class FactoryFloor implements FactorySim {
   }
 
   @override
-  EditResult setMode(int placementId, MachineMode mode) {
+  EditResult setMode(int placementId, MachineMode mode,
+      {bool restore = false}) {
     final p = _byId[placementId];
     if (p == null) return const EditResult.refused(EditRefusal.noSuchPlacement);
     if (p.kind != EntityKind.machine) {
       return const EditResult.refused(EditRefusal.wrongKind);
     }
-    if (!unlocks.allowsMode(mode)) {
+    if (!restore && !unlocks.allowsMode(mode)) {
       return const EditResult.refused(EditRefusal.notAllowed);
     }
     _replace(p.copyWith(mode: mode));
@@ -2434,12 +2449,13 @@ class FactoryFloor implements FactorySim {
   }
 
   @override
-  EditResult hire(HandlerKind kind, int delta) {
+  EditResult hire(HandlerKind kind, int delta, {bool restore = false}) {
     if (!kSimulatedHandlerKinds.contains(kind)) {
       return const EditResult.refused(EditRefusal.notAllowed);
     }
-    // Buying needs the unlock; letting go never does.
-    if (delta > 0 && !unlocks.allowsHandler(kind)) {
+    // Buying needs the unlock; letting go never does, nor does an undo
+    // re-hiring the crew the floor just had.
+    if (delta > 0 && !restore && !unlocks.allowsHandler(kind)) {
       return const EditResult.refused(EditRefusal.notAllowed);
     }
     final have = _bp.roster[kind] ?? 0;

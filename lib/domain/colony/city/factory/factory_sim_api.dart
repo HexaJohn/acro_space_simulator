@@ -216,21 +216,52 @@ abstract interface class FactoryFloorView {
   double get powerDemandKw;
 }
 
+/// The `restore` flag on [FactoryFloorEditor.place], [FactoryFloorEditor
+/// .setMode] and [FactoryFloorEditor.hire] is for the editor's UNDO / REDO
+/// only (§10 item 9). The colony's unlocks gate new PURCHASES; putting back
+/// what the floor already had is not one. Without it, a young colony that
+/// area-deleted part of a template floor (assisted stations, a pallet jack
+/// it can't buy yet) could never undo the delete: the floor would refuse
+/// to re-place what it had just removed. With it the unlock gate is
+/// skipped and every LAYOUT rule (hall, overlap, recipe, spans) still
+/// holds. It can't be used to move locked kit: undo is linear, so a restore
+/// only ever puts a thing back exactly as it stood, and the colony's capex
+/// settles on the blueprint diff at close either way. All three default to
+/// false, so every caller written before them is unchanged.
 abstract interface class FactoryFloorEditor {
-  /// Adds [p] (its id is ignored; the floor assigns one).
-  EditResult place(Placement p);
+  /// Adds [p] (its id is ignored; the floor assigns one). [restore]: see
+  /// the note above.
+  EditResult place(Placement p, {bool restore = false});
 
   /// What [place] would answer for [p] — the same rules, the id it would
   /// get — without changing anything ([FactoryFloorView.layoutRev] stays
   /// put). The editor's ghost preview.
   EditResult check(Placement p);
   EditResult remove(int placementId);
-  EditResult rotate(int placementId);
-  EditResult setRecipe(int placementId, String recipeId);
-  EditResult setMode(int placementId, MachineMode mode);
 
-  /// Hires ([delta] > 0) or lets go of handlers of [kind].
-  EditResult hire(HandlerKind kind, int delta);
+  /// Turns [placementId] a quarter turn: clockwise, or counter-clockwise
+  /// with [ccw] (the editor's Shift+R). Additive: [ccw] defaults to the
+  /// original clockwise turn, so every caller written before it is
+  /// unchanged. Runtime state (belt items, buffers, a held load) is kept.
+  EditResult rotate(int placementId, {bool ccw = false});
+
+  /// Points [placementId] along [dir], keeping everything it holds.
+  ///
+  /// The editor's "redraw a belt over a belt" (§10 item 8): re-laying a run
+  /// across existing belt tiles must retarget them, and doing that as
+  /// remove + place would spill the items riding on them as floor piles
+  /// (and hand them new ids). Same rules as [rotate] — refused when the
+  /// turned footprint would overlap or leave the hall — and a no-op that
+  /// leaves `layoutRev` alone when it already faces [dir].
+  EditResult setDir(int placementId, Dir4 dir);
+  EditResult setRecipe(int placementId, String recipeId);
+
+  /// Sets a machine's crew mode. [restore]: see the note above.
+  EditResult setMode(int placementId, MachineMode mode, {bool restore = false});
+
+  /// Hires ([delta] > 0) or lets go of handlers of [kind]. [restore]: see
+  /// the note above.
+  EditResult hire(HandlerKind kind, int delta, {bool restore = false});
 }
 
 abstract interface class FactorySim

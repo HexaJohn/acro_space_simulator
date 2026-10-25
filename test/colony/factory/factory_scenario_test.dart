@@ -120,16 +120,21 @@ void main() {
     place(EntityKind.arm, 7, 3, dir: Dir4.north);
     runUntil(() => stepId() != 'feed', limit: 10, what: 'the cell fed');
 
-    // f. Ship: a dock alone ships nothing (frames are pallet loads and
-    // nobody can lift them); a hired pallet jack does.
+    // f. Ship, as the step now spells it out: an arm on the cell's far side
+    // pointing away from it, a belt from its drop tile, a shipping dock at
+    // the belt's end. A dock alone ships nothing (frames are pallet loads
+    // and nobody on the floor can lift them); the arm-and-belt line does,
+    // with no handler hired at all.
     expect(stepId(), 'ship');
-    place(EntityKind.shippingDock, 24, 0, dir: Dir4.north);
+    place(EntityKind.shippingDock, 22, 8);
     runFor(90);
-    expect(stepId(), 'ship', reason: 'no handler can lift a frame');
-    expect(f.pendingRequests, greaterThan(0),
-        reason: 'the frames wait as an unserved request');
-    f.hire(HandlerKind.palletJack, 1);
-    runUntil(() => stepId() != 'ship', limit: 300, what: 'a frame shipped');
+    expect(stepId(), 'ship', reason: 'nothing carries a frame to the dock');
+    place(EntityKind.arm, 7, 7, dir: Dir4.north); // cell (7, 6) -> (7, 8)
+    runFor(20);
+    expect(stepId(), 'ship', reason: 'the arm has nowhere to drop yet');
+    belt(7, 21, 8, Dir4.east); // drop tile -> the dock at (22, 8)
+    runUntil(() => stepId() != 'ship', limit: 120, what: 'a frame shipped');
+    expect(f.handlers, isEmpty, reason: 'no handler was needed');
 
     // g. Second line: an electronics dock pointed straight into a wiring
     // bench (dock on the north wall facing south into the bench's top row).
@@ -143,11 +148,13 @@ void main() {
     f.hire(HandlerKind.onFoot, 2);
     runUntil(() => stepId() != 'secondLine', limit: 10, what: 'bench fed');
 
-    // h. Assemble: a bay fed by the jack (frames) and the walkers
-    // (harnesses); rocket parts are HEAVY, so an arm lifts them out into a
-    // shipping dock.
+    // h. Assemble: a bay one tile off the frame belt, an arm in the gap
+    // lifting the frames it needs as they ride past (the rest still ship),
+    // and the walkers bringing harnesses; rocket parts are HEAVY, so an arm
+    // lifts them out into a shipping dock.
     expect(stepId(), 'assemble');
-    final bay = assembler(24, 20, RocketPartsRecipes.assemble.id);
+    final bay = assembler(14, 10, RocketPartsRecipes.assemble.id);
+    place(EntityKind.arm, 15, 9, dir: Dir4.north); // belt (15, 8) -> bay
     runUntil(() => (f.contentsOf(bay)['rocketParts'] ?? 0) > 0,
         limit: 600, what: 'the bay to make parts');
     runFor(10);
@@ -155,8 +162,8 @@ void main() {
         reason: 'heavy parts: no worker or jack can ship them');
     expect(f.contentsOf(bay)['rocketParts'] ?? 0, greaterThan(0),
         reason: 'the bay made parts, they are just stuck');
-    place(EntityKind.arm, 27, 21, dir: Dir4.east);
-    place(EntityKind.shippingDock, 28, 21);
+    place(EntityKind.arm, 17, 11, dir: Dir4.east);
+    place(EntityKind.shippingDock, 18, 11);
     runUntil(() => stepId() != 'assemble', limit: 30, what: 'a part shipped');
 
     // i. Read: both UI flags, in either order.
@@ -252,21 +259,26 @@ void main() {
       assembler(x, 4, RocketPartsRecipes.weldFrame.id);
       place(EntityKind.arm, x + 1, 3, dir: Dir4.north);
     }
-    // Every cell's frames go up by arm onto a frame belt along y = 8 that
-    // runs east to the bay, and a last arm lifts them in. The bay moves to
-    // where the belts meet: the tutorial bay is replaced (as a player
-    // would) by one at (24, 8).
-    final oldBay = f.blueprint.placements.firstWhere((p) =>
-        p.kind == EntityKind.machine &&
-        p.recipe == RocketPartsRecipes.assemble.id);
-    final oldArm = f.blueprint.placements.firstWhere(
-        (p) => p.kind == EntityKind.arm && p.pos == const TilePos(27, 21));
-    expect(f.remove(oldArm.id).ok, isTrue);
-    expect(f.remove(oldBay.id).ok, isTrue);
-    for (final x in [6, 10, 14, 18]) {
+    // Every cell's frames go up by arm onto the frame belt along y = 8 (the
+    // tutorial's, which already carries cell 1's), now run east to the bay
+    // instead of the frame dock, and a last arm lifts them in. The bay
+    // moves to where the belts meet: the tutorial bay, its arms and its
+    // parts dock are replaced (as a player would) by one at (24, 8).
+    Placement at(EntityKind k, int x, int y) => f.blueprint.placements
+        .firstWhere((p) => p.kind == k && p.pos == TilePos(x, y));
+    for (final p in [
+      at(EntityKind.arm, 15, 9),
+      at(EntityKind.arm, 17, 11),
+      at(EntityKind.shippingDock, 18, 11),
+      at(EntityKind.machine, 14, 10),
+      at(EntityKind.shippingDock, 22, 8),
+    ]) {
+      expect(f.remove(p.id).ok, isTrue);
+    }
+    for (final x in [10, 14, 18]) {
       place(EntityKind.arm, x + 1, 7, dir: Dir4.north);
     }
-    belt(7, 22, 8, Dir4.east);
+    belt(22, 22, 8, Dir4.east);
     assembler(24, 8, RocketPartsRecipes.assemble.id);
     place(EntityKind.arm, 23, 8); // frame belt end -> bay
     // Benches 1-4 along y = 14..16, fed straight from north-wall docks at

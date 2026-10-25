@@ -657,11 +657,13 @@ FactoryScenario rocketPartsScenario() {
       TutorialStep(
         id: 'receive',
         title: 'Bring tubes in',
-        body: 'Pick Receiving Dock, set its item to Tubes, and place it '
+        body: 'Pick Receiving Dock, set its item to '
+            '${FactoryItems.tubes.pickerLabel}, and place it '
             'against a wall of the hall, facing in (R rotates it). A dock '
             'unloads only onto something in front of its open end, so '
             'nothing arrives yet.',
-        hint: const ScenarioHint('DOCKS ▸ Receiving Dock, item: Tubes',
+        hint: ScenarioHint(
+            'DOCKS ▸ Receiving Dock, item: ${FactoryItems.tubes.pickerLabel}',
             {ScenarioHintTarget.receivingDock}),
         check: (sim, p) => _hasDock(sim, _tubes),
       ),
@@ -685,38 +687,57 @@ FactoryScenario rocketPartsScenario() {
             '(or set it in the Inspector)', {ScenarioHintTarget.assembler}),
         check: (sim, p) => _running(sim, weld).isNotEmpty,
       ),
+      // Steps 5 and 6 were the playtest's sticking point (§10 item 2):
+      // "feed it" and "ship it" didn't say WHERE the arm goes or which way
+      // it points, and step 6 sent the player to hire a pallet jack before
+      // they had seen an arm carry anything out. Both now name the exact
+      // tile and facing; the jack is offered later as the alternative.
       TutorialStep(
         id: 'feed',
         title: 'Feed it with an arm',
-        body: 'Place an Arm in the gap, its arrow pointing at the cell. An arm '
-            'picks from the tile behind it and drops on the tile in front, so '
-            'it lifts tubes off the belt into the cell, which starts welding.',
+        body: 'Pick Arm and put it on the free tile BETWEEN the belt and the '
+            'cell, its arrow pointing INTO the cell (R turns it, Shift+R the '
+            'other way). An arm takes from the tile behind it and drops '
+            'into the tile its arrow points at: the ghost tints the "take" '
+            'tile (the belt) and the "drop" tile (the cell). It lifts tubes '
+            'off the belt into the cell, which starts welding.',
         hint: const ScenarioHint(
-            'TRANSPORT ▸ Arm, R to turn it', {ScenarioHintTarget.arm}),
+            'TRANSPORT ▸ Arm on the gap tile, arrow → the cell',
+            {ScenarioHintTarget.arm}),
         check: (sim, p) => _fed(sim, weld, {_tubes, frame}),
       ),
       TutorialStep(
         id: 'ship',
-        title: 'Ship the frames',
-        body: 'Place a Shipping Dock on a wall (it ships any item). Welded frames '
-            'are PALLET loads, too heavy for a worker on foot, so hire a '
-            'Pallet Jack (Handlers, +): it carries each frame from the cell '
-            'to the dock.',
+        title: 'Get the frames out',
+        body: 'Frames come out the same way tubes went in. Put a second Arm '
+            'on a free tile beside the cell with an empty tile past it, its '
+            'arrow pointing AWAY from the cell, then lay a Belt starting on '
+            'that empty tile (the arm drops onto it) and run it into a '
+            'Shipping Dock: the belt\'s last tile points into the dock, '
+            'which ships any item.',
         hint: const ScenarioHint(
-            'DOCKS ▸ Shipping Dock, then HANDLERS ▸ Pallet Jack +',
-            {ScenarioHintTarget.shippingDock, ScenarioHintTarget.palletJack}),
+            'Arm (cell → belt), Belt from the arm\'s drop tile, Shipping '
+            'Dock at the belt\'s end',
+            {
+              ScenarioHintTarget.arm,
+              ScenarioHintTarget.belt,
+              ScenarioHintTarget.shippingDock,
+            }),
         check: (sim, p) => _shipped(sim, frame) >= 1,
       ),
       TutorialStep(
         id: 'secondLine',
         title: 'Start the avionics line',
-        body: 'Add a Receiving Dock set to Electronics and an Assembler set to '
-            'Wire Avionics (3 electronics → 2 harnesses). Point the dock '
-            'straight at the bench: a dock can unload into a machine. '
-            'Harnesses are HAND loads, so hire a couple of Workers to carry '
-            'them.',
-        hint: const ScenarioHint(
-            'Receiving Dock (Electronics), Assembler (Wire Avionics), '
+        body: 'Add a Receiving Dock set to '
+            '${FactoryItems.electronics.pickerLabel} — the LOOSE boards, not '
+            'the ${FactoryItems.crateElectronics.pickerLabel}, which no bench '
+            'here unpacks — and an Assembler set to Wire Avionics (3 '
+            'electronics → 2 harnesses). Point the dock straight at the '
+            'bench: a dock can unload into a machine. Harnesses are HAND '
+            'loads, so hire a couple of Workers to carry them.',
+        hint: ScenarioHint(
+            'Receiving Dock (${FactoryItems.electronics.pickerLabel}), '
+            'Assembler (Wire Avionics), '
             'HANDLERS ▸ Worker +. Idle workers wait on the first Staging '
             'area you lay; with none they walk back to the hall\'s corner.',
             {
@@ -732,19 +753,25 @@ FactoryScenario rocketPartsScenario() {
         id: 'assemble',
         title: 'Assemble rocket parts',
         body: 'Place an Assembler set to Assemble Rocket Parts (1 frame + 1 '
-            'harness → 2 parts); the jack and workers bring it frames and '
-            'harnesses. Rocket parts are HEAVY: no worker or jack can lift '
-            'them. An arm lifts anything, so put one between the assembler '
-            'and a shipping dock (or a belt to one), or lay a Crane Bay over '
-            'it and hire a Crane.',
+            'harness → 2 parts) one tile off the frame belt, with an Arm '
+            'in the gap pointing into it: it takes the frames it needs as '
+            'they ride past, and the rest still ship. The workers bring it '
+            'harnesses. (Alternative: hand frames to a handler instead — '
+            'frames are PALLET loads, so hire a Pallet Jack to carry them '
+            'from the cell.) Rocket parts are HEAVY: no worker or jack can '
+            'lift them. An arm lifts anything, so put one between the '
+            'assembler and a shipping dock (or a belt to one), or lay a '
+            'Crane Bay over it and hire a Crane.',
         hint: const ScenarioHint(
-            'Assembler (Assemble Rocket Parts) + Arm → Shipping Dock, '
-            'or Crane Bay + Crane',
+            'Assembler (Assemble Rocket Parts) + Arm from the frame belt; '
+            'Arm → Shipping Dock (or Crane Bay + Crane). Or HANDLERS ▸ '
+            'Pallet Jack + to carry frames',
             {
               ScenarioHintTarget.assembler,
               ScenarioHintTarget.arm,
               ScenarioHintTarget.craneBay,
               ScenarioHintTarget.crane,
+              ScenarioHintTarget.palletJack,
             }),
         check: (sim, p) => _shipped(sim, _rocketParts) >= 1,
       ),

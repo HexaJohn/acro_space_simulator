@@ -457,10 +457,10 @@ void main() {
     await t.pump(const Duration(milliseconds: 400));
     // Items are listed by id and every plant chain's items are registered,
     // so 'ore' sits well down the menu: scroll it into view.
-    await t.dragUntilVisible(find.text(FactoryItems.ore.label),
+    await t.dragUntilVisible(find.text(FactoryItems.ore.pickerLabel),
         find.byType(Scrollable).last, const Offset(0, -200));
     await t.pump();
-    await t.tap(find.text(FactoryItems.ore.label).last);
+    await t.tap(find.text(FactoryItems.ore.pickerLabel).last);
     await t.pump();
     await t.pump(const Duration(milliseconds: 400));
     expect(sim.removed, [1]);

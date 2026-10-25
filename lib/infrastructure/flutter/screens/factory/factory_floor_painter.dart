@@ -19,6 +19,14 @@
 ///   tiles on screen, with paints held in finals so a frame allocates
 ///   nearly nothing.
 ///
+/// **Edit previews read at a glance** (§10 items 1, 6, 8, 9): every
+/// directed ghost carries a filled arrowhead, an arm's ghost tints the tile
+/// it takes from (cyan, "take") and drops into (amber, "drop"), a belt
+/// redrawn over a belt is tinted blue, the Delete tool's box tints its
+/// targets red with their counts, and a receiving dock nothing here uses
+/// wears an amber warning mark. All of it is FILLED geometry ([addArrow],
+/// [_T]): strokes smear on the Windows GLES renderer.
+///
 /// Tile space is y-up (north is up the screen) to match the floor's +y
 /// running away from the yard; labels are drawn after the transform is
 /// popped, in screen pixels, so text never mirrors.
@@ -72,6 +80,48 @@ const Color _beltBody = Color(0xFF39424D);
 const Color _beltChevron = Color(0xFF9AA8B6);
 const Color _okGhost = Color(0x707FE0A0);
 const Color _badGhost = Color(0x80FF6B6B);
+
+/// A ghost tile that RE-POINTS an existing belt rather than laying a new
+/// one (§10 item 8): blue, so a redraw reads apart from fresh belt.
+const Color kRedirectGhost = Color(0x804FA3FF);
+
+/// An arm's "takes from" tile (cyan) and "drops into" tile (amber), on its
+/// ghost and as the pick notch of a placed arm (§10 item 1).
+const Color kArmTakeColor = Color(0xFF4FE3E8);
+const Color kArmDropColor = Color(0xFFFFB74D);
+
+/// The Delete tool's area preview (§10 item 9).
+const Color kDeletePreview = Color(0x80FF3030);
+
+/// Appends a filled arrow from [a] to [b] onto [path]: a [shaft]-wide bar
+/// to the neck, then a [headLen] × [headWidth] triangle whose point is
+/// [b]. Both are closed polygons for a FILL paint: a stroked arrow smears
+/// ~10x wide on the Windows GLES renderer (see [_T]), and the playtest's
+/// "bare line" facing read as nothing at all.
+void addArrow(Path path, Offset a, Offset b,
+    {double shaft = 0.1, double headLen = 0.3, double headWidth = 0.36}) {
+  final d = b - a;
+  final len = d.distance;
+  if (len <= 0) return;
+  final u = d / len;
+  final n = Offset(-u.dy, u.dx);
+  final hl = math.min(headLen, len);
+  final neck = b - u * hl;
+  final s = n * (shaft / 2), h = n * (headWidth / 2);
+  if (len > hl) {
+    path
+      ..moveTo(a.dx + s.dx, a.dy + s.dy)
+      ..lineTo(neck.dx + s.dx, neck.dy + s.dy)
+      ..lineTo(neck.dx - s.dx, neck.dy - s.dy)
+      ..lineTo(a.dx - s.dx, a.dy - s.dy)
+      ..close();
+  }
+  path
+    ..moveTo(neck.dx + h.dx, neck.dy + h.dy)
+    ..lineTo(b.dx, b.dy)
+    ..lineTo(neck.dx - h.dx, neck.dy - h.dy)
+    ..close();
+}
 
 /// One color per station kind, so a line reads at a glance.
 const Map<StationKind, Color> kStationColor = {
@@ -236,7 +286,7 @@ class FloorLayerCache {
     final belts = Path(), chevrons = Path(), zebra = Path();
     final chests = Path(), recv = Path(), ship = Path(), doors = Path();
     final racks = Path(), rackBeams = Path(), charge = Path(), bolts = Path();
-    final arms = Path(), armLines = Path();
+    final arms = Path(), armLines = Path(), armPicks = Path();
     final byStation = <StationKind?, Path>{};
     final notches = Path();
     for (final p in ix.blueprint.placements) {
@@ -262,12 +312,18 @@ class FloorLayerCache {
               ..lineTo(cx - sx * 0.4 + fx * o, cy - sy * 0.4 + fy * o);
           }
         case EntityKind.arm:
+          // An arm reads its direction at a glance (§10 item 1): a filled
+          // arrow from its pick side to its drop side, and a pick notch on
+          // the back edge, the side it TAKES from. Filled, not stroked: a
+          // stroked line smeared into a blob on Windows (see [_T]).
           arms.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: 0.28));
-          armLines
-            ..moveTo(cx - fx * 0.45, cy - fy * 0.45)
-            ..lineTo(cx + fx * 0.45, cy + fy * 0.45)
-            ..moveTo(cx + fx * 0.45 + sx * 0.18, cy + fy * 0.45 + sy * 0.18)
-            ..lineTo(cx + fx * 0.45 - sx * 0.18, cy + fy * 0.45 - sy * 0.18);
+          addArrow(armLines, Offset(cx - fx * 0.3, cy - fy * 0.3),
+              Offset(cx + fx * 0.5, cy + fy * 0.5),
+              shaft: 0.12, headLen: 0.3, headWidth: 0.42);
+          armPicks.addRect(Rect.fromCenter(
+              center: Offset(cx - fx * 0.42, cy - fy * 0.42),
+              width: fx != 0 ? 0.12 : 0.5,
+              height: fx != 0 ? 0.5 : 0.12));
         case EntityKind.chest:
           chests.addRect(_r(f, 0.12));
         case EntityKind.receivingDock:
@@ -330,7 +386,8 @@ class FloorLayerCache {
     c.drawPath(charge, _fill(const Color(0xFF1E4A4A)));
     c.drawPath(bolts, _stroke(const Color(0xFF4FC3F7), 0.1));
     c.drawPath(arms, _fill(const Color(0xFF606C78)));
-    c.drawPath(armLines, _stroke(const Color(0xFFFFD54F), 0.12));
+    c.drawPath(armLines, _fill(const Color(0xFFFFD54F)));
+    c.drawPath(armPicks, _fill(kArmTakeColor));
     for (final e in byStation.entries) {
       c.drawPath(e.value, _fill(kStationColor[e.key] ?? const Color(0xFF555555)));
       c.drawPath(e.value, _stroke(const Color(0xFF0E1622), 0.1));
@@ -353,6 +410,18 @@ class FactoryFloorPainter extends CustomPainter {
 
   /// Each crane's bridge as last painted, by handler id, in tile units.
   final Map<int, Rect> bridgeRects = {};
+
+  /// What the last frame drew for the edit previews, read by tests to pin
+  /// the previews without golden images: filled arrowheads on the ghost,
+  /// each arm ghost's (takes-from, drops-into) tiles, redirected-belt
+  /// pieces, the area delete's target rects and label, and the unused-dock
+  /// warning marks.
+  int ghostArrows = 0;
+  final List<(TilePos, TilePos)> armGhostEnds = [];
+  int redirectGhosts = 0;
+  final List<Rect> deletePreviewRects = [];
+  String? deleteLabel;
+  int unusedDockMarks = 0;
 
   static final Paint _bg = _fill(kFactoryBg);
   static final Paint _grid = _stroke(const Color(0xFFFFFFFF), 0);
@@ -377,6 +446,13 @@ class FactoryFloorPainter extends CustomPainter {
   static final Paint _ghostOk = _fill(_okGhost);
   static final Paint _ghostBad = _fill(_badGhost);
   static final Paint _ghostEdge = _stroke(const Color(0xC0FFFFFF), 0.06);
+  static final Paint _ghostRedirect = _fill(kRedirectGhost);
+  static final Paint _ghostArrow = _fill(const Color(0xF0FFFFFF));
+  static final Paint _armTake = _fill(kArmTakeColor.withValues(alpha: 0.45));
+  static final Paint _armDrop = _fill(kArmDropColor.withValues(alpha: 0.45));
+  static final Paint _deleteFill = _fill(kDeletePreview);
+  static final Paint _deleteEdge = _stroke(const Color(0xFFFF5050), 0.12);
+  static final Paint _unusedMark = _fill(const Color(0xFFFFB300));
   static final Map<String, Paint> _itemPaints = {};
   static final Map<String, TextPainter> _labels = {};
 
@@ -419,10 +495,13 @@ class FactoryFloorPainter extends CustomPainter {
       _paintBeltItems(canvas, ix, vis);
       _paintHandlers(canvas, ix, vis);
     }
+    _paintUnusedDocks(canvas, ix, vis);
     _paintSelection(canvas, ix);
+    _paintDeletePreview(canvas);
     _paintGhost(canvas);
     canvas.restore();
     if (px >= kLabelMinPx) _paintLabels(canvas, ix, vis, px);
+    _paintEditLabels(canvas, px);
   }
 
   void _paintGrid(Canvas canvas, TileRect vis, double px) {
@@ -678,19 +757,126 @@ class FactoryFloorPainter extends CustomPainter {
         _select);
   }
 
+  /// The placement preview. Every directed piece gets a FILLED arrowhead
+  /// (the playtest's bare facing line didn't read), a redirected belt is
+  /// tinted apart from a new one, and an arm's ghost tints the tile it
+  /// takes from and the tile it drops into (§10 item 1).
   void _paintGhost(Canvas canvas) {
+    ghostArrows = 0;
+    armGhostEnds.clear();
+    redirectGhosts = 0;
+    final arrows = Path();
     for (final g in c.ghost) {
       final f = g.rect;
       final r = Rect.fromLTWH(f.x0.toDouble(), f.y0.toDouble(), f.w.toDouble(),
           f.h.toDouble());
-      _T.rect(canvas, r, g.check.ok ? _ghostOk : _ghostBad);
+      final redirect = g.redirects != null;
+      if (redirect) redirectGhosts++;
+      _T.rect(
+          canvas,
+          r,
+          !g.check.ok
+              ? _ghostBad
+              : redirect
+                  ? _ghostRedirect
+                  : _ghostOk);
       _T.rect(canvas, r, _ghostEdge);
       final p = g.placement;
       if (kSpannedKinds.contains(p.kind)) continue;
       final cx = r.center.dx, cy = r.center.dy;
       final fx = p.dir.dx.toDouble(), fy = p.dir.dy.toDouble();
-      _T.line(canvas, Offset(cx, cy),
-          Offset(cx + fx * (f.w / 2), cy + fy * (f.h / 2)), _ghostEdge);
+      final reach = (p.dir.isVertical ? f.h : f.w) / 2;
+      addArrow(
+          arrows,
+          Offset(cx - fx * reach * 0.55, cy - fy * reach * 0.55),
+          Offset(cx + fx * reach * 0.95, cy + fy * reach * 0.95),
+          shaft: 0.14,
+          headLen: math.min(0.45, reach),
+          headWidth: 0.55);
+      ghostArrows++;
+      if (p.kind == EntityKind.arm) {
+        final from = TilePos(p.pos.x - p.dir.dx, p.pos.y - p.dir.dy);
+        final to = p.pos.step(p.dir);
+        armGhostEnds.add((from, to));
+        _T.rect(canvas, _tileRect(from).deflate(0.06), _armTake);
+        _T.rect(canvas, _tileRect(to).deflate(0.06), _armDrop);
+      }
+    }
+    canvas.drawPath(arrows, _ghostArrow);
+  }
+
+  static Rect _tileRect(TilePos t) =>
+      Rect.fromLTWH(t.x.toDouble(), t.y.toDouble(), 1, 1);
+
+  /// The Delete tool's area drag: every target tinted red and the box
+  /// outlined (§10 item 9). The counts are drawn as a label afterwards.
+  void _paintDeletePreview(Canvas canvas) {
+    deletePreviewRects.clear();
+    final box = c.deleteRect;
+    if (box == null) return;
+    for (final p in c.deleteTargets) {
+      final f = p.footprint;
+      final r = Rect.fromLTWH(f.x0.toDouble(), f.y0.toDouble(),
+          f.w.toDouble(), f.h.toDouble());
+      deletePreviewRects.add(r);
+      _T.rect(canvas, r, _deleteFill);
+    }
+    _T.rect(
+        canvas,
+        Rect.fromLTWH(box.x0.toDouble(), box.y0.toDouble(), box.w.toDouble(),
+            box.h.toDouble()),
+        _deleteEdge);
+  }
+
+  /// A warning mark on every receiving dock whose item no machine here
+  /// consumes (§10 item 6): a filled amber triangle in its corner.
+  void _paintUnusedDocks(Canvas canvas, FloorLayoutIndex ix, TileRect vis) {
+    unusedDockMarks = 0;
+    final marks = Path();
+    for (final d in ix.unusedDocks) {
+      final f = d.footprint;
+      if (!f.overlaps(vis)) continue;
+      unusedDockMarks++;
+      final x = f.x1 - 0.5, y = f.y1 - 0.1;
+      marks
+        ..moveTo(x, y)
+        ..lineTo(x + 0.42, y - 0.72)
+        ..lineTo(x - 0.42, y - 0.72)
+        ..close();
+    }
+    if (unusedDockMarks > 0) canvas.drawPath(marks, _unusedMark);
+  }
+
+  /// Screen-space words for the ghost and the delete preview: "take" and
+  /// "drop" on an arm's two tiles, the area delete's counts.
+  void _paintEditLabels(Canvas canvas, double px) {
+    deleteLabel = null;
+    final box = c.deleteRect;
+    if (box != null) {
+      final s = c.deleteSummary;
+      deleteLabel = s;
+      final tp = TextPainter(
+        text: TextSpan(
+            text: s,
+            style: const TextStyle(
+                color: Color(0xFFFFB0B0),
+                fontSize: kLabelFont,
+                fontWeight: FontWeight.w700,
+                shadows: [Shadow(blurRadius: 3)])),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+      )..layout();
+      final at = c.tileToLocal(box.x0.toDouble(), box.y1.toDouble());
+      tp.paint(canvas, at - Offset(0, tp.height + 2));
+      tp.dispose();
+    }
+    if (px < kLabelMinPx) return;
+    for (final (from, to) in armGhostEnds) {
+      for (final (t, s) in [(from, 'take'), (to, 'drop')]) {
+        final tp = _label(s);
+        final at = c.tileCenterLocal(t);
+        tp.paint(canvas, at - Offset(tp.width / 2, tp.height / 2));
+      }
     }
   }
 

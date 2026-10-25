@@ -467,3 +467,18 @@ the recommendations; revisit if they object):
   piles.
 - **Docks:** a 4 m door with a 4×6 m loading area inside and the truck outside. Handlers unload
   trucks; a dock conveyor is a paid upgrade.
+
+**Built (2026-10-25): items 1, 2, 6 (picker part), 7, 8, 9, 10.**
+
+- Keys: R / Shift+R rotate cw / ccw; Ctrl+Z undo, Ctrl+Y or Ctrl+Shift+Z redo (also header arrows);
+  M cycles the run shape (Straight → L → Free, chips under Belt / Aisle); F flips the L; Shift held
+  forces Straight mid-drag and adds floor markings to a Delete-tool box. None fire in a text field.
+- Contract (`FactoryFloorEditor`, all additive): `rotate(id, {ccw})`, `setDir(id, dir)` (redirect
+  keeping items), and `restore` on `place` / `setMode` / `hire`, which undo uses to skip the unlock
+  gate (never a layout rule), so a young colony can undo deleting a template's assisted stations.
+- Undo (`floor_edit_history.dart`) covers every edit, grouped per player action, and replays through
+  the editor surface with history-local handles (floor ids are reused). It restores structure, not
+  goods: piles stay piles. The colony's capex is a blueprint diff at close, so edit + undo costs 0.
+- Picker names are derived (`FactoryItem.pickerLabel`): "Electronics (loose · hand)" vs
+  "Electronics ×10 (crate · pallet)", used items listed first with "· used here", and a receiving
+  dock nothing consumes gets a warning chip (inspector) and an amber mark (floor).

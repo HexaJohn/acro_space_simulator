@@ -16,6 +16,7 @@ library;
 
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_ledger.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
@@ -31,6 +32,8 @@ class FakeFactorySim implements FactorySim {
   final List<Placement> placed = [];
   final List<int> removed = [];
   final List<int> rotated = [];
+  final List<bool> rotatedCcw = [];
+  final List<(int, Dir4)> redirected = [];
   final List<(int, String)> recipes = [];
   final List<(int, MachineMode)> modes = [];
   final List<(HandlerKind, int)> hires = [];
@@ -102,7 +105,7 @@ class FakeFactorySim implements FactorySim {
   }
 
   @override
-  EditResult place(Placement p) {
+  EditResult place(Placement p, {bool restore = false}) {
     placed.add(p);
     final id = bp.nextId;
     bp.placements.add(p.copyWith(id: id));
@@ -119,25 +122,48 @@ class FakeFactorySim implements FactorySim {
   }
 
   @override
-  EditResult rotate(int placementId) {
+  EditResult rotate(int placementId, {bool ccw = false}) {
     rotated.add(placementId);
+    rotatedCcw.add(ccw);
+    _apply(placementId,
+        (p) => p.copyWith(dir: ccw ? p.dir.turnCcw : p.dir.turnCw));
+    return EditResult.ok(placementId);
+  }
+
+  @override
+  EditResult setDir(int placementId, Dir4 dir) {
+    redirected.add((placementId, dir));
+    _apply(placementId, (p) => p.copyWith(dir: dir));
     return EditResult.ok(placementId);
   }
 
   @override
   EditResult setRecipe(int placementId, String recipeId) {
     recipes.add((placementId, recipeId));
+    _apply(placementId, (p) => p.copyWith(recipe: recipeId));
     return EditResult.ok(placementId);
   }
 
   @override
-  EditResult setMode(int placementId, MachineMode mode) {
+  EditResult setMode(int placementId, MachineMode mode,
+      {bool restore = false}) {
     modes.add((placementId, mode));
+    _apply(placementId, (p) => p.copyWith(mode: mode));
     return EditResult.ok(placementId);
   }
 
+  /// Applies an accepted edit to the layout, like the real floor, so an
+  /// editor that reads the layout back (undo's "what was it before?") sees
+  /// the change.
+  void _apply(int id, Placement Function(Placement) f) {
+    final i = bp.placements.indexWhere((p) => p.id == id);
+    if (i < 0) return;
+    bp.placements[i] = f(bp.placements[i]);
+    rev++;
+  }
+
   @override
-  EditResult hire(HandlerKind kind, int delta) {
+  EditResult hire(HandlerKind kind, int delta, {bool restore = false}) {
     hires.add((kind, delta));
     bp.roster[kind] = (bp.roster[kind] ?? 0) + delta;
     return const EditResult.ok(null);

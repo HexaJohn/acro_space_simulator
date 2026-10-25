@@ -18,6 +18,7 @@ library;
 
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_ledger.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
@@ -134,7 +135,7 @@ class FakeSim implements FactorySim {
   EditResult check(Placement p) => EditResult.ok(_bp.nextId);
 
   @override
-  EditResult place(Placement p) {
+  EditResult place(Placement p, {bool restore = false}) {
     final id = _bp.nextId;
     _bp.placements.add(p.copyWith(id: id));
     _rev++;
@@ -153,17 +154,21 @@ class FakeSim implements FactorySim {
   }
 
   @override
-  EditResult rotate(int placementId) =>
+  EditResult rotate(int placementId, {bool ccw = false}) =>
+      const EditResult.refused(EditRefusal.notAllowed);
+  @override
+  EditResult setDir(int placementId, Dir4 dir) =>
       const EditResult.refused(EditRefusal.notAllowed);
   @override
   EditResult setRecipe(int placementId, String recipeId) =>
       const EditResult.refused(EditRefusal.notAllowed);
   @override
-  EditResult setMode(int placementId, MachineMode mode) =>
+  EditResult setMode(int placementId, MachineMode mode,
+          {bool restore = false}) =>
       const EditResult.refused(EditRefusal.notAllowed);
 
   @override
-  EditResult hire(HandlerKind kind, int delta) {
+  EditResult hire(HandlerKind kind, int delta, {bool restore = false}) {
     _bp = _bp.copy()..roster[kind] = (_bp.roster[kind] ?? 0) + delta;
     _rev++;
     return const EditResult.ok(null);

@@ -21,6 +21,7 @@ library;
 
 import '../../../../domain/colony/city/factory/factory_entities.dart';
 import '../../../../domain/colony/city/factory/factory_grid.dart';
+import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/floor_blueprint.dart';
 
@@ -89,6 +90,37 @@ class FloorLayoutIndex {
   /// Which way the belt or crossing on [t] runs (null = no belt there).
   Dir4? beltDirAt(TilePos t) => _beltDir[t.key];
 
+  Set<String>? _consumed;
+
+  /// Items some machine on this floor takes as a recipe INPUT: the item
+  /// picker's "used here" mark, and what a receiving dock is checked
+  /// against (§10 item 6). Built on first ask, once per revision.
+  Set<String> get consumedItems => _consumed ??= {
+        for (final m in machines)
+          ...?FactoryRecipes.byId(m.recipe ?? '')?.inputs.map((q) => q.item),
+      };
+
+  /// Receiving docks whose item no machine on the floor consumes: they
+  /// unload goods nothing here will ever use (the playtest's crate dock
+  /// feeding a bench that wanted loose boards). A dock with no item set is
+  /// left out; it asks for nothing.
+  late final List<Placement> unusedDocks = [
+    for (final p in blueprint.placements)
+      if (p.kind == EntityKind.receivingDock &&
+          p.item != null &&
+          !consumedItems.contains(p.item))
+        p,
+  ];
+
+  /// Solid placements whose footprint overlaps [r], plus floor markings
+  /// with [markings] (the Delete tool's area drag; Shift adds markings).
+  List<Placement> overlapping(TileRect r, {bool markings = false}) => [
+        for (final p in blueprint.placements)
+          if ((markings || !kOverlayKinds.contains(p.kind)) &&
+              p.footprint.overlaps(r))
+            p,
+      ];
+
   /// What a click on [t] means: the solid object first, else the topmost
   /// (last-placed) floor marking.
   Placement? hit(TilePos t) {
@@ -100,6 +132,23 @@ class FloorLayoutIndex {
     return null;
   }
 }
+
+/// Player-facing name of a placement kind (palette, inspector, the area
+/// delete's counts).
+String entityKindLabel(EntityKind k) => switch (k) {
+      EntityKind.machine => 'Machine',
+      EntityKind.belt => 'Belt',
+      EntityKind.arm => 'Arm',
+      EntityKind.chest => 'Chest',
+      EntityKind.receivingDock => 'Receiving Dock',
+      EntityKind.shippingDock => 'Shipping Dock',
+      EntityKind.aisle => 'Aisle',
+      EntityKind.crossing => 'Crossing',
+      EntityKind.craneBay => 'Crane Bay',
+      EntityKind.rack => 'Rack',
+      EntityKind.chargingBay => 'Charging Bay',
+      EntityKind.staging => 'Staging',
+    };
 
 /// Player-facing words for a refusal.
 String refusalText(EditRefusal r) => switch (r) {
