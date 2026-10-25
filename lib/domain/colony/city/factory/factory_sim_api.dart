@@ -109,6 +109,9 @@ enum EditRefusal {
   wrongKind,
   noSuchPlacement,
   notAllowed,
+
+  /// A dock away from the hall's outer wall (§10 item 3).
+  notOnWall,
 }
 
 class EditResult {

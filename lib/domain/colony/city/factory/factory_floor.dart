@@ -82,6 +82,8 @@ import 'factory_recipe.dart';
 import 'factory_sim_api.dart';
 import 'factory_unlocks.dart';
 import 'factory_vehicles.dart';
+import 'dock_geometry.dart';
+import 'dock_logistics.dart';
 import 'floor_blueprint.dart';
 
 /// Belt speed in tiles per second: 3 m/s, a brisk industrial conveyor.
@@ -246,12 +248,20 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     m(j['cx']).forEach((k, v) => f._craftNet[k] = (v as num).toInt());
     m(j['pp']).forEach((k, v) => f._prepaid[k] = (v as num).toDouble());
     m(j['ow']).forEach((k, v) => f._owed[k] = (v as num).toDouble());
+    final lg = j['lg'];
+    if (lg != null) f.logistics = FloorLogistics.fromJson(m(lg));
     return f;
   }
 
   // ---- state ---------------------------------------------------------------
 
   final FloorBlueprint _bp;
+
+  /// Docks on orders and trucks (§10 items 4, 6, 11; dock_logistics.dart).
+  /// Null — every template, the measurement harness and the colony today —
+  /// keeps the original constant feed, as does a world set to unlimited
+  /// supply. Saved with the floor under 'lg'.
+  FloorLogistics? logistics;
   /// What this colony may buy (see [FactoryUnlocks]); not saved. The
   /// colony sets it again whenever its milestones or research change.
   FactoryUnlocks unlocks;
@@ -465,6 +475,12 @@ class FactoryFloor implements FactorySim, FloorCleanup {
         bag.add(i, 1);
       }
     }
+    final area = logistics?.bays[placementId]?.area;
+    if (area != null) {
+      for (final k in area.keys) {
+        bag.add(k, area[k]);
+      }
+    }
     return bag.toMap();
   }
 
@@ -514,6 +530,9 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     for (final p in _piles.values) {
       addBag(p.items);
     }
+    // Docks' loading areas (a truck's cargo is outside: not yet received).
+    final lg = logistics;
+    if (lg != null) addBag(lg.areasTotal);
     return bag.toMap();
   }
 
@@ -533,6 +552,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       final c = FactoryItems.byId(s.queue.first)?.commodity;
       if (c != null) out[c] = (out[c] ?? 0) + s.paid;
     }
+    logistics?.shippedAhead.forEach((c, u) => out[c] = (out[c] ?? 0) + u);
     out.removeWhere((_, v) => v <= 0);
     return out;
   }
@@ -687,6 +707,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       if (_owed.isNotEmpty) 'ow': {..._owed},
       'led': _ledger.toJson(),
       if (!_isBlank(_lifetime)) 'life': _lifetime.toJson(),
+      if (logistics != null) 'lg': logistics!.toJson(),
     };
   }
 
@@ -698,7 +719,19 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     _routeMemo.clear();
     _fleet = _fleetLayers();
     _allocateStaff(_unit(port.staffingShare), dt);
-    _receive(port, dt);
+    // On orders (and not set to unlimited), docks trade with trucks, not
+    // with the colony directly: see dock_logistics.dart.
+    final lg = logistics;
+    final ordered = lg != null && !lg.world.unlimited;
+    if (lg != null) {
+      lg.tick(_simSeconds + dt, dt,
+          {for (final p in [..._recvList, ..._shipList]) p.id: p}, port);
+    }
+    if (lg != null && ordered) {
+      _receiveOrdered(lg);
+    } else {
+      _receive(port, dt);
+    }
     _postRequests();
     _seekCharge();
     Dispatcher.assign(_queue, _handlers,
@@ -707,7 +740,19 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     _swingArms(dt);
     _advanceBelts(dt);
     _craft(power, dt);
-    _shipOut(port, dt);
+    if (lg != null && ordered) {
+      _shipOrdered(lg);
+    } else {
+      _shipOut(port, dt);
+    }
+    if (lg != null) {
+      lg.drainReceived().forEach(_ledger.addReceived);
+      // Units a removed shipping dock already gave count first.
+      lg.drainShipped().forEach((c, u) {
+        final rest = u - _useCredit(_prepaid, c, u);
+        if (rest > 0) _ledger.addShipped(c, rest);
+      });
+    }
     _ledger.energyKJ += powerDemandKw * power * dt;
     _ledger.seconds += dt;
     _simSeconds += dt;
@@ -816,6 +861,42 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     }
   }
 
+  /// Receiving docks on orders: each sets its item down from its loading
+  /// area (filled by trucks; see [FloorLogistics]) onto the tile in front,
+  /// at the old dock rate, never taking from the colony itself.
+  void _receiveOrdered(FloorLogistics lg) {
+    for (final p in _recvList) {
+      final item = p.item;
+      if (item == null) continue;
+      final ready = lg.emitReady(p.id, item);
+      if (ready == null) continue;
+      final front = _frontOf(p);
+      if (!_depositTile(front, ready)) continue;
+      lg.take(p.id, ready);
+    }
+  }
+
+  /// Shipping docks on orders: the intake moves into the loading area,
+  /// where a pickup truck collects it ([PickupRule]). A full area backs the
+  /// line up, exactly like a colony that refuses goods.
+  void _shipOrdered(FloorLogistics lg) {
+    for (final p in _shipList) {
+      final s = _ship[p.id]!;
+      while (s.queue.isNotEmpty) {
+        final item = s.queue.first;
+        if (!lg.intake(p.id, item)) break;
+        s.queue.removeAt(0);
+        // A front item part-paid under the old feed keeps its units booked:
+        // they become credit the next pickup of that commodity uses first.
+        if (s.paid > 0) {
+          final c = FactoryItems.byId(item)?.commodity;
+          if (c != null) _prepaid[c] = (_prepaid[c] ?? 0) + s.paid;
+          s.paid = 0;
+        }
+      }
+    }
+  }
+
   // ---- moving items between tiles and placements ---------------------------
 
   /// The tile just beyond [p]'s footprint along its facing.
@@ -892,6 +973,10 @@ class FactoryFloor implements FactorySim, FloorCleanup {
         if (s.queue.length >= kShippingBufferItems) return false;
         if (commit) s.queue.add(item);
         return true;
+      case EntityKind.receivingDock:
+        // A handler unloading a truck sets the goods in the loading area.
+        final lg = logistics;
+        return lg != null && lg.putInArea(p.id, item, commit: commit);
       default:
         return false;
     }
@@ -945,6 +1030,8 @@ class FactoryFloor implements FactorySim, FloorCleanup {
   int _stored(Placement p, String item) => switch (p.kind) {
         EntityKind.machine => _machines[p.id]!.outBuf[item],
         EntityKind.chest || EntityKind.staging => _stores[p.id]![item],
+        // What the docked truck can hand over (dock_logistics.dart).
+        EntityKind.receivingDock => logistics?.truckCount(p.id, item) ?? 0,
         _ => 0,
       };
 
@@ -959,6 +1046,8 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       case EntityKind.chest:
       case EntityKind.staging:
         _stores[p.id]!.add(item, -k);
+      case EntityKind.receivingDock:
+        return logistics?.takeFromTruck(p.id, item, k) ?? 0;
       default:
         return 0;
     }
@@ -1268,6 +1357,8 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     final to = _byId[r.to];
     if (to == null) return false;
     if (to.kind == EntityKind.machine) return _autoFed.contains((to.id, r.item));
+    // Unloading a truck into its own dock's loading area is never stale.
+    if (to.kind == EntityKind.receivingDock) return false;
     return _handFedConsumes.contains(r.item);
   }
 
@@ -1377,6 +1468,23 @@ class FactoryFloor implements FactorySim, FloorCleanup {
           post(q.item, n, sBest, m.id, pull: true);
           want -= n;
         }
+      }
+    }
+
+    // Unload: a truck at a receiving dock is emptied into the dock's own
+    // loading area by handlers (§10 item 4) — a trip from the dock to the
+    // dock, so the queue, the dispatcher and the "hire a jack" signal all
+    // work as for any other load. A dock conveyor does it instead.
+    final lg = logistics;
+    if (lg != null && !lg.world.unlimited) {
+      for (final d in _recvList) {
+        final item = lg.unloadItem(d.id, (it) => _servable(it, d.id, d.id));
+        if (item == null) continue;
+        final a = avail(d.id, item);
+        final room =
+            lg.roomFor(d.id, item) - (inbound[d.id]?[item] ?? 0);
+        final n = a < room ? a : room;
+        if (n > 0) post(item, n, d.id, d.id, pull: true);
       }
     }
 
@@ -2016,6 +2124,10 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       sd.queue.clear();
       sd.paid = 0;
     }
+    // A dock's loading area is set down with the rest; its trucks turn
+    // away with their cargo (never received) and its orders stop.
+    final lg = logistics;
+    if (lg != null && isDockKind(p.kind)) addBag(lg.evictDock(p.id));
     final rd = _recv[p.id];
     final ri = p.item;
     if (rd != null && ri != null && rd.paid > 0) {
@@ -2406,6 +2518,13 @@ class FactoryFloor implements FactorySim, FloorCleanup {
   EditResult? _placeRefusal(Placement q) {
     if (!unlocks.allowsPlacement(q)) {
       return const EditResult.refused(EditRefusal.notAllowed);
+    }
+    // A wall dock is a door: it goes on an outer wall, facing in (§10
+    // item 3). Legacy spanless docks (templates, old saves) are exempt.
+    if (isWallDock(q) &&
+        _bp.hall.rect.containsRect(q.footprint) &&
+        !dockOnOuterWall(q, _bp.hall)) {
+      return const EditResult.refused(EditRefusal.notOnWall);
     }
     return _check(q);
   }

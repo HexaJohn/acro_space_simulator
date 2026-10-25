@@ -124,6 +124,12 @@ class Placement {
     if (kind == EntityKind.machine) {
       final st = recipe == null ? null : FactoryRecipes.byId(recipe!)?.station;
       (w, h) = st == null ? (1, 1) : (st.footW, st.footH);
+    } else if (span != null &&
+        (kind == EntityKind.receivingDock || kind == EntityKind.shippingDock)) {
+      // A wall dock (§10 item 3, dock_geometry.dart): its span is the
+      // loading area, east-facing, rotated like a fixed footprint. A dock
+      // with no span is a legacy 2 × 1 template dock.
+      (w, h) = span!;
     } else {
       (w, h) = kEntityFootprint[kind] ?? (1, 1);
     }

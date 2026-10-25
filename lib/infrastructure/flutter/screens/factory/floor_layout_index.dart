@@ -158,4 +158,5 @@ String refusalText(EditRefusal r) => switch (r) {
       EditRefusal.wrongKind => 'Not possible on that kind of object',
       EditRefusal.noSuchPlacement => 'Nothing there',
       EditRefusal.notAllowed => 'Not unlocked or not allowed here',
+      EditRefusal.notOnWall => 'Docks go on an outside wall',
     };

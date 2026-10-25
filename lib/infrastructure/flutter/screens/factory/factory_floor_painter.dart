@@ -46,7 +46,10 @@ import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 
+import '../../../../domain/colony/city/factory/dock_geometry.dart';
+import '../../../../domain/colony/city/factory/dock_logistics.dart';
 import '../../../../domain/colony/city/factory/factory_entities.dart';
+import '../../../../domain/colony/city/factory/factory_floor.dart';
 import '../../../../domain/colony/city/factory/factory_grid.dart';
 import '../../../../domain/colony/city/factory/factory_handling.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
@@ -533,6 +536,7 @@ class FactoryFloorPainter extends CustomPainter {
       _paintHandlers(canvas, ix, vis);
     }
     _paintUnusedDocks(canvas, ix, vis);
+    _paintTrucks(canvas, ix);
     _paintSelection(canvas, ix);
     _paintDeletePreview(canvas);
     _paintSweep(canvas);
@@ -542,6 +546,35 @@ class FactoryFloorPainter extends CustomPainter {
     if (px >= kLabelMinPx) _paintLabels(canvas, ix, vis, px);
     if (px >= kItemLabelMinPx) _paintItemLabels(canvas, ix, vis);
     _paintEditLabels(canvas, px);
+  }
+
+  static final Paint _truckIn = _fill(const Color(0xFF5C8DB8));
+  static final Paint _truckOut = _fill(const Color(0xFFB8925C));
+  static final Paint _truckCab = _fill(const Color(0xFF2B3440));
+
+  /// The truck backed up to each dock (§10 item 3): OUTSIDE the wall,
+  /// behind the door, its cab at the far end. Filled rects only (see
+  /// [_T]). Blue brings goods in, amber takes them away.
+  void _paintTrucks(Canvas canvas, FloorLayoutIndex ix) {
+    final sim = c.sim;
+    final lg = sim is FactoryFloor ? sim.logistics : null;
+    if (lg == null) return;
+    for (final t in lg.trucks.values) {
+      if (t.state != TruckState.docked) continue;
+      final p = ix.byId(t.dock);
+      if (p == null) continue;
+      final b = truckBayOf(p);
+      final r = Rect.fromLTWH(b.x0 + 0.15, b.y0 + 0.15, b.w - 0.3, b.h - 0.3);
+      _T.rect(canvas, r, t.inbound ? _truckIn : _truckOut);
+      const cab = 1.2;
+      final c0 = switch (p.dir) {
+        Dir4.east => Rect.fromLTWH(r.left, r.top, cab, r.height),
+        Dir4.west => Rect.fromLTWH(r.right - cab, r.top, cab, r.height),
+        Dir4.north => Rect.fromLTWH(r.left, r.top, r.width, cab),
+        Dir4.south => Rect.fromLTWH(r.left, r.bottom - cab, r.width, cab),
+      };
+      _T.rect(canvas, c0, _truckCab);
+    }
   }
 
   void _paintGrid(Canvas canvas, TileRect vis, double px) {

@@ -38,6 +38,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
+import '../../../../domain/colony/city/factory/dock_geometry.dart';
 import '../../../../domain/colony/city/factory/factory_capex.dart';
 import '../../../../domain/colony/city/factory/factory_catalog.dart';
 import '../../../../domain/colony/city/factory/factory_colony_port.dart';
@@ -932,6 +933,12 @@ class FactoryEditorController extends ChangeNotifier {
         k == EntityKind.chest ||
         k == EntityKind.arm) {
       item = itemChoice;
+    }
+    if (isDockKind(k)) {
+      // A dock is a door (§10 item 3): it snaps to the nearest outer wall,
+      // facing in, whatever the ghost's own facing.
+      final p = snapDockToWall(sim.blueprint.hall, t, k, item: item);
+      return GhostPiece(p, p.footprint, _check(p, pending: pending));
     }
     if (k == EntityKind.machine) {
       final r = effectiveRecipe;
