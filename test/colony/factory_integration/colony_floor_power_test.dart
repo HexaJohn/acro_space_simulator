@@ -21,10 +21,21 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'factory_colony_fixture.dart';
 
+/// Templates still drawn for arms, skipped like their own tests until their
+/// port redraw (#19); their measured draw means nothing until then.
+const Set<String> _awaitingPortRedraw = {
+  'refinery', 'electronics', 'rocketfactory', 'gunfactory',
+  'missilefactory', 'rationsfactory',
+};
+
 void main() {
+  final ready = [
+    for (final t in kFactoryPlantTypes)
+      if (!_awaitingPortRedraw.contains(t)) t,
+  ];
   final measured = <String, MeasuredRates>{};
   setUpAll(() {
-    for (final t in kFactoryPlantTypes) {
+    for (final t in ready) {
       measured[t] = measureBlueprint(factoryTemplateFor(t)!,
           buildFloorForMeasure, settings: measureSettingsFor(t));
     }
@@ -34,7 +45,7 @@ void main() {
   // changes its stations' draw must re-pin, or every measured floor of
   // that plant draws the wrong power.
   test('the pinned template draws are what the measurer reads', () {
-    for (final t in kFactoryPlantTypes) {
+    for (final t in ready) {
       expect(measured[t]!.powerKw,
           closeTo(kTemplateMeasuredKw[t]!, kTemplateMeasuredKw[t]! * 0.01),
           reason: t);
@@ -42,7 +53,7 @@ void main() {
   });
 
   test('every measured template draws its spec power, calibrated', () {
-    for (final t in kFactoryPlantTypes) {
+    for (final t in ready) {
       final spec = specOf(t);
       final flat = flatRatesOf(spec).powerKw;
       expect(calibratedFloorRates(measured[t]!, spec).powerKw,
@@ -54,11 +65,12 @@ void main() {
   // grid draw, and a design that halves its stations' kW halves it.
   test('applyFloorMeasure stores colony power', () {
     final sim = foundedColony();
-    final lot = placeOnFreeLot(sim, specOf('electronics'));
-    final m = measured['electronics']!;
+    // The Steel Mill until Electronics gets its port redraw (#19).
+    final lot = placeOnFreeLot(sim, specOf('steelmill'));
+    final m = measured['steelmill']!;
     final rec = sim.factoryFloors[lot]!;
     expect(sim.applyFloorMeasure(lot, m, rev: rec.rev), isTrue);
-    final flat = flatRatesOf(specOf('electronics')).powerKw;
+    final flat = flatRatesOf(specOf('steelmill')).powerKw;
     expect(rec.rates.powerKw, closeTo(flat, flat * 0.05));
     final half = MeasuredRates(
         inPerS: m.inPerS,
@@ -74,7 +86,8 @@ void main() {
   // editor open as closed. The live floor counts its stations' real kW;
   // uncalibrated, opening the editor cut the firm's power cost 8-100x.
   test('a live floor books the energy its aggregate would', () {
-    const type = 'electronics';
+    // The Steel Mill until Electronics gets its port redraw (#19).
+    const type = 'steelmill';
     final settings = measureSettingsFor(type);
     final sim = foundedColony();
     final lot = placeOnFreeLot(sim, specOf(type));

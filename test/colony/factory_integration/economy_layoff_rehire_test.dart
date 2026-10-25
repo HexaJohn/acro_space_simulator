@@ -34,7 +34,9 @@ void main() {
     final lot = placePlant(sim, 'steelmill');
     final template = factoryTemplateFor('steelmill')!.roster;
     makeLosing(sim, lot);
-    runDays(sim, 120, specs: [mill], after: () => sim.floorThrottleOf(lot) == 0);
+    // 200 days: the port-era mill crews 18 handlers, and the ladder lays
+    // off one a week before it idles and closes (it stops early on close).
+    runDays(sim, 200, specs: [mill], after: () => sim.floorThrottleOf(lot) == 0);
     expect(sim.firmBookOf(lot)!.health, FirmHealth.closed);
     final cut = sim.factoryFloors[lot]!.blueprint.roster;
     for (final k in template.keys) {

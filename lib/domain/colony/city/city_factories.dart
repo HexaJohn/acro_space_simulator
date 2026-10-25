@@ -80,7 +80,8 @@ const double kUnlockAutomationPop = 600;
 /// far outside the "a designed floor may beat its template" lever, and
 /// unbounded by the 1.5x cap, which only bounds output value.
 const Map<String, double> kTemplateMeasuredKw = {
-  'steelmill': 3621.178,
+  // Re-pinned for the port layout (#19): one automated smelter a line.
+  'steelmill': 3986.887,
   'refinery': 4063.818,
   'electronics': 739.688,
   'rocketfactory': 470.933,
