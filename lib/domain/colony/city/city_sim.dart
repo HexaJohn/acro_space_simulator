@@ -1644,6 +1644,9 @@ class CitySim {
     final Map<String, double> floorStaff;
     if (infiniteRobotics) {
       floorStaff = const {};
+      // Every post is staffed: no plant is starved of staff
+      // (`CityEconomy.noteFloorStaffing`), whatever the last market said.
+      colonyEconomy.labourMarketShare.clear();
     } else {
       final flatJobs = <SkillTier, double>{};
       final flatPosted = <SkillTier, double>{};

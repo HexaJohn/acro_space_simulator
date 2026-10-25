@@ -30,6 +30,18 @@
 ///   its stations ([kIdleStationsThrottle]), then closes, and the closed
 ///   plant waits in [pendingFirmOffers] for [resolveFirmOffer]: nationalise
 ///   or sell to a new firm.
+/// - **Idle days: the colony's refusal versus the firm's starvation.** A day
+///   a plant did no work at all is judged by WHY ([closeEconomyDay]):
+///   - the colony refused it (no inputs in stock, every crate turned away
+///     at a full warehouse, no power): the day books nothing and is skipped,
+///     since a stall the colony causes is no evidence about the firm;
+///   - the labour market starved it of staff (its own allocation share,
+///     [ColonyEconomy.labourMarketShare], under [kStaffStarvedShare] while
+///     its inputs were in stock, for at least [kStaffStarvedDayFraction] of
+///     the day): the firm could not outbid anyone for workers (private
+///     bids follow margin, `labourBid`), so the day IS evidence. It books
+///     the plant's standing costs (`standingPnlFor`: capital and tooling
+///     recovery) and the firm keeps walking its ladder to a close.
 /// - **State plants (Q10)** never act; their daily loss is the industry
 ///   deficit Budget line.
 /// - **Investment (Q9).** An edit to a built floor owes ore
@@ -73,6 +85,22 @@ const Map<AtmosphereGas, String> kGasFormula = {
   AtmosphereGas.argon: 'Ar',
   AtmosphereGas.water: 'H2O',
 };
+
+/// A floor's labour-allocation share ([ColonyEconomy.labourMarketShare])
+/// under which a tick counts as STARVED OF STAFF: the market gave it under
+/// 2% of its posts. Not zero, because an allocation's balanced-crew share
+/// is a ratio of floats that bottoms out at a hair above zero as the last
+/// worker is shared out, and a plant at 1% staffing ships nothing worth
+/// judging anyway.
+const double kStaffStarvedShare = 0.02;
+
+/// The share of a no-work day that must have been starved of staff for the
+/// day to be judged on the firm's standing costs rather than skipped as the
+/// colony's refusal: half. On a day that did no work every tick was either
+/// starved of staff or refused by the colony (inputs short, power, a full
+/// warehouse); the majority cause decides, so a plant whose inputs ran out
+/// for most of the day is never charged for it.
+const double kStaffStarvedDayFraction = 0.5;
 
 /// Handler kinds a layoff lets go, cheapest first: a worker on foot before a
 /// jack operator before a forklift driver before a crane operator. An AGV has
@@ -395,12 +423,56 @@ extension CityEconomy on CitySim {
       employers: employers,
     );
     e.labour.record(a, dt);
+    e.labourMarketShare
+      ..clear()
+      ..addAll(a.share);
     e.labourShare
       ..clear()
       ..addAll({
         for (final x in a.share.entries) x.key: x.value * staff,
       });
     return e.labourShare;
+  }
+
+  /// Tallies one tick of [site]'s staffing for the day close's
+  /// starved-of-staff rule (see the library doc): [dt] counts toward
+  /// [ColonyEconomy.staffStarvedS] when the last labour allocation filled
+  /// under [kStaffStarvedShare] of the site's posts while [inputsOnHand]
+  /// (every input its floor draws was in stock as the tick began). Called
+  /// by `stepFloorSite` before the floor steps, so [inputsOnHand] reads the
+  /// stock the floor was offered.
+  ///
+  /// The inputs test is what keeps the two idle causes apart: a floor with
+  /// no staff takes no inputs, so its ledger can't say whether there were
+  /// any; the stock can.
+  void noteFloorStaffing(String site, double dt, {required bool inputsOnHand}) {
+    if (!(dt > 0) || !inputsOnHand) return;
+    // Non-null read (no promotion through a bool: the AOT trap): a site the
+    // allocation never saw posted nothing, so it wasn't starved.
+    final share = colonyEconomy.labourMarketShare[site] ?? 1.0;
+    if (!(share < kStaffStarvedShare)) return;
+    final t = colonyEconomy.staffStarvedS;
+    t[site] = (t[site] ?? 0) + dt;
+  }
+
+  /// [site]'s standing costs per colony second, credits: its ore build cost
+  /// at [book]'s ore price and its tooling, each recovered over
+  /// [kCapitalRecoveryYears] — the same capital terms the cost solve prices
+  /// into its goods (`local_prices.dart`). What a staff-starved day books
+  /// (`standingPnlFor`).
+  ({double capitalPerS, double toolingPerS}) standingCostsPerS(
+      String site, PriceBook book) {
+    final rec = factoryFloors[site];
+    final spec = siteSpec(site);
+    final type = rec?.blueprint.plantType ?? spec?.type;
+    final build = spec?.buildCost ?? 0;
+    final ore = book.price(Commodity.ore);
+    return (
+      capitalPerS: build > 0 && ore > 0
+          ? build * ore / (kCapitalRecoveryYears * kGameYearSec)
+          : 0.0,
+      toolingPerS: type == null ? 0.0 : toolingRecoveryPerS(type),
+    );
   }
 
   /// [site]'s staffing share from the last tick's labour allocation (1 when
@@ -618,23 +690,45 @@ extension CityEconomy on CitySim {
       final firm = e.books[site] ??= FirmBook(owner: owner);
       firm.owner = owner;
       final ledger = factoryFloors.takeLedger(site);
+      final starvedS = e.staffStarvedS[site] ?? 0.0;
       // A closed plant trades nothing; whatever it ran up is not booked.
       if (firm.isClosed) continue;
-      final pnl = pnlFor(ledger, book,
-          owner: owner,
-          economy: econ,
-          sellThrough: e.sellThrough,
-          labourShares: floorLabourShares(site));
-      e.lastPnl[site] = pnl;
-      // A day the colony never let the plant work (no inputs, or every
-      // crate refused at a full warehouse) books nothing (the floor stands
-      // its staff down then) and is no evidence about the firm: folding it
-      // in would only decay the rolling books toward zero.
-      if (ledger.totalWorkerSeconds <= 0 &&
+      final idle = ledger.totalWorkerSeconds <= 0 &&
           ledger.shipped.isEmpty &&
-          ledger.energyKJ <= 0) {
+          ledger.energyKJ <= 0;
+      final PlantPnL pnl;
+      if (!idle) {
+        pnl = pnlFor(ledger, book,
+            owner: owner,
+            economy: econ,
+            sellThrough: e.sellThrough,
+            labourShares: floorLabourShares(site));
+      } else if (ledger.seconds > 0 &&
+          starvedS >= kStaffStarvedDayFraction * ledger.seconds) {
+        // The starved-of-staff rule (library doc): the labour market gave
+        // the plant no one while its inputs were there to work, because
+        // its firm can't outbid anyone. That is evidence about the firm,
+        // so the day books what owning the plant costs and the firm is
+        // judged on it: skipped instead, a losing firm the market starves
+        // stays "distressed" for ever and never reaches idle → close.
+        final fixed = standingCostsPerS(site, book);
+        pnl = standingPnlFor(
+            seconds: ledger.seconds,
+            capitalPerS: fixed.capitalPerS,
+            toolingPerS: fixed.toolingPerS);
+      } else {
+        // A day the colony never let the plant work (no inputs, every crate
+        // refused at a full warehouse, no power) books nothing (the floor
+        // stands its staff down then) and is no evidence about the firm:
+        // folding it in would only decay the rolling books toward zero.
+        e.lastPnl[site] = pnlFor(ledger, book,
+            owner: owner,
+            economy: econ,
+            sellThrough: e.sellThrough,
+            labourShares: floorLabourShares(site));
         continue;
       }
+      e.lastPnl[site] = pnl;
       firm.record(pnl);
       if (owner.isState) {
         deficit += math.max(0.0, -pnl.preTax);
@@ -675,6 +769,7 @@ extension CityEconomy on CitySim {
     e.supplyUnits.clear();
     e.importUnits.clear();
     e.madeUnits.clear();
+    e.staffStarvedS.clear();
   }
 
   /// The handler a layoff lets go: the cheapest kind with more than one on

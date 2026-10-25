@@ -245,6 +245,23 @@ class ColonyEconomy {
   /// allocation (runtime: the site panel's "understaffed" reading).
   final SplayTreeMap<String, double> labourShare = SplayTreeMap();
 
+  /// Each floor site's share of its posts the last tick's labour allocation
+  /// filled, BEFORE the colony-wide staffing share is applied
+  /// (`labour_market.dart` `LabourAllocation.share`; runtime). Unlike
+  /// [labourShare] this is the market's verdict on the plant alone: it is
+  /// low because the plant was outbid, not because the colony is short of
+  /// people altogether (which drops every post's share, and the posts the
+  /// plant puts up with it). A site absent from it posted nothing.
+  final SplayTreeMap<String, double> labourMarketShare = SplayTreeMap();
+
+  /// Colony seconds this day so far in which each floor site stood STARVED
+  /// OF STAFF: its [labourMarketShare] under `kStaffStarvedShare` while its
+  /// inputs were in stock (`CityFactories.stepFloorSite`). The day close's
+  /// starved-of-staff rule reads it (`CityEconomy.closeEconomyDay`). Saved
+  /// with the day's other tallies, so a load mid-day judges that day the
+  /// same way.
+  final SplayTreeMap<String, double> staffStarvedS = SplayTreeMap();
+
   /// The colony's own market: every traded good's price, stock and smoothed
   /// flows (docs/plans/dynamic-markets.md phase 1). Empty until the first
   /// day close seeds it from today's solve; saved with the rest.
@@ -327,6 +344,10 @@ class ColonyEconomy {
     labourShareCache.remove(oldId);
     final ls = labourShare.remove(oldId);
     if (ls != null) labourShare[newId] = ls;
+    final lm = labourMarketShare.remove(oldId);
+    if (lm != null) labourMarketShare[newId] = lm;
+    final ss = staffStarvedS.remove(oldId);
+    if (ss != null) staffStarvedS[newId] = ss;
     for (var i = 0; i < offers.length; i++) {
       if (offers[i].site == oldId) {
         offers[i] = FirmOffer(site: newId, options: offers[i].options);
@@ -344,6 +365,8 @@ class ColonyEconomy {
     lastPnl.remove(site);
     labourShareCache.remove(site);
     labourShare.remove(site);
+    labourMarketShare.remove(site);
+    staffStarvedS.remove(site);
     offers.removeWhere((o) => o.site == site);
   }
 
@@ -393,6 +416,7 @@ class ColonyEconomy {
         if (supplyUnits.isNotEmpty) 'sup': {...supplyUnits},
         if (importUnits.isNotEmpty) 'imp': {...importUnits},
         if (madeUnits.isNotEmpty) 'made': {...madeUnits},
+        if (staffStarvedS.isNotEmpty) 'starved': {...staffStarvedS},
         if (!colonyMarket.isEmpty) 'mkt': colonyMarket.toJson(),
         if (!earthMarket.isEmpty) 'earthMkt': earthMarket.toJson(),
         if (sellThrough.isNotEmpty) 'sell': {...sellThrough},
@@ -456,6 +480,7 @@ class ColonyEconomy {
     m(j['sup']).forEach((k, v) => supplyUnits[k] = d(v));
     m(j['imp']).forEach((k, v) => importUnits[k] = d(v));
     m(j['made']).forEach((k, v) => madeUnits[k] = d(v));
+    m(j['starved']).forEach((k, v) => staffStarvedS[k] = d(v));
     // An old save has neither market: both stay empty and the next day
     // close seeds them from today's model.
     colonyMarket = Market.fromJson(m(j['mkt']));

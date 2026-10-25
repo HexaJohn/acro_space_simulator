@@ -163,3 +163,43 @@ PlantPnL pnlFor(
     engineering: overhead.engineering,
   );
 }
+
+/// The books of a STAFF-STARVED day: [seconds] in which the plant sold
+/// nothing, used nothing and paid no wages because the labour market gave
+/// it no one (`CityEconomy.closeEconomyDay`, "the starved-of-staff rule"),
+/// charged only what owning the plant costs whether or not anyone works it:
+/// - its ore build cost recovered at [capitalPerS] ([PlantPnL.capital]);
+/// - its specialised tooling recovered at [toolingPerS] ([PlantPnL.tooling],
+///   `industrial_overhead.dart` `toolingRecoveryPerS`; a working day books
+///   the same recovery per unit shipped instead).
+///
+/// No revenue, so no tax: a private firm's loss is its own, a state plant's
+/// is the industry deficit like any other loss.
+///
+/// Why not book nothing, as a day the colony refused the plant does: a firm
+/// the market starves of staff is starved because it can't outbid anyone
+/// (`labour_market.dart` `labourBid`: private firms bid by margin), so its
+/// idle days ARE evidence about it. Skipping them froze a losing firm at
+/// "distressed" for ever: no `FirmBook.record`, so no `decide`, so the
+/// ladder (lay off → idle → close → offer) never reached its end.
+PlantPnL standingPnlFor({
+  required double seconds,
+  required double capitalPerS,
+  double toolingPerS = 0,
+}) {
+  final s = seconds > 0 ? seconds : 0.0;
+  final cap = capitalPerS > 0 ? capitalPerS * s : 0.0;
+  final tool = toolingPerS > 0 ? toolingPerS * s : 0.0;
+  return PlantPnL(
+    seconds: s,
+    revenue: 0,
+    inputs: 0,
+    wages: 0,
+    power: 0,
+    logistics: 0,
+    equipment: 0,
+    tax: 0,
+    tooling: tool,
+    capital: cap,
+  );
+}

@@ -521,6 +521,21 @@ extension CityFactories on CitySim {
     final ceiling = capPerS * kFloorValueBankSeconds;
     // A firm's idled stations or closed plant (`city_economy.dart`).
     final ft = floorThrottleOf(site);
+    // The day close's starved-of-staff rule needs to know whether the
+    // plant had inputs to work while the labour market gave it no one
+    // (`noteFloorStaffing`): read off the stock it is about to be offered.
+    final rec = factoryFloors[site];
+    if (rec != null && ft > 0) {
+      var onHand = true;
+      final ins = rec.rates.inPerS;
+      for (final c in ins.keys) {
+        if ((ins[c] ?? 0) > 0 && !(stockOf(c) > 1e-9)) {
+          onHand = false;
+          break;
+        }
+      }
+      noteFloorStaffing(site, dt, inputsOnHand: onHand);
+    }
     final port = CityFactoryPort(
       stock: stock,
       stockCap: stockCap,

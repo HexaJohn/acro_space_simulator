@@ -225,6 +225,7 @@ class PlantPnL {
     this.wagesByTier = const {},
     this.tooling = 0,
     this.engineering = 0,
+    this.capital = 0,
   });
 
   static const PlantPnL zero = PlantPnL(
@@ -258,8 +259,30 @@ class PlantPnL {
   /// or [wagesByTier], which are the floor's hours.
   final double engineering;
 
+  /// The plant's standing CAPITAL charge, credits: its ore build cost at the
+  /// local ore price, recovered straight-line over `kCapitalRecoveryYears`
+  /// (the same term the cost solve prices it over, `local_prices.dart`).
+  ///
+  /// Booked ONLY on a day the labour market left the plant unstaffed
+  /// (`standingPnlFor` in `plant_pnl.dart`, with the day's tooling recovery
+  /// in [tooling]). A working day's books carry the plant's capital inside
+  /// its margin: the cost solve prices it into what the plant sells, so a
+  /// price-setting plant's "normal margin" is its capital recovery. A day
+  /// with no sales has no margin to carry it, yet a firm that can't staff
+  /// its plant still owns the plant, and those idle days must still read as
+  /// a loss or the firm is never judged (the layoff → idle → close ladder
+  /// stalls). Zero on every working day.
+  final double capital;
+
   double get costs =>
-      inputs + wages + power + logistics + equipment + tooling + engineering;
+      inputs +
+      wages +
+      power +
+      logistics +
+      equipment +
+      tooling +
+      engineering +
+      capital;
   double get preTax => revenue - costs;
   double get profit => preTax - tax;
 
@@ -268,6 +291,7 @@ class PlantPnL {
         'pow': power, 'log': logistics, 'eq': equipment, 'tax': tax,
         if (tooling != 0) 'tool': tooling,
         if (engineering != 0) 'eng': engineering,
+        if (capital != 0) 'cap': capital,
         if (wagesByTier.isNotEmpty)
           'wt': {for (final e in wagesByTier.entries) e.key.name: e.value},
       };

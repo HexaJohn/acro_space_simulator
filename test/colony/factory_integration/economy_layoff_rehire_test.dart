@@ -14,6 +14,7 @@ library;
 import 'package:acro_space_simulator/application/factory/colony_floor_measurer.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_economy.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_factories.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/firm_policy.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
@@ -52,6 +53,80 @@ void main() {
     final r = measureBlueprint(rec.blueprint, buildFloorForMeasure,
         settings: measureSettingsFor('steelmill'));
     expect(r.outPerS['steel'] ?? 0, greaterThan(0));
+  });
+
+  // The starved-of-staff rule (`city_economy.dart` library doc). The labour
+  // market staffs flat buildings first, then floors by bid (a losing
+  // private firm bids last), each a balanced crew, so a floor whose crew
+  // needs a tier nobody is left in gets no one. That is what stalled the
+  // test above: by ~day 100 its allocation share had fallen to 0 as its
+  // roster thinned, the floor booked no work at all, and the day close
+  // skipped every such day as "the colony refused the plant", freezing the
+  // firm at distressed for ever. Here the
+  // colony has no one above unskilled (the mix is pinned each tick) and
+  // the mill's handlers are skilled: its share is 0 from the first tick,
+  // with its inputs in stock. It must still be judged, on what owning the
+  // plant costs, and walk idle → close → offer.
+  test('a firm starved of staff by the labour market still closes', () {
+    final sim = economyColony();
+    final mill = specOf('steelmill');
+    final lot = placePlant(sim, 'steelmill');
+    // One of each kind: nothing left to lay off, so the ladder is idle,
+    // then a close after the distress grace.
+    final roster = sim.factoryFloors[lot]!.blueprint.roster;
+    for (final k in roster.keys.toList()) {
+      roster[k] = 1;
+    }
+    final mix = sim.colonyEconomy.labour.mix;
+    void pinMix() => mix
+      ..clear()
+      ..addAll({for (final t in SkillTier.values) t: 0.0})
+      ..[SkillTier.unskilled] = 1.0;
+    final ticks = (45 * kColonyDaySec / kEconTickS).round();
+    var sawStarved = false;
+    for (var i = 0; i < ticks; i++) {
+      sim.population = kEconPopulation;
+      pinMix();
+      holdStock(sim, mill);
+      sim.advance(kEconTickS);
+      if ((sim.colonyEconomy.staffStarvedS[lot] ?? 0) > 0) sawStarved = true;
+      if (sim.floorThrottleOf(lot) == 0) break;
+    }
+    expect(sawStarved, isTrue, reason: 'the market gave it no one');
+    expect(sim.colonyEconomy.labourMarketShare[lot] ?? 1,
+        lessThan(kStaffStarvedShare));
+    final pnl = sim.colonyEconomy.lastPnl[lot]!;
+    expect(pnl.wages, 0, reason: 'nobody worked');
+    expect(pnl.revenue, 0);
+    expect(pnl.capital, greaterThan(0),
+        reason: 'an unstaffed day books what owning the plant costs');
+    expect(sim.firmBookOf(lot)!.health, FirmHealth.closed);
+    expect(sim.pendingFirmOffers.map((o) => o.site), contains(lot));
+  });
+
+  // The other idle cause stays exempt: no inputs in stock is the colony's
+  // stall, not the firm's failing, even while the market staffs no one
+  // (a floor with no inputs to work posts its jobs all the same).
+  test('a plant the colony starves of inputs is not judged', () {
+    final sim = economyColony();
+    final mill = specOf('steelmill');
+    final lot = placePlant(sim, 'steelmill');
+    final mix = sim.colonyEconomy.labour.mix;
+    final ticks = (20 * kColonyDaySec / kEconTickS).round();
+    for (var i = 0; i < ticks; i++) {
+      sim.population = kEconPopulation;
+      mix
+        ..clear()
+        ..addAll({for (final t in SkillTier.values) t: 0.0})
+        ..[SkillTier.unskilled] = 1.0;
+      holdStock(sim, mill, inputs: 0);
+      sim.advance(kEconTickS);
+    }
+    expect(sim.colonyEconomy.staffStarvedS[lot], isNull);
+    final book = sim.firmBookOf(lot)!;
+    expect(book.health, FirmHealth.healthy);
+    expect(book.costPerS, 0, reason: 'no day was booked');
+    expect(sim.floorThrottleOf(lot), 1);
   });
 
   // Nationalising rehires too: a state plant on a stripped roster would
