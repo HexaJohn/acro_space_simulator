@@ -509,6 +509,17 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
     - Cost: it changes the engine's feed rule; all seven templates are redrawn within 5% of
       spec; the tutorial is rewritten. Build it alongside construction crews and blueprint mode.
 
+20. **Station operators are hired people.** Manual (2) and assisted (1) stations need operators
+    the player HIRES, a new Operator role in the roster, not an abstract staffing share (today
+    the sandbox is always 100% staffed, and a colony uses a colony-wide percentage).
+    - Operators walk to their station and stand there; you can see who mans what. A station
+      without its operator is unstaffed and idle.
+    - Assignment fills the nearest stations first, with an option to pin a person to a machine.
+    - Automated stations need 0 operators plus a share of a hired Technician role.
+    - Each shift has its own operator crew (#5). Wages and the supply of skilled people come from
+      the labour market (dynamic markets phase 3).
+    - Templates ship with their operators hired, so placing a plant still makes its spec rate.
+
 **Defaults for the open questions** (2026-10-25; the user said go without picking, so these are
 the recommendations; revisit if they object):
 
