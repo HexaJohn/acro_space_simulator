@@ -409,3 +409,50 @@ and no existing file is modified.
   4. Off-world Steel Mill, Refinery and Rations margins are about 0.1-0.3%.
   5. A road edit that drops a designed floor only posts a notice.
   6. Firm offers show in the flight view only while the editor overlay is open.
+
+## 10. Playtest feedback backlog (user, 2026-10-25; do not build until the user says go)
+
+From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dart`):
+
+1. **Placement arrows don't read.** The ghost shows facing as a bare line. Add an arrowhead. An
+   arm's ghost tints its "takes from" tile and its "drops into" tile.
+2. **Tutorial steps 5 and 6 are unclear** about getting parts out of the assembler. Rewrite them
+   as explicit arm-and-belt placement first, with the pallet jack introduced later as the
+   alternative.
+3. **Docks are oddly sized, and can be placed mid-hall.** There is no wall rule anywhere. A dock
+   becomes a door on an outer wall facing out: a 4 m door, a 4×6 m loading area inside, the truck
+   drawn outside. The ghost snaps to the wall, and placement elsewhere is refused.
+4. **Docks feed constantly. Replace this with ordering, like the spaceport.**
+   - Inbound: one-off or recurring orders ("weekdays 06:00, 2 truckloads of tubes"), arriving
+     after a lead time and unloaded by handlers. A dock conveyor is a paid upgrade.
+   - Outbound: scheduled pickups, or a truck called when N pallets are ready.
+5. **Calendar, shifts, time off.**
+   - 1st, 2nd and 3rd shifts, weekdays and weekends, a crew per shift, a pay premium for 2nd and
+     3rd shift, staggered vacations and holidays.
+   - Automated stations run off-hours (the case for automation).
+   - Speeds 1/4/16/60×, "Skip to next shift", and an "Auto-skip off-hours" setting.
+   - Open: the clock scale (real-time floor vs compressed), and how shifts map to the colony's
+     120 s day.
+6. **Electronics vs Electronics Crate is confusing.**
+   - With ordering, you order goods and trucks bring them packed. Pallets are broken down in the
+     dock area, by hand or by an unpacker, so packs stop being a dock choice.
+   - Meanwhile, give the picker clearer names ("loose, hand-carried" / "×10 crate, pallet"), mark
+     which machines use each item, and warn when nothing uses a dock's item.
+7. **Shift+R rotates counter-clockwise**, for the ghost and for rotating a placed item.
+8. **Redraw over belts to redirect them.** Belt tiles along a drag take the new direction, items on
+   them are kept, crossings keep their walkway, anything that isn't a belt still blocks, and the
+   ghost tints the redirected tiles.
+9. **Area delete.**
+   - Drag a rectangle with the Delete tool. Floor markings are kept unless Shift is held.
+   - A red preview with counts. Held goods become floor piles.
+   - Ctrl+Z undo. Open: undo for area deletes only, or for every edit.
+10. **Belt placement modes:** Straight (axis-locked), L-shape (one corner, a key flips it) and
+    Freeform. A toggle by the tool, Shift forces Straight while dragging, and the same modes apply
+    to aisles.
+11. **The outside world isn't unlimited.**
+    - Suppliers have finite stock, a refill rate, a price, a lead time and a truck size.
+    - Customers have contracts with delivery windows, plus a spot market.
+    - In a colony, these are the colony's own stock and plants plus spaceport imports (via dynamic
+      markets later).
+    - **Toggleable:** an "Unlimited supply" sandbox switch, and the goal tracker marks runs that
+      used it.
