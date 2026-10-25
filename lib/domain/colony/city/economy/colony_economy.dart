@@ -40,6 +40,7 @@ import '../factory/factory_handling.dart';
 import '../factory/factory_sim_api.dart';
 import '../factory/floor_blueprint.dart';
 import 'economy_contracts.dart';
+import 'entrepreneurs.dart';
 import 'firm_policy.dart';
 import 'labour_market.dart';
 import 'learning.dart';
@@ -227,6 +228,13 @@ class ColonyEconomy {
   /// like [tech], so a colony with no plant keeps its wages across a load.
   LabourMarket labour = LabourMarket();
 
+  /// The colony's entrepreneurs: the founding cooldown, each good's margin
+  /// pressure, the firm counter and what has been founded
+  /// (docs/plans/dynamic-markets.md phase 4, `entrepreneurs.dart`). Saved by
+  /// `CitySim` under its own key ('founding'), like [tech]: the pressure
+  /// builds before the colony has any plant at all.
+  FoundingState founding = FoundingState();
+
   /// Each floor site's labour shares by tier, with the record revision they
   /// were read at (runtime cache of `labourProfileOf`, re-read when the
   /// floor's layout or roster changes).
@@ -347,6 +355,12 @@ class ColonyEconomy {
   /// the economy, and its markets re-seed from today's model on load (the
   /// old-save path). No plant's books depend on them, and a plant placed
   /// later starts the colony saving them with everything else.
+  ///
+  /// Founding pressure ([founding]) doesn't count either, though it is
+  /// saved (its own key): a plantless colony's shortage price re-seeds at
+  /// the cost solve's on load, and if that reads under the founding
+  /// threshold the count simply starts over (`FoundingState.recordDay`).
+  /// The old save shape is worth more than a few days of a count.
   bool get hasState =>
       books.isNotEmpty ||
       throttle.isNotEmpty ||

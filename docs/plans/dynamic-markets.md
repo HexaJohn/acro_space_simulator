@@ -128,6 +128,20 @@ against the skilled jobs posted, priced like any other good.
 4. **Entrepreneurs.** When a good's local margin stays high, an AI firm founds a plant for it on
    a site the build snap finds (`CitySim.snapSiteCentre`), within the colony's rules (economy
    type, ore, unlocks).
+   *Built* (`economy/entrepreneurs.dart`, `city_entrepreneurs.dart`). Each day close scores every
+   good a buildable floor plant makes by a new template plant's margin (revenue at today's price
+   × the sell-through it could expect with its own output added, against tier wages, inputs,
+   power, freight, wear and capital recovery), smoothed over a week. Twenty-one days above 40%
+   (the normal margin is 25% of revenue) found a plant, at most one a month: a new firm
+   ("Aldine Corp"), seed capital off-world in shadow credits (build cost + a quarter as cash), ore
+   from colony stock only when it holds twice the cost, else imported at the ceiling. Gates: idle
+   workers for half its jobs, spare power, half its inputs spare; a site from the build snap along
+   the roads, never over a zoned or built lot. Socialism at a third of the rate, communism never;
+   none while Industrial Licensing (a new law, off by default) is in force, or in a colony that
+   is independent, occupied, Defiant, in Standoff or under a no-demolition term. Exit is the
+   existing firm policy. Finding: an Earth colony's Refinery reads a 61% margin (its fuel sells
+   at Earth's extraction cost, which its ore recipe undercuts), so an Earth colony with spare ore
+   and workers will attract refineries.
 5. **Inter-colony trade.** Each player colony is a source and destination for the others, linked
    by transport cost.
 6. **UI.** A price chart per good ("why this price"), the labour market, invention news, and firm

@@ -42,6 +42,7 @@ import 'dart:math' as math;
 
 import '../../planetary/atmospheric_composition.dart';
 import 'city_building_spec.dart';
+import 'city_entrepreneurs.dart';
 import 'city_sim.dart';
 import 'commodity.dart';
 import 'economy/colony_economy.dart';
@@ -654,6 +655,10 @@ extension CityEconomy on CitySim {
     // skill mix drifts toward what schooling and pay aim it at. Tomorrow's
     // cost solve and books read the new wages.
     e.labour.closeDay(coverage: educationCoverage);
+    // Entrepreneurs (docs/plans/dynamic-markets.md phase 4): with today's
+    // prices closed, a good whose margin has stayed high long enough draws
+    // a firm to found a plant for it (`city_entrepreneurs.dart`).
+    entrepreneursCloseDay(day);
     e.dayClockS = 0;
     e.demandUnits.clear();
     e.supplyUnits.clear();

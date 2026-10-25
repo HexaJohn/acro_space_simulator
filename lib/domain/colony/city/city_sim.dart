@@ -271,7 +271,17 @@ enum Law {
   parkingOrdinance('Parking Ordinance', 'no kerb parking: cars park in lots'),
   pedestrianPriority(
       'Pedestrian Priority', 'crashes −, junctions slower, happiness +'),
-  vehicleLicensing('Vehicle Licensing', 'crashes −, fewer cars, funds +');
+  vehicleLicensing('Vehicle Licensing', 'crashes −, fewer cars, funds +'),
+
+  /// No private firm may found a plant of its own (docs/plans/
+  /// dynamic-markets.md phase 4, `city_entrepreneurs.dart`). A law that
+  /// FORBIDS, so the default (not enacted) is what a market economy does:
+  /// firms found plants where margins stay high, and an old save, with no
+  /// such law, keeps that default. Communism needs no licence: it allows no
+  /// private enterprise at all. No vote enacts it; it is the player's
+  /// switch. Appended: saves keep laws by name.
+  industrialLicensing(
+      'Industrial Licensing', 'private firms may not found plants');
 
   final String label;
   final String effect;
@@ -5712,6 +5722,11 @@ class CitySim {
         // has none and seeds the wages at their anchors and the mix at what
         // the colony's schooling aims for.
         'labour': ?colonyEconomy.labour.toJsonOrNull(),
+        // Entrepreneurs (`economy/entrepreneurs.dart`): the founding
+        // cooldown, the goods' margin pressure and the firm counter, their
+        // own key like 'tech'. An old save has none and starts with no
+        // pressure, so nothing founds for three weeks after a load.
+        'founding': ?colonyEconomy.founding.toJsonOrNull(),
       };
 
   /// [fineCorridors] as saved: those of roads still in the layout.
@@ -6005,6 +6020,8 @@ class CitySim {
         .restoreTech((j['tech'] as Map?)?.cast<String, Object?>());
     sim.colonyEconomy.labour
         .restore((j['labour'] as Map?)?.cast<String, Object?>());
+    sim.colonyEconomy.founding
+        .restore((j['founding'] as Map?)?.cast<String, Object?>());
     sim.reconcileFactoryFloors();
     // The loading drain (docs/plans/site-access.md §4.1, §3.10): every plan
     // is re-derived inside the load, not on the first gameplay tick, and
