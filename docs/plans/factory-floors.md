@@ -457,6 +457,24 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
     - **Toggleable:** an "Unlimited supply" sandbox switch, and the goal tracker marks runs that
       used it.
 
+12. **Delete hotkey.** Del removes the selection today; add a key that picks the Delete TOOL (e.g.
+    X), as builder games do.
+13. **Construction crews, Prison Architect style.**
+    - Placing a machine (or belt, dock, rack) does not make it appear. It posts a CONSTRUCTION job:
+      a crew brings the materials (the item's capex, carried like freight) and works for a build
+      time, then it switches on.
+    - Removing posts a DISMANTLE job: a crew takes it down over time and carries back the salvage.
+    - Crews are handlers with a builder role, hired like the rest; the job queue is visible.
+14. **Blueprint planning mode.**
+    - A separate mode with a literal blueprint look: blue background, white lines.
+    - Lay out a floor there and SIMULATE it (the sandbox floor, no cost) before building for
+      real.
+    - "Build this plan" turns the difference between the plan and the live floor into
+      construction and dismantle jobs for the crews.
+15. **The product tree is too strong for the game.** Keep the full tree as a DEBUG tool (dev
+    entry and a debug flag only). In game, the player sees either the raw materials an item needs
+    in total, or its DIRECT components (one level). Never the whole chain.
+
 **Defaults for the open questions** (2026-10-25; the user said go without picking, so these are
 the recommendations; revisit if they object):
 
