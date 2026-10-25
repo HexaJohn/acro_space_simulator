@@ -494,6 +494,21 @@ From the user's own run of the Rocket Parts tutorial (`main_factory_tutorial.dar
       square.
     - A legend lists every item colour currently on the floor.
 
+19. **Explicit machine inputs and outputs (ports): the routing puzzle.**
+    - Each station kind has fixed connection points on its edges, rotating with the machine. A
+      belt must end facing INTO an input port to feed it; an output port pushes onto a belt
+      leading away. Several inputs and outputs per machine, byproducts on their own output.
+    - Ports are drawn as green (in) and orange (out) notches, shown on the ghost and lit when
+      connected.
+    - OPEN for the user:
+      (1) arms: remove them, keep them only for chests and docks, or keep them as a slow
+          alternative (rec: chests and docks only);
+      (2) handlers feed through a marked hand port per station (rec);
+      (3) port items fixed per recipe slot (rec, a harder puzzle) or any input at any port;
+      (4) port layout per station kind (rec) or per recipe.
+    - Cost: it changes the engine's feed rule; all seven templates are redrawn within 5% of
+      spec; the tutorial is rewritten. Build it alongside construction crews and blueprint mode.
+
 **Defaults for the open questions** (2026-10-25; the user said go without picking, so these are
 the recommendations; revisit if they object):
 
