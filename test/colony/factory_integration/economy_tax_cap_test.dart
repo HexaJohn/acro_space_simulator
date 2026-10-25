@@ -20,6 +20,7 @@ import 'package:acro_space_simulator/domain/colony/city/city_economy.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/colony_economy.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/industrial_overhead.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -34,7 +35,10 @@ void main() {
         final sim = economyColony(bodyId: body);
         placePlant(sim, type);
         runDays(sim, 1.01, specs: [specOf(type)], inputs: 1e5);
-        final workerTax = specOf(type).jobs *
+        // Its staff: the floor's jobs and, for an advanced plant, the
+        // overhead engineers its books pay (`industrial_overhead.dart`).
+        final staff = specOf(type).jobs + overheadJobsOf(type);
+        final workerTax = staff *
             kCapHappiness *
             CitySim.defaultTaxRate *
             CitySim.taxPerWorkerPerSec *

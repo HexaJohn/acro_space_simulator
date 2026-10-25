@@ -190,7 +190,13 @@ void main() {
       at(2),
       earthPrices: earth,
     ).localCost[Commodity.rocketParts]!;
-    expect(dear, greaterThan(cheap * 1.1));
+    // By the floor crew's engineers only: since `industrial_overhead.dart`
+    // most of a rocket part's cost is tooling and overhead engineering, and
+    // those hours are contracted at Earth's rate once the colony's own
+    // engineers are dearer, so doubling the engineering wage moves the
+    // cost by the floor's share (under 1%), not the 10% it did.
+    expect(dear, greaterThan(cheap));
+    expect(dear, lessThan(cheap * 1.1));
   });
 
   // Schools: the share of the colony they teach moves the skill mix.

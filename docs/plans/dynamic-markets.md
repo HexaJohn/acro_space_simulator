@@ -125,6 +125,18 @@ against the skilled jobs posted, priced like any other good.
    electronics, rocket parts and missiles land 16×, 40× and 190× under real-world, because their
    flat recipes are far more productive per worker than the real trades; closing that is a recipe
    retune, not a price.
+   *Follow-up, advanced overheads* (`economy/industrial_overhead.dart`, user said yes 2026-10-25).
+   The Electronics, Rocket Parts, Missile and Arms plants carry a documented TOOLING capital in
+   credits ($400M, $1.5B, $8B, $60M: clean rooms, test stands, ranges), recovered over ten
+   game-years of nameplate, and ENGINEERING hours per unit (8 h a tray, 300 h a crate, 5,000 h a
+   missile, 2 h a rifle, 0.1 h an ammo case) at the cheaper of the colony's and Earth's
+   engineering wage (engineering is a traded service). The ore build cost stays the physical
+   construction cost. The P&L books both lines on units shipped; they are overhead, not floor
+   crew. Day-0 Earth prices are now ×1.00, ×1.05 and ×0.84 the real-world reference for
+   electronics, rocket parts and missiles (guns ×0.80, ammo ×0.76). The recurring tooling and
+   engineering are in the mature cost; the learning premium stays the non-recurring part, so
+   nothing counts twice. An advanced plant's overhead engineers count as staff for the tax
+   ceiling: Rocket Parts pays 19× → 8× and Missiles 12× → 3.8× their staff's tax over a decade.
 4. **Entrepreneurs.** When a good's local margin stays high, an AI firm founds a plant for it on
    a site the build snap finds (`CitySim.snapSiteCentre`), within the colony's rules (economy
    type, ore, unlocks).

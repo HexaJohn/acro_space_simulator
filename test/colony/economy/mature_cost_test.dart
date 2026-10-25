@@ -13,6 +13,8 @@ import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/commodity_mass.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/earth_market.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_clock.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
+import 'package:acro_space_simulator/domain/colony/city/economy/industrial_overhead.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/learning.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/local_prices.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/markets.dart';
@@ -23,14 +25,13 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The goods whose derived Earth price lands more than an order of
-/// magnitude under the real-world reference, and why: their flat recipes
-/// are far more productive per worker than the real trades (50 people make
-/// 40 kg of rocket parts every colony second — 4.8 t a day — out of 43 kg
-/// of tube and boards, so the part costs little more than its materials),
-/// and the real price is mostly engineering hours, R&D and capital the
-/// recipe doesn't carry. Closing it is a recipe retune, not a price.
-const Set<String> kRecipeBoundGoods = {
+/// The advanced goods whose real price is mostly what the recipe leaves out:
+/// specialised tooling and engineering hours. Before
+/// `industrial_overhead.dart` their derived Earth prices landed 16×, 40× and
+/// 190× under real-world (50 people make 4.8 t of rocket parts a day out of
+/// little more than their materials); with the tooling and engineering
+/// lines they sit within 3× of it, a tighter band than the other goods'.
+const Set<String> kOverheadBoundGoods = {
   Commodity.electronics,
   Commodity.rocketParts,
   Commodity.missiles,
@@ -81,10 +82,12 @@ void main() {
 
   // The carry-over fix: rocket parts' mature price is its recipe's inputs
   // at Earth's mature prices, its jobs at Earth's tier wages, its energy,
-  // the capital recovery of its build cost, its floor's freight fee and
-  // equipment wear, plus the normal margin — recomputed here by hand.
+  // the capital recovery of its build cost, its specialised tooling and its
+  // overhead engineering hours (`industrial_overhead.dart`), its floor's
+  // freight fee and equipment wear, plus the normal margin — recomputed
+  // here by hand.
   test('rocket parts: mature price = inputs + labour + energy + capital + '
-      'margin', () {
+      'tooling + engineering + margin', () {
     final spec = kUtilCatalog.firstWhere((s) => s.type == 'rocketfactory');
     expect(m.sourceOf[Commodity.rocketParts], spec.type);
     var inputs = 0.0, units = 0.0;
@@ -112,25 +115,41 @@ void main() {
       wear += (roster[k] ?? 0) * equipmentWearPerS(k);
     }
     final freight = units * kLogisticsFeePerUnit;
-    final direct = inputs + labour + energy + capital + wear + freight;
     final rate = spec.outputs[Commodity.rocketParts]!;
+    // Tooling: $1.5B straight-line over ten game-years of nameplate.
+    final tooling = toolingRecoveryPerS(spec.type);
+    expect(
+      tooling,
+      closeTo(1.5e9 / (kCapitalRecoveryYears * kGameYearSec), 1e-6),
+    );
+    // Engineering: 300 h a crate at Earth's engineering wage, an hour
+    // being 15 colony worker-seconds.
+    final engineering =
+        300 * kWorkerSecondsPerHour * book.wageOf(SkillTier.engineering) *
+        rate;
+    final direct =
+        inputs + labour + energy + capital + tooling + engineering + wear +
+        freight;
     final expected = direct * (1 + kNormalMargin) / rate;
     final got = earthMatureCost(Commodity.rocketParts)!;
     expect(got, closeTo(expected, expected * 1e-6));
     // The labour is engineers and skilled handlers, dearer than the cost
     // of living (2.3× on average for the template's crew).
     expect(wageMultipleOf(labourSharesOf(spec.type)), greaterThan(2));
-    // No longer eight times its inputs (phase 2's seed calibration): the
-    // inputs are most of the direct cost, and the price is about twice them.
+    // What dominates a real rocket part dominates this one: tooling and
+    // engineering are most of the direct cost, the materials a small part.
     final perUnitInputs = inputs / rate;
-    expect(got / perUnitInputs, inInclusiveRange(1.5, 2.5));
+    expect((tooling + engineering) / direct, greaterThan(0.8));
+    expect(inputs / direct, lessThan(0.2));
     // ignore: avoid_print
     print(
       'rocket parts mature ${got.toStringAsFixed(1)}/unit: inputs '
       '${(inputs / rate).toStringAsFixed(1)}, labour '
       '${(labour / rate).toStringAsFixed(1)}, energy '
       '${(energy / rate).toStringAsFixed(2)}, capital '
-      '${(capital / rate).toStringAsFixed(4)}, wear+freight '
+      '${(capital / rate).toStringAsFixed(4)}, tooling '
+      '${(tooling / rate).toStringAsFixed(1)}, engineering '
+      '${(engineering / rate).toStringAsFixed(1)}, wear+freight '
       '${((wear + freight) / rate).toStringAsFixed(2)}, margin '
       '${(direct * kNormalMargin / rate).toStringAsFixed(1)} '
       '(${(got / perUnitInputs).toStringAsFixed(2)}× inputs)',
@@ -152,8 +171,8 @@ void main() {
 
   // The old table survives only as this: a real-world sanity reference.
   // Every derived Earth price is within an order of magnitude of what the
-  // good really sells for, except the recipe-bound advanced goods, which
-  // land below it by the documented margin (see [kRecipeBoundGoods]).
+  // good really sells for, and the overhead-bound advanced goods within 3×
+  // (see [kOverheadBoundGoods]).
   test('derived Earth prices against the real-world reference', () {
     final t = TechState();
     final lines = <String>[];
@@ -167,9 +186,8 @@ void main() {
         '${(real / kgPerUnit(c)).toStringAsFixed(3)} (×${r.toStringAsFixed(3)}, '
         '${goodClassOf(c).name})',
       );
-      if (kRecipeBoundGoods.contains(c)) {
-        expect(r, lessThan(0.1), reason: '$c: recipe-bound, below real');
-        expect(r, greaterThan(0.001), reason: '$c: but not absurdly');
+      if (kOverheadBoundGoods.contains(c)) {
+        expect(r, inInclusiveRange(1 / 3, 3), reason: '$c ×$r');
       } else {
         expect(r, inInclusiveRange(0.1, 10), reason: '$c ×$r');
       }

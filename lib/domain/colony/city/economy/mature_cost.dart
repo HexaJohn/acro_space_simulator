@@ -21,8 +21,17 @@
 ///                  + jobs × Earth's wage for each job's skill tier
 ///                  + energy at Earth's power price
 ///                  + capital recovery of the plant's build cost
+///                  + an advanced plant's tooling recovery
 ///                  + a floor plant's freight fee and equipment wear)
 ///                 × (1 + [kNormalMargin]) ÷ output rate
+///                + an advanced good's engineering hours per unit
+///                  at the engineering wage, × (1 + [kNormalMargin])
+///
+/// The two advanced lines (`industrial_overhead.dart`) are the specialised
+/// tooling a plant's firm finances in credits and the design, test and
+/// certification hours each unit needs. Without them electronics, rocket
+/// parts and missiles came out 16×, 40× and 190× under real-world; with
+/// them they sit within ~5% of it on day 0 (×1.00, ×1.05, ×0.84).
 ///
 /// which is exactly the colony cost solve (`local_prices.dart`) run on
 /// Earth's facts with no import source, so the two can never disagree on

@@ -223,6 +223,8 @@ class PlantPnL {
     required this.equipment,
     required this.tax,
     this.wagesByTier = const {},
+    this.tooling = 0,
+    this.engineering = 0,
   });
 
   static const PlantPnL zero = PlantPnL(
@@ -245,13 +247,27 @@ class PlantPnL {
   /// book, where [wages] is all at the one wage.
   final Map<SkillTier, double> wagesByTier;
 
-  double get costs => inputs + wages + power + logistics + equipment;
+  /// Specialised tooling recovered on the units shipped, credits: the
+  /// credit investment an advanced plant's firm financed, paid back out of
+  /// revenue (`industrial_overhead.dart`). Zero for a plant with none.
+  final double tooling;
+
+  /// Overhead ENGINEERING wages, credits: the design, test and
+  /// certification hours the units shipped carry, at the engineering tier
+  /// wage (`industrial_overhead.dart`). Not floor crew, so not in [wages]
+  /// or [wagesByTier], which are the floor's hours.
+  final double engineering;
+
+  double get costs =>
+      inputs + wages + power + logistics + equipment + tooling + engineering;
   double get preTax => revenue - costs;
   double get profit => preTax - tax;
 
   Map<String, Object?> toJson() => {
         's': seconds, 'rev': revenue, 'in': inputs, 'wage': wages,
         'pow': power, 'log': logistics, 'eq': equipment, 'tax': tax,
+        if (tooling != 0) 'tool': tooling,
+        if (engineering != 0) 'eng': engineering,
         if (wagesByTier.isNotEmpty)
           'wt': {for (final e in wagesByTier.entries) e.key.name: e.value},
       };

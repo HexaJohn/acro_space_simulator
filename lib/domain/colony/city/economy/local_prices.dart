@@ -79,6 +79,11 @@
 /// the book carries every tier's wage ([PriceBook.tierWages]). The ratios
 /// are constants within a solve, so the map stays monotone.
 ///
+/// An advanced plant's recipe also carries its specialised TOOLING
+/// recovery (a credit investment, beside the ore build cost) and its
+/// overhead ENGINEERING hours per unit, at the cheaper of the market's and
+/// Earth's engineering wage (`industrial_overhead.dart`).
+///
 /// The same solve, handed Earth's facts, no import source at all, the raw
 /// goods [pinned] at their extraction cost and a normal margin as
 /// [costMarkup], is how Earth's MATURE cost of every manufactured good is
@@ -100,6 +105,7 @@ import 'commodity_mass.dart';
 import 'earth_market.dart';
 import 'economy_clock.dart';
 import 'economy_contracts.dart';
+import 'industrial_overhead.dart';
 import 'plant_pnl.dart';
 import 'skill_tiers.dart';
 import 'transport_cost.dart';
@@ -389,6 +395,9 @@ LocalMarket solveLocalMarket(
           s.powerDraw * powerUnit +
           s.computeDraw * computeUnit +
           s.buildCost * (p[Commodity.ore] ?? 0) * capexPerS +
+          // An advanced plant's specialised tooling, a credit investment
+          // recovered over the same term (`industrial_overhead.dart`).
+          toolingRecoveryPerS(s.type) +
           (_templateWearPerS[s.type] ?? 0);
       var units = 0.0;
       for (final e in s.inputs.entries) {
@@ -405,6 +414,13 @@ LocalMarket solveLocalMarket(
       return cost + units * fee;
     }
 
+    // The engineering wage an advanced recipe's overhead design, test and
+    // certification hours are paid: the market's, or Earth's contract rate
+    // where that is cheaper (`industrial_overhead.dart`). A min of a
+    // non-decreasing map and a constant, so the solve stays monotone.
+    final engWage = engineeringWagePerS(wage *
+        skillMultipleOf(SkillTier.engineering) *
+        (facts.wageRatio[SkillTier.engineering] ?? 1.0));
     var nextPower = double.infinity;
     var nextCompute = double.infinity;
     final cost = <String, double>{};
@@ -433,9 +449,12 @@ LocalMarket solveLocalMarket(
         // puts the premium its inexperience still carries on top
         // (`learning.dart`). A constant factor ≥ 1, so the map stays
         // monotone and the fixed point still converges from below.
-        final unit = c *
-            share /
-            rate *
+        //
+        // Overhead engineering is per unit made, whatever the yield: each
+        // unit is tested and certified once.
+        final engineering =
+            engineeringWorkerSecondsPerUnit(s.type, e.key) * engWage;
+        final unit = (c * share / rate + engineering) *
             (facts.learningMult[e.key] ?? 1.0) *
             costMarkup;
         final had = cost[e.key];

@@ -23,6 +23,7 @@ library;
 import '../factory/factory_handling.dart';
 import '../factory/factory_ledger.dart';
 import 'economy_contracts.dart';
+import 'industrial_overhead.dart';
 
 /// Freight fee per commodity unit through a dock, credits: hauling a
 /// pallet a few kilometres across the colony (~$0.10/t-km over ~5 km).
@@ -79,6 +80,14 @@ double corporateTaxRate(EconomyKind e) => switch (e) {
 /// and a plant is staffed in its profile's proportions either way. With no
 /// shares (a hand-built book or ledger) every hour is paid the book's one
 /// wage.
+///
+/// **Advanced overheads** (`industrial_overhead.dart`): every unit shipped
+/// of a good an advanced plant makes books its tooling recovery
+/// ([PlantPnL.tooling], straight-line over the plant's nameplate life, the
+/// way program accounting spreads tooling over planned units) and its
+/// design, test and certification hours at the book's engineering wage
+/// ([PlantPnL.engineering]). Per unit SHIPPED, so a plant whose market
+/// takes only part of its output carries more tooling per unit sold.
 PlantPnL pnlFor(
   FactoryLedger ledger,
   PriceBook book, {
@@ -128,7 +137,15 @@ PlantPnL pnlFor(
   final power = ledger.energyKJ * book.powerPerKJ;
   final logistics =
       (unitsOf(ledger.received) + unitsOf(ledger.shipped)) * logisticsPerUnit;
-  final preTax = revenue - (inputs + wages + power + logistics + equipment);
+  final overhead = overheadBooked(ledger.shipped, book);
+  final preTax = revenue -
+      (inputs +
+          wages +
+          power +
+          logistics +
+          equipment +
+          overhead.tooling +
+          overhead.engineering);
   final tax = owner.isState || preTax <= 0
       ? 0.0
       : preTax * corporateTaxRate(economy);
@@ -142,5 +159,7 @@ PlantPnL pnlFor(
     equipment: equipment,
     tax: tax,
     wagesByTier: Map.unmodifiable(byTier),
+    tooling: overhead.tooling,
+    engineering: overhead.engineering,
   );
 }

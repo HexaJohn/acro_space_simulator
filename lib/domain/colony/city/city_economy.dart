@@ -49,6 +49,7 @@ import 'economy/colony_economy.dart';
 import 'economy/economy_clock.dart';
 import 'economy/economy_contracts.dart';
 import 'economy/firm_policy.dart';
+import 'economy/industrial_overhead.dart';
 import 'economy/labour_market.dart';
 import 'economy/learning.dart';
 import 'economy/local_prices.dart';
@@ -98,18 +99,21 @@ const List<HandlerKind> kLayoffOrder = [
 /// 30×, generous on purpose. Since phase 3 of docs/plans/dynamic-markets.md
 /// every good's mature cost is derived from its recipe (`mature_cost.dart`),
 /// and at Earth's day-0 prices the templates pay 0.3× (Rations) to 3×
-/// (Refinery) their workers' tax, the Missile Plant 9.5× and Rocket Parts
-/// 17× (their goods' learning premium, the first mover's rent), so the
-/// saturation shaves the mill ~2% and Rocket Parts ~25%.
+/// (Refinery) their workers' tax, the Missile Plant ~12× and Rocket Parts
+/// ~19× their staff's (their goods' learning premium, the first mover's
+/// rent), so the saturation shaves the mill ~2% and Rocket Parts ~28%.
 ///
 /// Measured under learning curves (learning_tax_test.dart: an Earth
 /// colony's private plant, its output sold to Earth, the world
-/// fast-forwarded): Rocket Parts' raw tax falls 17× → 12× → 10× → 8× → 7×
-/// its workers' over years 0/1/2/5/10, the Missile Plant's 10× → 3× → 3× →
-/// 2× → 2×. Neither is pinned at the ceiling any more. In phase 2, with the
+/// fast-forwarded): Rocket Parts' raw tax falls 19× → 14× → 12× → 9× → 8×
+/// its staff's over years 0/1/2/5/10, the Missile Plant's 12× → 6× → 5.5×
+/// → 4.5× → 3.8×. Neither is pinned at the ceiling. In phase 2, with the
 /// mature cost taken from the old seed table (rocket parts' mature price
 /// eight times their inputs), they were 391× → 188× and 1,707× → 705×,
-/// saturated for the whole decade.
+/// saturated for the whole decade. Since advanced overheads
+/// (`industrial_overhead.dart`) an advanced plant's staff, and so its
+/// ceiling, include the overhead engineers its books pay
+/// ([corporateTaxCeilingFor]).
 const double kCorporateTaxSafetyMultiple = 30;
 
 /// The happiness the tax ceiling's reference colony has: the "typical" 60%
@@ -237,10 +241,17 @@ extension CityEconomy on CitySim {
   /// in a reference colony of this economy. A reference colony, not this
   /// one's mood of the day: a ceiling that followed happiness would let one
   /// bad week (or a tax holiday) zero every plant's tax.
+  ///
+  /// The jobs count an advanced plant's overhead engineers too
+  /// (`industrial_overhead.dart` [overheadJobsOf]): the firm employs them
+  /// and books their wages, so the tax its business pays is weighed against
+  /// all of its staff, not just the floor crew.
   double corporateTaxCeilingFor(String site) {
-    final double jobs = siteSpec(site)?.jobs.toDouble() ??
-        factoryFloors[site]?.rates.jobs ??
-        0.0;
+    final spec = siteSpec(site);
+    final double jobs = (spec?.jobs.toDouble() ??
+            factoryFloors[site]?.rates.jobs ??
+            0.0) +
+        (spec == null ? 0.0 : overheadJobsOf(spec.type));
     return jobs *
         kCapHappiness *
         CitySim.defaultTaxRate *

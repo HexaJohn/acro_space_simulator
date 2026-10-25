@@ -18,7 +18,6 @@ import 'package:acro_space_simulator/domain/colony/city/city_economy.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_factories.dart';
 import 'package:acro_space_simulator/domain/colony/city/city_sim.dart';
 import 'package:acro_space_simulator/domain/colony/city/commodity.dart';
-import 'package:acro_space_simulator/domain/colony/city/economy/earth_market.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/economy_contracts.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/learning.dart';
 import 'package:acro_space_simulator/domain/colony/city/economy/local_prices.dart';
@@ -298,7 +297,10 @@ void main() {
     final a = sim.colonyEconomy.earthMarket.priceOf(kRp)!;
     final b = loaded.colonyEconomy.earthMarket.priceOf(kRp)!;
     expect(b, closeTo(a, a * 1e-9), reason: "Earth's market was saved too");
-    expect(b, lessThan(earthPrice(kRp)), reason: 'not back at the seed');
+    // Not back at its day-0 seed (mature × (1 + today's premium)): a month
+    // of world learning has taken it down.
+    expect(b, lessThan(TechState().earthUnitCost(kRp)!),
+        reason: 'not back at the seed');
     expect((json['tech'] as Map).containsKey('earthMkt'), isTrue);
     // A colony with plants saves Earth's market once, in its plant economy.
     final withPlant = economyColony();

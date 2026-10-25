@@ -19,6 +19,15 @@
 /// is pinned at the 30× safety ceiling any more: the treasury gets 43% →
 /// 21% and 28% → 7% of it.
 ///
+/// Since advanced overheads (`industrial_overhead.dart`) rocket parts and
+/// missiles cost what real ones do (their tooling and engineering hours),
+/// so Earth's price is ~40× and ~160× higher and so is the rent on it. The
+/// plants' staff now include their overhead engineers (1,800 and 11,250 at
+/// nameplate), and the ceiling and the workers' tax count them. Measured:
+/// Rocket Parts 19.3×, 13.6×, 11.8×, 9.4×, 7.9× its staff's tax over years
+/// 0/1/2/5/10, the Missile Plant 12.3×, 6.2×, 5.5×, 4.5×, 3.8× (against the
+/// floor crews alone: ~37× and ~190× those).
+///
 /// Years of a live colony would take minutes, so the WORLD is fast-forwarded
 /// headless between checkpoints (Earth's market and the colony's copy of the
 /// world's learning stepped day by day, with the plant's output sold to
@@ -95,7 +104,7 @@ List<TaxPoint> measure(String type, String good) {
   print('$type on Earth (ceiling ${kCorporateTaxSafetyMultiple.toStringAsFixed(0)}× '
       'workers\' tax):\n${out.map((p) => '  year ${p.years.toStringAsFixed(0)}: '
           'Earth ${Commodity.name(good)} ${p.earthPrice.toStringAsFixed(0)}/unit, '
-          'raw tax ${p.rawMultiple.toStringAsFixed(0)}× workers\', '
+          'raw tax ${p.rawMultiple.toStringAsFixed(1)}× workers\', '
           'paid ${(p.saturation * 100).toStringAsFixed(1)}% of ceiling').join('\n')}');
   return out;
 }
@@ -121,6 +130,10 @@ void main() {
       // under it from year 0, and falling every year.
       for (final p in pts) {
         expect(p.rawMultiple, lessThan(kCorporateTaxSafetyMultiple),
+            reason: 'year ${p.years}: ${p.rawMultiple}x workers tax');
+        // ...and still a real first mover's rent a decade on, not the ~2×
+        // of an ordinary plant: the good is young and its curve long.
+        expect(p.rawMultiple, greaterThan(3),
             reason: 'year ${p.years}: ${p.rawMultiple}x workers tax');
         expect(p.saturation, lessThan(0.5), reason: 'year ${p.years}');
       }
