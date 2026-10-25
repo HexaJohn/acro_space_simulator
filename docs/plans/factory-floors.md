@@ -547,6 +547,32 @@ the recommendations; revisit if they object):
 - Every item and recipe picker is `searchable_picker.dart`: a dialog route (outside the canvas
   Listener and the editor's focus chain), label-or-id substring, grouped, arrows / Enter / Esc.
 
+**Built (2026-10-25): items 5 and 20 (calendar, shifts, hired operators).**
+
+- Files: `factory_calendar.dart` (`FactoryCalendar`, `ShiftSchedule`, holidays, `onLeave`),
+  `factory_staffing.dart` (`FloorStaffPlan` on the blueprint, `ShiftCrew`, `FactoryStaffedSim`),
+  `factory_floor_crew.dart` (a `part` of the floor: posts, walking, staffing, skip), and
+  `screens/factory/floor_clock.dart` (clock, speeds, skip, crew panel, pin row).
+- Clock: real time from Monday 06:00; shifts 06–14 / 14–22 / 22–06 (a 3rd shift belongs to the
+  day it starts); default schedule 1st shift Mon–Fri; 52-week year with a documented holiday list.
+  Pay premium 1.10 / 1.15 for 2nd / 3rd shift, booked as `FactoryLedger.premiumSeconds` (additive).
+- People: operators and technicians are hired per shift and walk in from the muster spot, nearest
+  stations first (sticky posts, pins first); a post with no walking route is reached by a fixed
+  20 s "back corridor". A station runs only while its full crew stands at it. Technicians are on
+  call across shifts (lights-out cells don't wear out overnight). Off shift: only automation and
+  AGVs run; a loaded hand finishes the trip, walkers walk out. Leave: whole weeks by
+  `staffHash(id, year, week)`, ≈2.65 weeks a year, week 0 no-leave.
+- Migration: a blueprint without a plan is an AUTO crew (the 1st shift hires what the layout
+  needs, old jobDemand formula), so every old save and test layout runs as before; the first
+  hand-made hire turns it explicit. Templates ship explicit with their crew hired.
+- Colony: the staffing share caps who turns up (pooled per shift: operators, then technicians,
+  then drivers). `FactoryCalendar.colony()` maps a 120 s colony day onto the calendar (a shift =
+  40 s) but is NOT wired by default: measured (aggregate) rates assume the 1st-shift crew, and a
+  live colony floor on 40 s shifts would change output when the editor opens. Open item.
+- Skip: provably idle stretches are jumped (signature checked at absolute sub-step indices, so
+  chunking never changes the result); a busy lights-out night is plain sub-steps with posting and
+  dispatch skipped while no hand is at work. A 16 h lights-out skip measures ~0.5 s (debug JIT).
+
 **Built (2026-10-25): items 1, 2, 6 (picker part), 7, 8, 9, 10.**
 
 - Keys: R / Shift+R rotate cw / ccw; Ctrl+Z undo, Ctrl+Y or Ctrl+Shift+Z redo (also header arrows);

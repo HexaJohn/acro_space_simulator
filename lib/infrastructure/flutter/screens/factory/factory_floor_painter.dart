@@ -55,6 +55,7 @@ import '../../../../domain/colony/city/factory/factory_handling.dart';
 import '../../../../domain/colony/city/factory/factory_recipe.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/station_ports.dart';
+import '../../../../domain/colony/city/factory/factory_staffing.dart';
 import 'factory_editor_controller.dart';
 import 'floor_item_info.dart' show itemAbbrev;
 import 'floor_layout_index.dart';
@@ -159,6 +160,10 @@ const Map<HandlerKind, Color> kHandlerColor = {
   HandlerKind.crane: Color(0xFFB388FF),
   HandlerKind.agv: Color(0xFF4FC3F7),
 };
+
+/// Hired station operators and technicians (§10 item 20).
+const Color kOperatorColor = Color(0xFF8FD3FF);
+const Color kTechnicianColor = Color(0xFFFFB74D);
 
 const Map<MachineStatus, Color> kStatusColor = {
   MachineStatus.working: Color(0xFF7FE0A0),
@@ -547,6 +552,7 @@ class FactoryFloorPainter extends CustomPainter {
       _paintStuckPiles(canvas, vis);
       _paintBeltItems(canvas, ix, vis);
       _paintHandlers(canvas, ix, vis);
+      _paintStaff(canvas, vis);
     }
     _paintUnusedDocks(canvas, ix, vis);
     _paintTrucks(canvas, ix);
@@ -806,6 +812,33 @@ class FactoryFloorPainter extends CustomPainter {
       final ctr = c.tileToLocal(p.tile.x + 0.35 + o, p.tile.y + 0.35);
       final tp = _label('${itemAbbrev(p.item)}${p.count > 1 ? p.count : ''}');
       tp.paint(canvas, ctr - Offset(tp.width / 2, tp.height / 2));
+    }
+  }
+
+  /// Hired operators (sky) and technicians (amber), §10 item 20: a small
+  /// filled dot with a dark ring, a white core when pinned. Smaller than a
+  /// handler walker's dot so the two read apart; several at one post fan
+  /// out by id.
+  void _paintStaff(Canvas canvas, TileRect vis) {
+    final sim = c.sim;
+    if (sim is! FactoryStaffedSim) return;
+    final seen = <(int, int), int>{};
+    for (final v in (sim as FactoryStaffedSim).staff) {
+      if (v.x < vis.x0 - 1 || v.x > vis.x1 + 1) continue;
+      if (v.y < vis.y0 - 1 || v.y > vis.y1 + 1) continue;
+      final key = (v.x.round(), v.y.round());
+      final n = seen[key] = (seen[key] ?? -1) + 1;
+      final at = Offset(v.x + 0.5 + (n % 3 - 1) * 0.3 * (n > 0 ? 1 : 0),
+          v.y + 0.5 + (n ~/ 3) * 0.3);
+      _dot.color = v.role == StaffRole.operator
+          ? kOperatorColor
+          : kTechnicianColor;
+      _T.circle(canvas, at, 0.24, _dot);
+      _T.circle(canvas, at, 0.24, _handlerRing);
+      if (v.pinned) {
+        _dot.color = const Color(0xFFFFFFFF);
+        _T.circle(canvas, at, 0.09, _dot);
+      }
     }
   }
 

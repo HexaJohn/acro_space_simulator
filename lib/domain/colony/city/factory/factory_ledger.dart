@@ -25,6 +25,13 @@ class FactoryLedger {
   /// workers for 10 s books 20).
   final Map<WorkRole, double> workerSeconds = {};
 
+  /// Shift-premium worker-seconds by role: the EXTRA a 2nd or 3rd shift
+  /// is paid, (premium factor − 1) × its worker-seconds (`kShiftPremium`:
+  /// 1.10 evenings, 1.15 nights). Additive to [workerSeconds]: wages are
+  /// (workerSeconds + premiumSeconds) × wage, and a reader that ignores
+  /// this field still gets every hour worked.
+  final Map<WorkRole, double> premiumSeconds = {};
+
   /// Energy drawn, kilojoules (kW × s).
   double energyKJ = 0;
 
@@ -45,6 +52,8 @@ class FactoryLedger {
 
   void addWork(WorkRole role, double s) =>
       workerSeconds[role] = (workerSeconds[role] ?? 0) + s;
+  void addPremium(WorkRole role, double s) =>
+      premiumSeconds[role] = (premiumSeconds[role] ?? 0) + s;
   void addReceived(String c, double units) =>
       received[c] = (received[c] ?? 0) + units;
   void addShipped(String c, double units) =>
@@ -63,6 +72,7 @@ class FactoryLedger {
     energyKJ += o.energyKJ;
     itemMetres += o.itemMetres;
     o.workerSeconds.forEach(addWork);
+    o.premiumSeconds.forEach(addPremium);
     o.received.forEach(addReceived);
     o.shipped.forEach(addShipped);
     o.scrapped.forEach(addScrapped);
@@ -74,6 +84,7 @@ class FactoryLedger {
     energyKJ = 0;
     itemMetres = 0;
     workerSeconds.clear();
+    premiumSeconds.clear();
     received.clear();
     shipped.clear();
     scrapped.clear();
@@ -86,6 +97,8 @@ class FactoryLedger {
         'm': itemMetres,
         if (workerSeconds.isNotEmpty)
           'w': {for (final e in workerSeconds.entries) e.key.name: e.value},
+        if (premiumSeconds.isNotEmpty)
+          'wp': {for (final e in premiumSeconds.entries) e.key.name: e.value},
         if (received.isNotEmpty) 'in': {...received},
         if (shipped.isNotEmpty) 'out': {...shipped},
         if (scrapped.isNotEmpty) 'scr': {...scrapped},
@@ -102,6 +115,8 @@ class FactoryLedger {
         ((o as Map?) ?? const {}).cast<String, Object?>();
     m(j['w']).forEach(
         (k, v) => l.addWork(WorkRole.values.byName(k), (v as num).toDouble()));
+    m(j['wp']).forEach((k, v) =>
+        l.addPremium(WorkRole.values.byName(k), (v as num).toDouble()));
     m(j['in']).forEach((k, v) => l.addReceived(k, (v as num).toDouble()));
     m(j['out']).forEach((k, v) => l.addShipped(k, (v as num).toDouble()));
     m(j['scr']).forEach((k, v) => l.addScrapped(k, (v as num).toDouble()));

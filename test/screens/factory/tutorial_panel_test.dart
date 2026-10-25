@@ -154,7 +154,12 @@ void main() {
     put(const Placement(id: 0, kind: EntityKind.belt, pos: TilePos(13, 11)));
     put(const Placement(
         id: 0, kind: EntityKind.shippingDock, pos: TilePos(14, 11)));
-    floor.step(20, run.port);
+    // Until the first part ships: the assembler's operator walks in from
+    // the entrance first (§10 item 20: operators are people).
+    for (var i = 0; i < 300; i++) {
+      if ((floor.lifetime.shipped['rocketParts'] ?? 0) > 0) break;
+      floor.step(1, run.port);
+    }
     await live(t);
     final shipped = floor.lifetime.shipped['rocketParts'] ?? 0;
     expect(shipped, greaterThan(0));

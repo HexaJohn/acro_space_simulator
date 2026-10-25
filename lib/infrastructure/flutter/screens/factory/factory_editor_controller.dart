@@ -52,6 +52,7 @@ import '../../../../domain/colony/city/factory/factory_scenario.dart';
 import '../../../../domain/colony/city/factory/factory_sim_api.dart';
 import '../../../../domain/colony/city/factory/factory_unlocks.dart';
 import '../../../../domain/colony/city/factory/factory_cleanup.dart';
+import 'floor_clock.dart';
 import 'floor_edit_history.dart';
 import 'floor_layout_index.dart';
 
@@ -328,8 +329,11 @@ class FactoryEditorController extends ChangeNotifier {
 
   final Set<FactoryOverlay> overlays = {};
 
-  /// Sim speed multiplier (0 = paused).
+  /// Sim speed multiplier (0 = paused): 1/4/16/60× (floor_clock.dart).
   double speed = 1;
+
+  /// Skip-to-next-shift and auto-skip (floor_clock.dart).
+  final FloorClock clock = FloorClock();
 
   void setTool(FactoryTool t) {
     tool = t;
@@ -1523,7 +1527,9 @@ class FactoryEditorController extends ChangeNotifier {
 
   /// One animation frame: [wallDt] real seconds since the last.
   void tick(double wallDt) {
-    if (drivesSim) {
+    // A running skip drives the sim within a frame budget instead of the
+    // speed setting (floor_clock.dart).
+    if (drivesSim && !clock.tick(sim, port)) {
       final dt = wallDt.clamp(0.0, kMaxFrameDt) * speed;
       if (dt > 0) sim.step(dt, port);
     }

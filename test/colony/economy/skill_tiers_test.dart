@@ -87,7 +87,11 @@ void main() {
       for (final v in jobs.values) {
         total += v;
       }
-      expect(total, closeTo(bp.jobDemand, 1e-9));
+      // Templates ship with their crew HIRED (factory-floors §10 item 20):
+      // whole technicians, so the floor posts up to one job more than the
+      // profile's fractional technician share.
+      final spare = bp.jobDemand - total;
+      expect(spare, inInclusiveRange(-1e-9, 1 - 1e-9));
     },
   );
 }

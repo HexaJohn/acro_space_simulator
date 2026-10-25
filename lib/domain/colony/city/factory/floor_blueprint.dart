@@ -18,6 +18,7 @@ import 'factory_entities.dart';
 import 'factory_grid.dart';
 import 'factory_handling.dart';
 import 'factory_recipe.dart';
+import 'factory_staffing.dart';
 
 /// Why a layout is not buildable as drawn.
 enum BlueprintIssueKind { outOfHall, overlap, unknownRecipe, missingSpan }
@@ -49,8 +50,10 @@ class FloorBlueprint {
     List<Placement>? placements,
     Map<HandlerKind, int>? roster,
     this.plantType,
+    FloorStaffPlan? staff,
   })  : placements = placements ?? [],
-        roster = roster ?? {};
+        roster = roster ?? {},
+        staff = staff ?? FloorStaffPlan();
 
   String name;
 
@@ -60,8 +63,13 @@ class FloorBlueprint {
   HallSize hall;
   final List<Placement> placements;
 
-  /// Handlers hired, by kind.
+  /// Handlers hired, by kind (the fleet; the 1st shift drives all of it).
   final Map<HandlerKind, int> roster;
+
+  /// Who is hired per shift, the shift schedule, pins and the clock
+  /// (`factory_staffing.dart`). A blueprint saved without one loads as an
+  /// auto crew, which runs exactly as floors ran before shifts existed.
+  FloorStaffPlan staff;
 
   int get nextId =>
       placements.fold(0, (m, p) => p.id > m ? p.id : m) + 1;
@@ -109,7 +117,20 @@ class FloorBlueprint {
   /// Total job demand at full staffing: station crews, maintenance shares
   /// and handler operators. The sim refines this (idle stations still count;
   /// a plant is staffed for its layout, not its luck).
+  ///
+  /// An explicit crew ([FloorStaffPlan.auto] false) counts the people HIRED
+  /// instead: every shift's operators, technicians and handler drivers, the
+  /// 1st shift driving the whole fleet. An auto crew keeps the old layout
+  /// formula (fractional technician shares) so legacy floors read the same.
   double get jobDemand {
+    if (!staff.auto) {
+      var n = 0.0;
+      for (var s = 0; s < 3; s++) {
+        final c = staff.crews[s];
+        n += c.operators + c.technicians + (s == 0 ? 0 : c.handlers);
+      }
+      return n + fleetDrivers(roster);
+    }
     var jobs = 0.0;
     for (final p in placements) {
       if (p.kind != EntityKind.machine) continue;
@@ -125,6 +146,7 @@ class FloorBlueprint {
         placements: [...placements],
         roster: {...roster},
         plantType: plantType,
+        staff: staff.copy(),
       );
 
   Map<String, Object?> toJson() => {
@@ -137,6 +159,7 @@ class FloorBlueprint {
             for (final k in HandlerKind.values)
               if ((roster[k] ?? 0) > 0) k.name: roster[k],
           },
+        if (!staff.isDefault) 'staff': staff.toJson(),
       };
 
   static FloorBlueprint fromJson(Map<String, Object?> j) => FloorBlueprint(
@@ -153,5 +176,8 @@ class FloorBlueprint {
                   .entries)
             HandlerKind.values.byName(e.key): (e.value as num).toInt(),
         },
+        // Old saves have no crew plan: auto (the old roster is the 1st
+        // shift's handler crew, and the layout's stations are crewed).
+        staff: j.containsKey('staff') ? FloorStaffPlan.fromJson(j['staff']) : null,
       );
 }

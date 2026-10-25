@@ -62,6 +62,7 @@
 library;
 
 import 'factory_catalog.dart';
+import 'factory_staffing.dart';
 import 'factory_entities.dart';
 import 'factory_grid.dart';
 import 'factory_handling.dart';
@@ -100,7 +101,18 @@ const int kSteelMillCranes = 2;
 
 /// A fresh template blueprint for [plantType], or null when that plant has
 /// none (every zoned spec, and every placed plant without a template yet).
+///
+/// Every template ships with its crew HIRED (§10 item 20): its stations'
+/// operators and its automated stations' technicians on the 1st shift, an
+/// explicit crew, so a placed plant makes its spec rate from its first
+/// shift and editing it means hiring for what you add.
 FloorBlueprint? factoryTemplateFor(String plantType) {
+  final bp = _templateFor(plantType);
+  if (bp == null) return null;
+  return bp..staff = FloorStaffPlan.hiredFor(bp.placements);
+}
+
+FloorBlueprint? _templateFor(String plantType) {
   ensureFactoryCatalog();
   return switch (plantType) {
     kSteelMillType => _steelMill(),

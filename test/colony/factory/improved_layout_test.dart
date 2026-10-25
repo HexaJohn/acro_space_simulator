@@ -8,6 +8,7 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_p
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_handling.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_staffing.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_templates.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -35,6 +36,9 @@ void main() {
               : MachineMode.assisted);
     }
     bp.roster[HandlerKind.onFoot] = 8;
+    // Templates ship with their crew hired (§10 item 20): re-crewing means
+    // hiring what the new layout needs, and letting the rest go.
+    bp.staff = FloorStaffPlan.hiredFor(bp.placements);
     final better = FactoryFloor.fromBlueprint(bp);
     final r1 = measure(better, InfiniteColonyPort(), warmupS: 300, windowS: 900);
 

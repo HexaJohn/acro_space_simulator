@@ -69,11 +69,17 @@
 /// an unservable request can never starve a servable one. An automated
 /// station needs its technician share or it wears out and breaks down.
 /// What a colony may buy is its [FactoryUnlocks].
+///
+/// **Shifts** (§10 items 5 and 20, `factory_floor_crew.dart`): station
+/// operators and technicians are hired people who walk in at shift start
+/// and out at its end, on a calendar; the colony's staffing share caps who
+/// turns up. Off shift only automated stations and AGVs run.
 library;
 
 import 'dart:collection';
 import 'dart:typed_data';
 
+import 'factory_calendar.dart';
 import 'factory_catalog.dart';
 import 'factory_cleanup.dart';
 import 'factory_colony_port.dart';
@@ -87,12 +93,15 @@ import 'factory_ledger.dart';
 import 'factory_pathing.dart';
 import 'factory_recipe.dart';
 import 'factory_sim_api.dart';
+import 'factory_staffing.dart';
 import 'factory_unlocks.dart';
 import 'factory_vehicles.dart';
 import 'dock_geometry.dart';
 import 'dock_logistics.dart';
 import 'floor_blueprint.dart';
 import 'station_ports.dart';
+
+part 'factory_floor_crew.dart';
 
 /// Belt speed in tiles per second: 3 m/s, a brisk industrial conveyor.
 const double kBeltTilesPerS = 1.5;
@@ -186,7 +195,7 @@ bool _driveMarking(EntityKind k) =>
     k == EntityKind.staging ||
     k == EntityKind.chargingBay;
 
-class FactoryFloor implements FactorySim, FloorCleanup {
+class FactoryFloor implements FactorySim, FloorCleanup, FactoryStaffedSim {
   FactoryFloor._(this._bp, this.unlocks);
 
   /// A fresh floor running [bp] (copied; the blueprint stays untouched).
@@ -213,6 +222,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     // Vehicles and cranes start on their own layers.
     f._rebuild();
     f._handlers.forEach(f._sendHome);
+    f._crewAtPosts();
     return f;
   }
 
@@ -258,6 +268,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     m(j['ow']).forEach((k, v) => f._owed[k] = (v as num).toDouble());
     final lg = j['lg'];
     if (lg != null) f.logistics = FloorLogistics.fromJson(m(lg));
+    f._crewFromJson(j['crew']);
     return f;
   }
 
@@ -450,6 +461,9 @@ class FactoryFloor implements FactorySim, FloorCleanup {
   /// station whose mode needs none counts as maintained when staffed).
   final Map<int, bool> _maintained = {};
 
+  /// The hired people and the off-shift walkers (`factory_floor_crew.dart`).
+  final _CrewRuntime _crew = _CrewRuntime();
+
 
   // ---- FactoryFloorView ----------------------------------------------------
 
@@ -631,7 +645,77 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       [..._beltOrder]..sort((a, b) => a.id.compareTo(b.id));
 
   @override
-  Iterable<HandlerView> get handlers => [for (final h in _handlers) h.view];
+  Iterable<HandlerView> get handlers => [
+        for (final h in _handlers)
+          if (!_crew.away.contains(h.id)) h.view,
+      ];
+
+  // ---- FactoryStaffedSim (factory_floor_crew.dart) -------------------------
+
+  @override
+  FactoryCalendar get calendar => _bp.staff.calendar;
+
+  @override
+  set calendar(FactoryCalendar c) => _bp.staff.calendar = c;
+
+  @override
+  ShiftSchedule get schedule => _bp.staff.schedule;
+
+  @override
+  bool get onShift => calendar.onShift(schedule, _simSeconds);
+
+  @override
+  ShiftCrew crewOn(int shift) => _bp.staff.crewFor(shift, _bp.placements);
+
+  @override
+  int get operatorsNeeded => operatorsNeededFor(_bp.placements);
+
+  @override
+  int get techniciansNeeded =>
+      techniciansFor(technicianShareNeeded(_bp.placements));
+
+  @override
+  bool get autoCrew => _bp.staff.auto;
+
+  @override
+  Iterable<StaffView> get staff => _staffViews;
+
+  @override
+  List<StaffView> staffAt(int placementId) =>
+      [for (final v in _staffViews) if (v.stationId == placementId) v];
+
+  // The crew plan is part of the blueprint: a change bumps [layoutRev] so
+  // a colony's close keeps it (and drawing caches refresh), without the
+  // full layout rebuild an edit needs.
+
+  @override
+  void hireStaff(int shift, StaffRole? role, int delta) {
+    _hireStaff(shift, role, delta);
+    _layoutRev++;
+  }
+
+  @override
+  void setShiftDay(int shift, int weekday, bool on) {
+    schedule.set(shift, weekday, on);
+    _layoutRev++;
+  }
+
+  @override
+  void pinStaff(int personId, int? placementId) {
+    if (placementId == null) {
+      _bp.staff.pins.remove(personId);
+    } else {
+      _bp.staff.pins[personId] = placementId;
+    }
+    _layoutRev++;
+  }
+
+  @override
+  bool get idleOffShift => _idleOffShift;
+
+  @override
+  bool skipToward(double targetS, FactoryColonyPort port, int maxSubSteps) =>
+      _skipToward(targetS, port, maxSubSteps);
 
   @override
   int get pendingRequests => _queue.length;
@@ -729,6 +813,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
       'led': _ledger.toJson(),
       if (!_isBlank(_lifetime)) 'life': _lifetime.toJson(),
       if (logistics != null) 'lg': logistics!.toJson(),
+      if (_crewJson().isNotEmpty) 'crew': _crewJson(),
     };
   }
 
@@ -739,7 +824,7 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     final power = _unit(port.powerShare);
     _routeMemo.clear();
     _fleet = _fleetLayers();
-    _allocateStaff(_unit(port.staffingShare), dt);
+    _crewStep(_unit(port.staffingShare), dt);
     // On orders (and not set to unlimited), docks trade with trucks, not
     // with the colony directly: see dock_logistics.dart.
     final lg = logistics;
@@ -753,10 +838,16 @@ class FactoryFloor implements FactorySim, FloorCleanup {
     } else {
       _receive(port, dt);
     }
-    _postRequests();
-    _seekCharge();
-    Dispatcher.assign(_queue, _handlers,
-        distTo: _distTo, routable: _routableBy);
+    // Off shift with no hand at work (lights-out), nobody could take a
+    // request: skip posting and dispatch (the night's cost, see
+    // factory_floor_crew.dart). On shift the queue still posts, as the
+    // "hire someone" signal.
+    if (_crewHandsAtWork) {
+      _postRequests();
+      _seekCharge();
+      Dispatcher.assign(_queue, _handlers,
+          distTo: _distTo, routable: _routableBy);
+    }
     _moveHandlers(power, dt);
     _swingArms(dt);
     _advanceBelts(dt);
@@ -781,42 +872,6 @@ class FactoryFloor implements FactorySim, FloorCleanup {
   }
 
   static double _unit(double v) => v.isNaN ? 0 : (v < 0 ? 0 : (v > 1 ? 1 : v));
-
-  /// Hands the staffed share of the layout's jobs out by placement id:
-  /// whole station crews first, then technician shares (fractional jobs),
-  /// then handler operators by handler id. People are counted as a real
-  /// number so a lone automated station's quarter technician is a job too;
-  /// whole crews still need whole people.
-  void _allocateStaff(double share, double dt) {
-    var avail = _bp.jobDemand * share;
-    for (final p in _machineList) {
-      final need = p.crew.workers;
-      final ok = avail + _eps >= need;
-      _staffed[p.id] = ok;
-      if (!ok) continue;
-      avail -= need;
-      if (need > 0) _ledger.addWork(WorkRole.station, need * dt);
-    }
-    for (final p in _machineList) {
-      final need = p.crew.maintenance;
-      if (need <= 0) {
-        _maintained[p.id] = _staffed[p.id] == true;
-        continue;
-      }
-      final ok = avail + _eps >= need;
-      _maintained[p.id] = ok;
-      if (!ok) continue;
-      avail -= need;
-      _ledger.addWork(WorkRole.maintenance, need * dt);
-    }
-    for (final h in _handlers) {
-      final ops = h.spec.operators;
-      h.active = avail + _eps >= ops;
-      if (!h.active) continue;
-      avail -= ops;
-      if (ops > 0) _ledger.addWork(WorkRole.handler, ops * dt);
-    }
-  }
 
   // ---- docks ---------------------------------------------------------------
 
@@ -1872,6 +1927,8 @@ class FactoryFloor implements FactorySim, FloorCleanup {
   void _moveHandlers(double power, double dt) {
     for (final h in _handlers) {
       if (!h.active) {
+        // Off shift a walker walks out (factory_floor_crew.dart).
+        if (_walkOffShift(h, dt)) continue;
         // An unstaffed hand stops where it is — on a tile, not between two.
         if (h.state == HandlerState.idle) h.settle();
         continue;

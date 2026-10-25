@@ -84,6 +84,7 @@ import 'factory_editor_controller.dart';
 import 'factory_floor_painter.dart';
 import 'floor_item_overlays.dart';
 import 'orders_panel.dart';
+import 'floor_clock.dart';
 import 'floor_layout_index.dart';
 import 'machine_ports_view.dart';
 import 'product_tree_panel.dart';
@@ -670,23 +671,10 @@ class _TopBar extends StatelessWidget {
                       .copyWith(color: AppTheme.accent, fontSize: 16)),
             ),
             const SizedBox(width: 16),
-            // Speed is the driver's to set: hidden while the colony steps
-            // the floor.
-            if (c.drivesSim)
-              for (final (s, icon, tip) in const [
-                (0.0, Icons.pause, 'Pause'),
-                (1.0, Icons.play_arrow, '1x'),
-                (4.0, Icons.fast_forward, '4x'),
-              ])
-                IconButton(
-                  key: Key('speed-${s.round()}'),
-                  tooltip: tip,
-                  onPressed: () => c.setSpeed(s),
-                  icon: Icon(icon,
-                      color:
-                          c.speed == s ? AppTheme.accent : AppTheme.textDim),
-                )
-            else
+            // The clock always shows; speed and skip are the driver's to
+            // set, hidden while the colony steps the floor (floor_clock.dart).
+            FloorClockBar(c: c),
+            if (!c.drivesSim)
               Text('LIVE · colony time',
                   key: const Key('colony-driven'),
                   style: AppTheme.dim.copyWith(color: AppTheme.accent2)),
@@ -1019,6 +1007,9 @@ class _SidePanel extends StatelessWidget {
             const SizedBox(height: 14),
             _Roster(c: c),
             const SizedBox(height: 14),
+            FloorSkipControls(c: c),
+            FloorCrewPanel(c: c),
+            const SizedBox(height: 14),
             _Readout(c: c),
           ],
         ),
@@ -1107,7 +1098,9 @@ class _Inspector extends StatelessWidget {
             ),
           ),
         if (p.kind == EntityKind.machine) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
+          StaffPinRow(c: c, placementId: p.id),
+          const SizedBox(height: 4),
           if (choices.isEmpty)
             const Text('No recipes registered', style: AppTheme.dim)
           else
