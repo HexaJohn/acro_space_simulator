@@ -4,7 +4,8 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 /// The Refinery's default floor (docs/plans/factory-floors.md §3
-/// "Templates", phase 6).
+/// "Templates", phase 6), redrawn for EXPLICIT MACHINE PORTS (§10 item 19,
+/// `station_ports.dart`).
 ///
 /// Like the Steel Mill's (`factory_templates.dart`), this is a built-in
 /// [FloorBlueprint] whose MEASURED rate is the spec's flat rate within 5%,
@@ -37,46 +38,98 @@
 /// plants use), which is this plant's byproduct loop. The rock left over
 /// is backfill on site; the floor tracks freight, not tailings.
 ///
-/// ## The layout (a 96 × 52 m process hall, two mirrored lines)
+/// ## The ports, and what they force
 ///
-/// West to east: ore door and feed conveyor, hot process, a long pipe run,
-/// the tank and filling bay, the shipping aisle and its doors. The plan's
-/// realistic mix (§3 "Template plants"), in the user's words "workers used
-/// in conjunction with heavy vehicles … or just on their own":
+/// Belts feed a station only at its input ports and carry its outputs
+/// only from its output ports; handlers work it only at its hand port; no
+/// arm touches a machine. Two facts about the kiln (a furnace: ore in at
+/// the back, volatiles out the front, the hand port under its second
+/// tile) shaped this floor:
+///
+/// * **Both lines must flow the same way.** A kiln's input and output are
+///   on opposite faces, and the one ore door must reach both kilns' inputs
+///   while both volatiles lines leave for the filling bay. Point the
+///   lines opposite ways (or face the kilns at each other across the
+///   press) and the ore belt to one kiln would wall a volatiles line in:
+///   floors have no belt bridges. So both kilns face east, inputs to the
+///   west, where the ore comes from.
+/// * **East-facing kilns open their hand ports SOUTH.** Two lines stacked
+///   the old way put line A's kiln hand on the wall side, six tiles and
+///   more from any press both cranes could share; the first port draw's
+///   cranes spent their shift travelling and starved the press. So the two
+///   kilns are STAGGERED round the press instead (the hot core below):
+///   kiln B sits one row above line A's volatiles belt, its hand port
+///   opening onto the tile just above the press's, a one-tile hop.
+///
+/// ## The hot core (x 0 .. 22, rows m-1 .. m+7, m = [_m]; north up)
+///
+///     m+7   .............BBBB......
+///     m+6   ........KKKK.BBBB>>>>>>   LOX B
+///     m+5   ..>>>>>>KKKK>BBBB>>>>>>   fuel B
+///     m+4   ..^.....KKKK.BBBBAAAA..
+///     m+3   ..r.kkkk.o....o..AAAA>>   LOX A
+///     m+2   DD>>kkkk>+++>>>>>AAAA>>   fuel A
+///     m+1   ....kkkkPPP......AAAA..
+///     m     .....o..PPP.......o....
+///     m-1   ........PPP............
+///
+/// `D` the ore door, `r` the ore arm, `k`/`K` kilns A and B, `P` the
+/// press, `A`/`B` the reactors, `+` crossings (walkable belt), `o` the
+/// floor tiles the kilns' and reactors' hand ports open onto. The press's
+/// hand port (9, m+1) opens onto the crossing (9, m+2).
 ///
 /// * **Ore arrives on a DOCK CONVEYOR**, the way bulk ore really does: one
-///   door on the west wall tips 1 pallet/s onto a feed loop that passes
-///   both kilns' feed arms. The door sets the plant's rate (the kilns have
-///   25% to spare), as the Steel Mill's docks set its. Unloading by hand
-///   was tried and is worse: pallet jacks walk the whole hall (any walker
-///   or jack on the floor answers any pallet request), and a forklift
-///   fleet shared between a west pad and the east doors spends its battery
-///   driving between them. `capexOf` charges the conveyor as the upgrade.
-/// * **Clinker is heavy, so cranes move it.** Each line's crane bay runs
-///   from its kiln to the one catalyst press between the lines (the two
-///   bays overlap over it); a hook lifts each 1.5 t skip a few metres.
-/// * **Catalyst is hand work.** Four workers walk the 25 kg bags from the
-///   press to both synthesis reactors, ~10 m each way. One SHARED press is
-///   deliberate: with a press per line, each reactor's pull would raid the
-///   other line's press whenever its own was empty, and the walkers spent
-///   their shift crossing the hall.
-/// * **Volatiles go straight in** (a transfer arm from kiln to reactor),
-///   and the reactor's two products leave on SEPARATE pipe runs — fuel and
-///   oxidizer never share a line — 64 m east to the tank bay, away from
-///   the hot kilns. Each run ends in a day tank (a chest) that a filling
-///   arm draws from.
-/// * **Totes leave by forklift.** Each filler's 1 t totes wait for a
-///   forklift that runs them across the shipping aisle to that product's
-///   two doors (two, because a filler sets down four totes at once — more
-///   than one door's bay holds — and a full bay sends the overflow to the
-///   far line's doors). The forklifts charge at a bay midway along the
-///   aisle.
+///   door on the west wall drops 1 pallet/s onto a belt straight into kiln
+///   A's input port. An arm on the belt's first tile lifts ore onto a
+///   branch that climbs to kiln B's input (arms still work belts, just not
+///   machines). The arm takes every pallet its branch has room for, so
+///   kiln B runs flat out (a manual kiln roasts 5 ore per 9 s, 0.556/s)
+///   and kiln A takes the rest (0.444/s, 80% busy). The door sets the
+///   plant's rate, as the Steel Mill's docks set its; `capexOf` charges
+///   the conveyor as the upgrade.
+/// * **Clinker is heavy, so cranes move it.** Each kiln has no belt at its
+///   clinker port, so its clinker waits at its hand port. Kiln B's crane
+///   hops one tile, from (9, m+3) to the press's floor tile (9, m+2);
+///   kiln A's hook travels four tiles, from over its hand port (5, m+1)
+///   to the press's (9, m+1) and back, so its bay has two cranes.
+/// * **Catalyst is hand work.** Walkers pick the 25 kg bags at the press's
+///   hand port, which opens onto a CROSSING of line A's volatiles belt (a
+///   handler can only work a port from a walkable tile), and carry them to
+///   the reactors' hand ports: reactor B's is six tiles along the corridor
+///   above line A's belt, reactor A's is reached over two more crossings
+///   and along row m. One SHARED press is deliberate (the Steel Mill's
+///   trap): with a press per line, each reactor's pull would raid the
+///   other line's press whenever its own was empty, and the walkers would
+///   spend their shift crossing the hall.
+/// * **Volatiles go straight in**, kiln output port to reactor input port
+///   by belt, and each reactor's two products leave by its two output
+///   ports on SEPARATE pipe runs — fuel and oxidizer never share a line —
+///   east to the filling bay, away from the hot kilns. Line B's pipes
+///   climb two rows at x 30..31 to clear line A's filling bay.
+/// * **Totes leave by forklift.** In each filling bay the fuel pipe ends
+///   at the fuel filler's input port and the LOX pipe runs over it, then
+///   down a tile into the LOX filler's. Each filler's 1 t totes wait at its
+///   hand port on a forklift lane that opens onto the shipping aisle and
+///   that line's four doors (two per product: a filler sets down four
+///   totes at once, more than one door's bay holds; the fuel doors face
+///   the lane). The forklifts charge at a bay off the aisle.
 ///
 /// Belts and arms here are pipes and transfer pumps: the floor moves
 /// liquids as discrete tank runs, the way it moves everything.
 ///
-/// Jobs: 9 manual stations × 2 + 5 forklift drivers + 2 crane drivers + 4
-/// catalyst walkers = 29, the spec's 30 within 10%. Build cost ≈ 41.6 ore
+/// ## Mass balance through the stations (per second)
+///
+/// | station        | line B (first)   | line A (rest)    | capacity (manual) |
+/// |----------------|------------------|------------------|-------------------|
+/// | kiln           | 0.556 ore        | 0.444 ore        | 0.556 ore         |
+/// | reactor        | 0.444 volatiles  | 0.356 volatiles  | 0.5 volatiles     |
+/// | each filler    | 0.056 runs       | 0.044 runs       | 0.0625 runs       |
+///
+/// and the one press 0.2 clinker against its 0.25. Out: 0.1 runs of each
+/// product, 0.4 fuel and 0.3 oxidizer totes.
+///
+/// Jobs: 9 manual stations × 2 + 6 forklift drivers + 3 crane drivers + 4
+/// catalyst walkers = 31, the spec's 30 within 10%. Build cost ≈ 38.9 ore
 /// against the spec's 40.
 library;
 
@@ -93,25 +146,26 @@ import '../template_layout.dart';
 const String kRefineryType = 'refinery';
 
 /// Refinery hall: 48 × 26 tiles = 96 × 52 m. The length is the pipe run
-/// that keeps the fuel tanks 64 m from the kilns (a real plant's hazard
-/// separation), and it is also what brings the shed to the spec's build
-/// cost. It is under 1% of a 900 × 700 m Refinery site; the rest is yard,
-/// tank farm and ore stockpile.
+/// that keeps the filling bays ~40 m from the kilns (a real plant's hazard
+/// separation); the open floor north and south of the lines is room for a
+/// designer to grow into, and it is also what brings the shed to the
+/// spec's build cost. It is under 1% of a 900 × 700 m Refinery site; the
+/// rest is yard, tank farm and ore stockpile.
 const HallSize kRefineryHall = HallSize(48, 26);
 
-/// Forklifts clearing totes, two per trip: 0.7 totes/s across a 4 m
-/// aisle is two forklifts' steady work, but both lines' fillers can set
-/// down 14 totes in one moment, and each truck runs flat after 360 s and
-/// charges for up to 60 s. Measured: four fall ~15% short of the spec's
-/// fuel; five hold it.
-const int kRefineryForklifts = 5;
+/// Forklifts clearing totes, two per trip: 0.7 totes/s from four fillers
+/// to eight doors, and each truck runs flat after 360 s and charges for up
+/// to 60 s. Measured: five fall ~7% short of the spec's fuel; six hold it.
+const int kRefineryForklifts = 6;
 
-/// One crane per line's kiln-to-press bay.
-const int kRefineryCranes = 2;
+/// Cranes: two in kiln A's bay (a four-tile hop each way to the press, at
+/// ~13 s a skip against kiln A's one every ~11 s) and one in kiln B's
+/// (a one-tile hop).
+const int kRefineryCranes = 3;
 
-/// Catalyst walkers: 0.1 bags/s from the one press to two reactors, ~30 s
-/// a round trip. Measured: three starve the reactors (~17% short); four
-/// hold the rate with a quarter to spare.
+/// Catalyst walkers: 0.1 bags/s from the one press to two reactors, a
+/// ~20 s round trip to reactor B and ~40 s to reactor A. Measured: three
+/// fall ~7% short (and back the ore door up); four hold the rate.
 const int kRefineryWalkers = 4;
 
 // ---- items ------------------------------------------------------------------
@@ -137,7 +191,7 @@ class RefineryItems {
       id: 'refinery:catalyst', label: 'Catalyst', loadClass: LoadClass.hand,
       kgPerUnit: 25);
 
-  /// One reactor run of fuel, 4 t, piped to its day tank; only pipes and
+  /// One reactor run of fuel, 4 t, piped to its filler; only pipes and
   /// pumps move it, so it is heavy to anything with hands.
   static const fuelRun = FactoryItem(
       id: 'refinery:fuelRun', label: 'Fuel (tank run)',
@@ -155,10 +209,10 @@ class RefineryItems {
 
 /// Recipe ids of the Refinery chain. Saved on machines: never rename.
 ///
-/// Every station in the template is MANUAL (speed 0.6), and each craft
-/// time is set so it runs at ~80% of capacity at the spec rate (one of
-/// each per line, the press one for both): the receiving door, not a
-/// machine, sets the template's rate, and there is room to do better.
+/// Every station in the template is MANUAL (speed 0.6). The receiving
+/// door, not a machine, sets the template's rate, and the stations behind
+/// the kilns have room to spare (see the library doc's table), so there
+/// is room to do better.
 class RefineryRecipes {
   RefineryRecipes._();
 
@@ -168,9 +222,12 @@ class RefineryRecipes {
     station: StationKind.furnace,
     inputs: [ItemQty('ore', 5)],
     outputs: [ItemQty('refinery:volatiles', 4), ItemQty('refinery:clinker', 1)],
-    // 4.8 s: a manual kiln (8 s a charge) roasts 0.625 ore/s against the
-    // 0.5 its line gets — 80% busy, so the ore door sets the rate.
-    seconds: 4.8,
+    // 5.4 s: a manual kiln (9 s a charge) roasts 0.556 ore/s. The ore arm
+    // gives kiln B all it can take, so this caps what reaches reactor B at
+    // 0.444 volatiles/s, 89% of a manual reactor; kiln A gets the other
+    // 0.444 ore/s (80% busy). Faster, and kiln B would feed its reactor
+    // exactly to capacity, with no slack.
+    seconds: 5.4,
     // A rotary kiln baking half a tonne a second; order of magnitude, like
     // the Steel Mill's furnaces (integration calibrates to powerDraw).
     powerKw: 900,
@@ -196,7 +253,7 @@ class RefineryRecipes {
     inputs: [ItemQty('refinery:volatiles', 8), ItemQty('refinery:catalyst', 1)],
     outputs: [ItemQty('refinery:fuelRun', 1), ItemQty('refinery:loxRun', 1)],
     // 9.6 s: a manual reactor (16 s a batch) runs 0.0625 batches/s
-    // against its line's 0.05.
+    // against line B's 0.056 and line A's 0.044.
     seconds: 9.6,
     // Electrolysis stack, reactor and liquefaction compressors: the plant's
     // biggest draw by far.
@@ -210,7 +267,7 @@ class RefineryRecipes {
     inputs: [ItemQty('refinery:fuelRun', 1)],
     outputs: [ItemQty('fuel', 4)],
     // 9.6 s for four totes: a manual filler (16 s) keeps pace with its
-    // reactor at 80%.
+    // reactor.
     seconds: 9.6,
     // Transfer pump and a chiller on the fill head.
     powerKw: 20,
@@ -244,94 +301,116 @@ void registerRefineryChain() {
 
 // ---- layout -----------------------------------------------------------------
 
-/// Line A runs south of the feed conveyor; line B is its mirror image
-/// across the hall's middle (y ↔ [_mirrorSum] − y).
-const int _mirrorSum = 25;
+/// The hot core's reference row: kiln A's hand port opens onto (5, m), its
+/// output belt (line A's volatiles) runs along m+2. The core spans rows
+/// m-1 .. m+6 and the filling bays m-1 .. m+8, centred in the hall.
+const int _m = 10;
 
-/// x where the pipe runs end in their day tanks.
-const int _tankX = 39;
+/// x of the fuel fillers; the LOX fillers stand five tiles east of them.
+const int _fillX = 36;
 
 /// x of the shipping aisle's west lane (two tiles wide), past the fillers.
-const int _shipAisleX = _tankX + 5;
+const int _shipAisleX = _fillX + 8;
 
 /// x of the shipping doors on the east wall, across the aisle.
 const int _shipX = _shipAisleX + 2;
 
-/// Draws one line in line-A coordinates, mirrored when [mirror].
-class _Line {
-  _Line(this.l, {required this.mirror});
-  final TemplateLayout l;
-  final bool mirror;
+/// x where line B's fuel pipe climbs (its LOX pipe climbs one tile west).
+const int _climbX = 31;
 
-  /// The low y of a footprint [h] tall whose line-A low y is [y].
-  int y(int y, [int h = 1]) => mirror ? _mirrorSum - (y + h - 1) : y;
-
-  Dir4 d(Dir4 dir) => !mirror || !dir.isVertical ? dir : dir.opposite;
-
-  void machine(int x, int y0, FactoryRecipe r,
-          {MachineMode mode = MachineMode.manual}) =>
-      l.machine(x, y(y0, r.station.footH), r, mode: mode);
-
-  void arm(int x, int y0, Dir4 dir, {String? only}) =>
-      l.arm(x, y(y0), d(dir), only: only);
-
-  void add(EntityKind k, int x, int y0, {(int, int)? span, String? item}) =>
-      l.add(k, x, y(y0, span?.$2 ?? 1), span: span, item: item);
-
-  void draw() {
-    // Hot end: the kiln beside the feed conveyor, its reactor just
-    // outboard of it.
-    machine(2, 7, RefineryRecipes.roast);
-    // The crane bay runs from the kiln to the shared catalyst press in the
-    // middle of the hall (the two lines' bays overlap over the press).
-    add(EntityKind.craneBay, 2, 7, span: (7, 7));
-    // Volatiles straight from kiln to reactor.
-    arm(3, 6, Dir4.south, only: RefineryItems.volatiles.id);
-    machine(2, 2, RefineryRecipes.synthesise);
-    // Fuel and LOX on separate pipe runs east to their day tanks.
-    arm(6, 4, Dir4.east, only: RefineryItems.fuelRun.id);
-    arm(6, 3, Dir4.east, only: RefineryItems.loxRun.id);
-    l.beltEast(7, _tankX - 1, y(4));
-    l.beltEast(7, _tankX - 1, y(3));
-    add(EntityKind.chest, _tankX, 4, item: RefineryItems.fuelRun.id);
-    add(EntityKind.chest, _tankX, 3, item: RefineryItems.loxRun.id);
-    arm(_tankX + 1, 4, Dir4.east);
-    arm(_tankX + 1, 3, Dir4.east);
-    machine(_tankX + 2, 4, RefineryRecipes.fillFuel);
-    machine(_tankX + 2, 2, RefineryRecipes.fillLox);
-    // Two doors per product, across the shipping aisle from its filler: a
-    // filler sets down four totes at a time, more than one door's bay
-    // holds, and a full bay would send the overflow across the hall.
-    add(EntityKind.shippingDock, _shipX, 5, item: 'fuel');
-    add(EntityKind.shippingDock, _shipX, 4, item: 'fuel');
-    add(EntityKind.shippingDock, _shipX, 3, item: 'oxidizer');
-    add(EntityKind.shippingDock, _shipX, 2, item: 'oxidizer');
-  }
+/// One line's filling bay with its fillers on rows [f] .. f+1 (all
+/// east-facing; ports in `station_ports.dart`'s packer layout):
+///
+///     f+2   LOX > > > > v
+///     f+1   fuel > F F F . > L L L
+///     f          F h F     L h L
+///     f-2..f-1   forklift lane under both hand ports, out to the aisle
+///
+/// The fuel pipe arrives on row f+1 at x = fx-1, straight into the fuel
+/// filler's input port; the LOX pipe on row f+2 runs over the fuel filler
+/// and turns down a tile into the LOX filler's input. The fuel filler's
+/// output port (fx+2, f+1) has no belt in front of it, so its totes wait
+/// at its hand port for the forklifts.
+void _fillBay(TemplateLayout l, int f) {
+  l.machine(_fillX, f, RefineryRecipes.fillFuel);
+  l.add(EntityKind.belt, _fillX + 4, f + 2, dir: Dir4.south);
+  l.add(EntityKind.belt, _fillX + 4, f + 1);
+  l.machine(_fillX + 5, f, RefineryRecipes.fillLox);
+  l.add(EntityKind.aisle, _fillX, f - 2, span: (_shipAisleX - _fillX, 2));
+  // The fuel doors face the lane (fuel is the busier product); the
+  // oxidizer doors are just north of them.
+  l.add(EntityKind.shippingDock, _shipX, f - 2, item: 'fuel');
+  l.add(EntityKind.shippingDock, _shipX, f - 1, item: 'fuel');
+  l.add(EntityKind.shippingDock, _shipX, f, item: 'oxidizer');
+  l.add(EntityKind.shippingDock, _shipX, f + 1, item: 'oxidizer');
 }
 
-/// A fresh Refinery template blueprint (the caller may edit it).
+/// A fresh Refinery template blueprint (the caller may edit it). See the
+/// library doc's core diagram for the tiles named here.
 FloorBlueprint refineryTemplate() {
   ensureFactoryCatalog();
   registerRefineryChain();
   final l = TemplateLayout();
-  // Receiving: ore tipped at one door onto a feed conveyor that loops
-  // past both kilns' feed arms, between the two lines.
-  l.add(EntityKind.receivingDock, 0, 12, item: 'ore');
-  l.beltRun(12, 12, 2, Dir4.south);
-  l.beltRun(2, 4, 11, Dir4.east);
-  l.beltRun(11, 13, 5, Dir4.north);
-  l.beltRun(3, 5, 14, Dir4.west);
-  l.arm(3, 10, Dir4.south); // feed conveyor → kiln A (passing)
-  l.arm(3, 15, Dir4.north); // conveyor's end → kiln B
-  // One catalyst press between the two kilns, under both crane bays, and
-  // the walkers' muster area beside it.
-  l.machine(6, 11, RefineryRecipes.pelletise);
-  l.add(EntityKind.staging, 9, 11, span: (2, 4));
-  _Line(l, mirror: false).draw();
-  _Line(l, mirror: true).draw();
-  // The shipping aisle along the east wall, and its charging bay midway.
+  const m = _m;
+
+  // Ore: the dock conveyor straight into kiln A's input port (4, m+2);
+  // an arm on its first tile lifts ore onto the branch up column 2 and
+  // along row m+5 into kiln B's input port (8, m+5).
+  l.add(EntityKind.receivingDock, 0, m + 2, item: 'ore');
+  l.beltEast(2, 3, m + 2);
+  l.arm(2, m + 3, Dir4.north);
+  l.add(EntityKind.belt, 2, m + 4, dir: Dir4.north);
+  l.beltEast(2, 7, m + 5);
+
+  // The hot core. Kiln A (4, m+1): hand port (5, m+1) onto (5, m). Kiln B
+  // (8, m+4): hand port (9, m+4) onto (9, m+3). The press faces WEST so
+  // its hand port (9, m+1) opens north onto (9, m+2); its catalyst output
+  // port (8, m) and its input port (10, m) have no belt, so clinker comes
+  // in and catalyst goes out by hand.
+  l.machine(4, m + 1, RefineryRecipes.roast);
+  l.machine(8, m + 4, RefineryRecipes.roast);
+  l.machine(8, m - 1, RefineryRecipes.pelletise, dir: Dir4.west);
+  // Crane bays (crane i rides bay i): two over kiln A's hand port and the
+  // press's, one over kiln B's and the press's.
+  l.add(EntityKind.craneBay, 5, m, span: (5, 3));
+  l.add(EntityKind.craneBay, 5, m, span: (5, 3));
+  l.add(EntityKind.craneBay, 9, m + 1, span: (1, 4));
+
+  // Line A's volatiles: kiln A's output port (7, m+2) onto (8, m+2), east
+  // into reactor A's input port (17, m+2). (9, m+2) is the press's hand
+  // tile's floor, and (10..11, m+2) the walkers' way down to row m: all
+  // three are crossings.
+  l.beltEast(8, 16, m + 2, crossings: {9, 10, 11});
+  // Reactor A (17, m+1): catalyst by hand at (18, m+1), from (18, m).
+  l.machine(17, m + 1, RefineryRecipes.synthesise);
+  // Line B's volatiles: kiln B's output port (11, m+5) one tile into
+  // reactor B's input port (13, m+5). Reactor B (13, m+4): catalyst by
+  // hand at (14, m+4), from the corridor tile (14, m+3).
+  l.add(EntityKind.belt, 12, m + 5);
+  l.machine(13, m + 4, RefineryRecipes.synthesise);
+
+  // Line A's pipes from reactor A's output ports (20, m+2) fuel and
+  // (20, m+3) LOX to its filling bay.
+  l.beltEast(21, _fillX - 1, m + 2);
+  l.beltEast(21, _fillX + 3, m + 3);
+  _fillBay(l, m + 1);
+
+  // Line B's pipes from reactor B's output ports (16, m+5) fuel and
+  // (16, m+6) LOX, climbing two rows over line A's filling lane: the LOX
+  // pipe turns north first (one tile west), so the two never cross.
+  l.beltEast(17, _climbX - 1, m + 5);
+  l.beltRun(m + 5, m + 6, _climbX, Dir4.north);
+  l.beltEast(_climbX, _fillX - 1, m + 7);
+  l.beltEast(17, _climbX - 2, m + 6);
+  l.beltRun(m + 6, m + 7, _climbX - 1, Dir4.north);
+  l.beltEast(_climbX - 1, _fillX + 3, m + 8);
+  _fillBay(l, m + 6);
+
+  // The walkers' muster area, south of the core.
+  l.add(EntityKind.staging, 12, m - 3, span: (3, 2));
+  // The shipping aisle along the east wall, and its charging bay.
   l.add(EntityKind.aisle, _shipAisleX, 0, span: (2, kRefineryHall.h));
-  l.add(EntityKind.chargingBay, _shipAisleX - 2, 12);
+  l.add(EntityKind.chargingBay, _shipAisleX - 2, m + 10);
   return FloorBlueprint(
     name: 'Refinery',
     plantType: kRefineryType,
