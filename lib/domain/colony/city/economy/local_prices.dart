@@ -295,6 +295,13 @@ List<String> marketGoods() => [
 /// [recipes] defaults to the utility catalogue plus the zoned industry
 /// tiers.
 ///
+/// [tradeCeiling] and [tradeFloor] are what the other player colonies add
+/// to the band (docs/plans/dynamic-markets.md phase 5,
+/// `inter_colony_trade.dart` `tradeBandFor`): per good, the cheapest landed
+/// price of a colony that can sell it here and the best netback from one
+/// that wants it. They tighten the band exactly as another source or
+/// market does; the floor only with [MarketFacts.canExport].
+///
 /// [pinned] goods are priced at the given credits per unit, not from any
 /// recipe or source (their cost is [LocalMarket.localCost] too), and every
 /// recipe's unit cost is multiplied by [costMarkup]: both exist for Earth's
@@ -310,6 +317,8 @@ LocalMarket solveLocalMarket(
   List<CityBuildingSpec>? recipes,
   Map<String, double> pinned = const {},
   double costMarkup = 1,
+  Map<String, double> tradeCeiling = const {},
+  Map<String, double> tradeFloor = const {},
 }) {
   final t = transport ?? _defaultTransport;
   final goods = marketGoods();
@@ -343,6 +352,15 @@ LocalMarket solveLocalMarket(
     for (final id in marketIds) {
       final p = markets[id]!.prices[c];
       if (p != null && p > 0) source(id, p);
+    }
+    // Other player colonies (phase 5): freight is already in the quotes.
+    final colonyHi = tradeCeiling[c];
+    if (colonyHi != null && colonyHi > 0 && colonyHi.isFinite) {
+      hi = math.min(hi, colonyHi);
+    }
+    final colonyLo = tradeFloor[c];
+    if (facts.canExport && colonyLo != null && colonyLo.isFinite) {
+      lo = math.max(lo, colonyLo);
     }
     if (hi.isFinite) ceiling[c] = hi;
     floor[c] = hi.isFinite ? math.min(lo, hi) : lo;

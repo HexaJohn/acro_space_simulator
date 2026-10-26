@@ -70,6 +70,10 @@ class GameStateCodec {
       'deposits': [for (final d in deposits.all()) _deposit(d)],
       if (cities != null)
         'cities': [for (final c in cities.all()) c.toJson()],
+      // The ONE world market every colony trades in (Earth's market, the
+      // world's learning state, docs/plans/dynamic-markets.md phase 5):
+      // saved once here; the colonies above leave it out of theirs.
+      if (cities != null) 'worldEconomy': cities.worldEconomy.toJson(),
       if (atmospheres != null)
         'atmospheres': [for (final a in atmospheres.all()) a.toJson()],
       'operations': ?ops,
@@ -247,9 +251,19 @@ class GameStateCodec {
       for (final existing in cities.all().toList()) {
         cities.remove(existing.id);
       }
+      // The world market starts over with the save. Each colony joining
+      // below brings its own copy of the world from an old save (before
+      // phase 5 of docs/plans/dynamic-markets.md every colony carried one),
+      // and the world keeps the most advanced (`WorldEconomy.join`). A
+      // newer save then lays its one saved world over that.
+      cities.worldEconomy.reset();
       for (final cj in (json['cities'] as List)) {
         cities.add(
             CitySim.fromJson(cj as Map<String, dynamic>, bodies: bodies));
+      }
+      final world = json['worldEconomy'];
+      if (world is Map) {
+        cities.worldEconomy.restore(world.cast<String, Object?>());
       }
     }
     if (atmospheres != null) {

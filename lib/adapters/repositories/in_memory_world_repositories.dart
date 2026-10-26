@@ -6,6 +6,8 @@
 import '../../application/ports/world_repositories.dart';
 import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../domain/colony/city/city_trade.dart';
+import '../../domain/colony/city/economy/world_economy.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
 import '../../domain/terrain/terrain_brush.dart';
@@ -35,8 +37,11 @@ class InMemoryColonyRepository implements ColonyRepository {
 class InMemoryCityRepository implements CityRepository {
   final Map<String, CitySim> _store;
 
-  InMemoryCityRepository([Iterable<CitySim> seed = const []])
-      : _store = {for (final c in seed) c.id: c};
+  InMemoryCityRepository([Iterable<CitySim> seed = const []]) : _store = {} {
+    for (final c in seed) {
+      add(c);
+    }
+  }
 
   @override
   Iterable<CitySim> all() => _store.values;
@@ -44,11 +49,24 @@ class InMemoryCityRepository implements CityRepository {
   @override
   CitySim? byId(String id) => _store[id];
 
+  /// Every colony stored here trades in this one world
+  /// (docs/plans/dynamic-markets.md phase 5).
   @override
-  void add(CitySim city) => _store[city.id] = city;
+  final WorldEconomy worldEconomy = WorldEconomy(shared: true);
 
   @override
-  void remove(String id) => _store.remove(id);
+  void add(CitySim city) {
+    final had = _store[city.id];
+    if (had != null && !identical(had, city)) worldEconomy.leave(city.id);
+    _store[city.id] = city;
+    city.joinWorld(worldEconomy);
+  }
+
+  @override
+  void remove(String id) {
+    worldEconomy.leave(id);
+    _store.remove(id);
+  }
 }
 
 class InMemoryWeatherRepository implements WeatherRepository {

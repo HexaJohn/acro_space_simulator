@@ -402,9 +402,104 @@ class TechCatalog {
 
 // ---- state ---------------------------------------------------------------------
 
+/// The WORLD's half of the learning state: the world clock and Earth's
+/// cumulative output of every seeded good (docs/plans/dynamic-markets.md
+/// phase 5, "one world market").
+///
+/// Split out of [TechState] so that every colony in a game can share ONE
+/// (`world_economy.dart` [WorldEconomy] owns it, beside Earth's market):
+/// before phase 5 each colony carried its own copy of the world clock and
+/// world Q, so two colonies each advanced "the world" a day per close and
+/// each colony's exports taught only its own copy of Earth. A colony that
+/// stands alone (a city-builder screen, a test) still has a private one, and
+/// behaves exactly as before.
+class WorldTech {
+  /// Colony days since the world economy started (one per world close).
+  int day = 0;
+
+  /// Earth's cumulative output of each invented seeded good, units. Absent
+  /// = its day-0 seed ([TechCatalog.worldQAtStart]).
+  final SplayTreeMap<String, double> q = SplayTreeMap();
+
+  /// Day 0, nothing made: what an old save without world state loads as.
+  bool get isFresh => day == 0 && q.isEmpty;
+
+  /// Replaces this state with [o]'s (the merge rule's "take the most
+  /// advanced world", `world_economy.dart`).
+  void copyFrom(WorldTech o) {
+    day = o.day;
+    q
+      ..clear()
+      ..addAll(o.q);
+  }
+
+  /// Steps the world one colony day under [catalog]: the clock advances;
+  /// every good Earth makes adds a day of its industry's output (ramped for
+  /// a good invented after the start, [kAdoptionRampDays]) plus what
+  /// colonies sold it ([exportsUnits], units over the day); a good whose
+  /// invention day has come starts at its first lot. Returns the goods
+  /// invented today.
+  List<String> advanceDay(TechCatalog catalog,
+      {Map<String, double> exportsUnits = const {}}) {
+    final before = day;
+    day++;
+    final invented = <String>[];
+    for (final g in catalog.goods) {
+      final s = catalog[g]!;
+      if (s.inventionDay > day) continue;
+      if (s.inventionDay > before) {
+        q[g] = catalog.firstLot(g);
+        invented.add(g);
+        continue;
+      }
+      final age = day - s.inventionDay;
+      final ramp = s.inventionDay <= 0
+          ? 1.0
+          : math.min(1.0, age / kAdoptionRampDays);
+      final exported = exportsUnits[g] ?? 0.0;
+      q[g] = qOf(catalog, g) +
+          catalog.worldOutputPerS(g) * kColonyDaySec * ramp +
+          (exported > 0 && exported.isFinite ? exported : 0.0);
+    }
+    return invented;
+  }
+
+  /// World Q of [g] for a good Earth already makes: the saved value, or its
+  /// seed (the first lot for a good invented after the start, else
+  /// [TechCatalog.worldQAtStart]).
+  double qOf(TechCatalog catalog, String g) {
+    final saved = q[g];
+    if (saved != null) return saved;
+    final s = catalog[g];
+    if (s == null) return 0;
+    return s.inventionDay > 0
+        ? catalog.firstLot(g)
+        : catalog.worldQAtStart(g);
+  }
+
+  Map<String, Object?> toJson() => {
+        'day': day,
+        if (q.isNotEmpty) 'wq': {...q},
+      };
+
+  /// Restores [j]'s world fields ('day', 'wq'); a map with neither (a colony
+  /// saved while it shared a world, whose world is saved once by its owner)
+  /// leaves this state untouched.
+  void restore(Map<String, Object?> j) {
+    if (!j.containsKey('day') && !j.containsKey('wq')) return;
+    day = (j['day'] as num?)?.toInt() ?? 0;
+    q.clear();
+    ((j['wq'] as Map?) ?? const {}).forEach((k, v) {
+      final x = (v as num?)?.toDouble() ?? 0;
+      if (x > 0 && x.isFinite) q[k as String] = x;
+    });
+  }
+}
+
 /// What one colony knows about making things, and the world's state as that
-/// colony carries it: the world clock, world and local cumulative output,
-/// and the goods it invented ahead of Earth. Held by `ColonyEconomy.tech`;
+/// colony sees it: the world clock and world output ([world], shared by
+/// every colony of a game since phase 5), its own cumulative output, and
+/// the goods it invented ahead of Earth. Held by `ColonyEconomy.tech`;
 /// saved by `CitySim` under its own key, so a colony that never had a plant
 /// still keeps its world clock (Earth's prices would jump back to their
 /// seed on every load otherwise).
@@ -414,12 +509,17 @@ class TechState {
   /// The seeds (runtime: never saved, always the game's outside a test).
   final TechCatalog catalog;
 
-  /// Colony days since the world economy started (one per economy close).
-  int worldDay = 0;
+  /// The world clock and world output this colony reads: its own private
+  /// one until it joins a shared world (`world_economy.dart`).
+  WorldTech world = WorldTech();
 
-  /// Earth's cumulative output of each invented seeded good, units. Absent
-  /// = its day-0 seed ([TechCatalog.worldQAtStart]).
-  final SplayTreeMap<String, double> worldQ = SplayTreeMap();
+  /// Colony days since the world economy started ([WorldTech.day]).
+  int get worldDay => world.day;
+  set worldDay(int d) => world.day = d;
+
+  /// Earth's cumulative output of each invented seeded good, units
+  /// ([WorldTech.q]). Absent = its day-0 seed ([TechCatalog.worldQAtStart]).
+  SplayTreeMap<String, double> get worldQ => world.q;
 
   /// This colony's own cumulative output of each learning good, units.
   final SplayTreeMap<String, double> localQ = SplayTreeMap();
@@ -428,8 +528,10 @@ class TechState {
   final SplayTreeSet<String> early = SplayTreeSet();
 
   /// Nothing learned, nothing invented, day 0: what an old save loads as.
-  bool get isFresh =>
-      worldDay == 0 && worldQ.isEmpty && localQ.isEmpty && early.isEmpty;
+  bool get isFresh => world.isFresh && isLocalFresh;
+
+  /// Nothing of the colony's OWN: no local output, nothing invented early.
+  bool get isLocalFresh => localQ.isEmpty && early.isEmpty;
 
   // ---- invention ----
 
@@ -485,13 +587,7 @@ class TechState {
   /// Earth's cumulative output of [good]; 0 before it is invented.
   double worldQOf(String good) {
     if (!inventedOnEarth(good)) return 0;
-    return worldQ[good] ?? _worldQSeed(good);
-  }
-
-  double _worldQSeed(String good) {
-    final s = catalog[good];
-    if (s == null) return 0;
-    return s.inventionDay > 0 ? catalog.firstLot(good) : catalog.worldQAtStart(good);
+    return world.qOf(catalog, good);
   }
 
   /// This colony's own cumulative output of [good].
@@ -547,55 +643,29 @@ class TechState {
     }
   }
 
-  /// Steps the world one colony day: the clock advances; every good Earth
-  /// makes adds a day of its industry's output (ramped for a good invented
-  /// after the start, [kAdoptionRampDays]) plus what colonies sold it
-  /// ([exportsUnits], units over the day); a good whose invention day has
-  /// come starts at its first lot. Returns the goods invented today.
-  List<String> advanceWorldDay({Map<String, double> exportsUnits = const {}}) {
-    final before = worldDay;
-    worldDay++;
-    final invented = <String>[];
-    for (final g in catalog.goods) {
-      final s = catalog[g]!;
-      if (s.inventionDay > worldDay) continue;
-      if (s.inventionDay > before) {
-        worldQ[g] = catalog.firstLot(g);
-        invented.add(g);
-        continue;
-      }
-      final age = worldDay - s.inventionDay;
-      final ramp = s.inventionDay <= 0
-          ? 1.0
-          : math.min(1.0, age / kAdoptionRampDays);
-      final exported = exportsUnits[g] ?? 0.0;
-      worldQ[g] = worldQOf(g) +
-          catalog.worldOutputPerS(g) * kColonyDaySec * ramp +
-          (exported > 0 && exported.isFinite ? exported : 0.0);
-    }
-    return invented;
-  }
+  /// Steps the world one colony day ([WorldTech.advanceDay] under this
+  /// colony's catalog). Returns the goods invented today.
+  List<String> advanceWorldDay({Map<String, double> exportsUnits = const {}}) =>
+      world.advanceDay(catalog, exportsUnits: exportsUnits);
 
   // ---- saving ----
 
-  Map<String, Object?> toJson() => {
-        'day': worldDay,
-        if (worldQ.isNotEmpty) 'wq': {...worldQ},
+  /// The saved state. [withWorld] false (a colony sharing a world, which is
+  /// saved once by its owner) leaves the world clock and world Q out.
+  Map<String, Object?> toJson({bool withWorld = true}) => {
+        if (withWorld) ...world.toJson(),
         if (localQ.isNotEmpty) 'lq': {...localQ},
         if (early.isNotEmpty) 'early': early.toList(),
       };
 
   /// Restores a saved state into this fresh one; null (an old save) leaves
-  /// it at day 0 with every curve at its seed.
+  /// it at day 0 with every curve at its seed. A save without world fields
+  /// leaves [world] as it is.
   void restore(Map<String, Object?>? j) {
     if (j == null) return;
     Map<String, Object?> m(Object? o) =>
         ((o as Map?) ?? const {}).cast<String, Object?>();
-    worldDay = (j['day'] as num?)?.toInt() ?? 0;
-    m(j['wq']).forEach((k, v) {
-      final q = (v as num?)?.toDouble() ?? 0;
-      if (q > 0 && q.isFinite) worldQ[k] = q;
-    });
+    world.restore(j);
     m(j['lq']).forEach((k, v) {
       final q = (v as num?)?.toDouble() ?? 0;
       if (q > 0 && q.isFinite) localQ[k] = q;

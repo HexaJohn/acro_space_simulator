@@ -56,6 +56,7 @@ import '../../planetary/atmospheric_composition.dart';
 import 'city_building_spec.dart';
 import 'city_entrepreneurs.dart';
 import 'city_sim.dart';
+import 'city_trade.dart';
 import 'commodity.dart';
 import 'economy/colony_economy.dart';
 import 'economy/economy_clock.dart';
@@ -69,6 +70,7 @@ import 'economy/markets.dart';
 import 'economy/plant_pnl.dart';
 import 'economy/skill_tiers.dart';
 import 'economy/transport_cost.dart';
+import 'economy/world_economy.dart';
 import 'factory/factory_handling.dart';
 import 'factory/factory_sim_api.dart';
 import 'factory/floor_blueprint.dart';
@@ -158,6 +160,10 @@ double softTaxCeiling(double raw, double ceiling) {
   return ceiling * (1 - math.exp(-raw / ceiling));
 }
 
+/// The Δv freight model at the seed propellant price (what a solve with no
+/// transport given uses), built once.
+final DeltaVTransportModel _seedTransport = DeltaVTransportModel();
+
 /// Most messages [ColonyEconomy.notices] holds: the newest few are what a
 /// HUD shows, and the list must not grow for a colony's whole life when no
 /// host drains it.
@@ -232,19 +238,35 @@ extension CityEconomy on CitySim {
 
   /// The cost solve against Earth's LIVE market (seeded if this colony has
   /// none yet), with propellant out of Earth's well at Earth's live methalox
-  /// price.
-  LocalMarket _solveCosts() {
+  /// price, and the other player colonies of its world in the trade band
+  /// (docs/plans/dynamic-markets.md phase 5, [colonyTradeBand]).
+  ///
+  /// [band] is the colony band to use when the caller took it already (the
+  /// daily close takes it BEFORE the day's cargo moves: a partner that sold
+  /// out its surplus to this colony today was still today's source).
+  LocalMarket _solveCosts(
+      {({Map<String, double> ceiling, Map<String, double> floor})? band}) {
     final e = colonyEconomy;
     if (e.earthMarket.isEmpty) e.earthMarket = seedEarthMarketFor(e.tech);
-    final propellant = earthPropellantPerKgIn(e.earthMarket);
+    final transport = colonyTransport();
+    final quotes = band ?? colonyTradeBand(transport);
     return solveLocalMarket(
       marketFacts(),
       earthPrices: e.earthMarket.prices,
-      transport: propellant == null
-          ? null
-          : DeltaVTransportModel(
-              propellantPricePerKg: {kEarthMarketId: propellant}),
+      transport: transport,
+      tradeCeiling: quotes.ceiling,
+      tradeFloor: quotes.floor,
     );
+  }
+
+  /// Freight by Δv, propellant out of Earth's well at Earth's live methalox
+  /// price (seed-priced when Earth's market trades neither half yet).
+  TransportCostModel colonyTransport() {
+    final propellant = earthPropellantPerKgIn(colonyEconomy.earthMarket);
+    return propellant == null
+        ? _seedTransport
+        : DeltaVTransportModel(
+            propellantPricePerKg: {kEarthMarketId: propellant});
   }
 
   /// Today's cost solve exactly as the next day close will run it (Earth's
@@ -636,33 +658,63 @@ extension CityEconomy on CitySim {
   /// test's manual close mid-day steps prices a whole day).
   void closeEconomyDay() {
     final e = colonyEconomy;
+    // Inter-colony trade first (docs/plans/dynamic-markets.md phase 5): the
+    // cargo this colony buys from the others lands today, so it is part of
+    // the day's supply (and the sellers' demand) the markets close on.
+    if (e.earthMarket.isEmpty) e.earthMarket = seedEarthMarketFor(e.tech);
+    final transport = colonyTransport();
+    final band = colonyTradeBand(transport);
+    runColonyImports(transport);
     final facts = marketFacts();
-    final solved = _solveCosts();
+    final solved = _solveCosts(band: band);
     final daySoFar = e.dayClockS;
     final imports = <String, double>{
       if (daySoFar > 0)
         for (final c in e.importUnits.keys) c: e.importUnits[c]! / daySoFar,
     };
+    // What landed from other colonies is never this colony's to sell on to
+    // Earth (nor was it bought from Earth: not Earth's demand).
+    final notOurs = <String, double>{...imports};
+    if (daySoFar > 0) {
+      for (final c in e.trade.inUnits.keys) {
+        notOurs[c] = (notOurs[c] ?? 0) + e.trade.inUnits[c]! / daySoFar;
+      }
+    }
     final close = closeColonyMarket(e.colonyMarket, solved, facts,
-        localImportsPerS: imports);
+        localImportsPerS: notOurs);
     // Learning (docs/plans/dynamic-markets.md phase 2): the day's own
-    // production becomes the colony's experience, the world makes a day of
-    // everything it has invented (plus what this colony sold it), and
-    // Earth's anchors move down their curves before its market steps.
-    // Tomorrow's cost solve reads both.
+    // production becomes the colony's experience; then the colony's trade
+    // with Earth joins the WORLD's day (phase 5, `world_economy.dart`),
+    // which, once every colony of the world has closed, makes a day of
+    // everything invented (plus what the colonies sold it) and moves
+    // Earth's anchors down their curves before its market steps. A lone
+    // colony's world steps right here, as before. Tomorrow's cost solve
+    // reads both.
     final tech = e.tech;
     tech.recordLocal(e.madeUnits);
     final daySec = daySoFar > 0 ? daySoFar : kColonyDaySec;
-    final invented = tech.advanceWorldDay(exportsUnits: {
-      for (final x in close.exportsPerS.entries) x.key: x.value * daySec,
-    });
-    for (final g in invented) {
-      pushEconomyNotice("Earth's industry has begun making "
-          '${Commodity.name(g)}: dear at first, cheaper with every doubling.');
+    final world = e.world;
+    final seen = e.trade.worldDaySeen ?? world.tech.day;
+    world.closeColonyDay(
+        id,
+        WorldDayShare(
+          importsPerS: Map.unmodifiable(imports),
+          exportsPerS: close.exportsPerS,
+          daySec: daySec,
+        ),
+        tech);
+    // Every colony hears of each invention once, whichever colony's close
+    // stepped the world past it.
+    final now = world.tech.day;
+    for (final g in tech.catalog.goods) {
+      final d = tech.catalog[g]!.inventionDay;
+      if (d > seen && d <= now) {
+        pushEconomyNotice("Earth's industry has begun making "
+            '${Commodity.name(g)}: dear at first, cheaper with every '
+            'doubling.');
+      }
     }
-    applyWorldTech(e.earthMarket, tech);
-    closeEarthDay(e.earthMarket,
-        importsPerS: imports, exportsPerS: close.exportsPerS);
+    e.trade.worldDaySeen = now;
     e.market = _withBook(solved, (_) => close.book);
     e.sellThrough
       ..clear()
@@ -764,6 +816,7 @@ extension CityEconomy on CitySim {
     // prices closed, a good whose margin has stayed high long enough draws
     // a firm to found a plant for it (`city_entrepreneurs.dart`).
     entrepreneursCloseDay(day);
+    e.trade.closeDay(day);
     e.dayClockS = 0;
     e.demandUnits.clear();
     e.supplyUnits.clear();

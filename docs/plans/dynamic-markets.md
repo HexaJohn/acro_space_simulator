@@ -156,6 +156,25 @@ against the skilled jobs posted, priced like any other good.
    and workers will attract refineries.
 5. **Inter-colony trade.** Each player colony is a source and destination for the others, linked
    by transport cost.
+   *Built* (`economy/world_economy.dart`, `economy/inter_colony_trade.dart`, `city_trade.dart`).
+   ONE world market (Earth's market plus the world clock and world output, `WorldTech`) owned by
+   the `CityRepository`, which joins each colony as it is added; a lone colony keeps a private
+   one and runs exactly as before. The world steps once per round of closes (every member closed,
+   or one closed twice), summing every colony's Earth trade in colony-id order. Old saves: each
+   colony's copy merges as it joins, the most advanced (highest world day) winning, ties to the
+   first; the world is then saved once (`worldEconomy`) and colonies carry none. Every other
+   colony with a working port is in the band: a source at its price + freight when it holds
+   more than its reserve (30 days of its own use or half its store), a destination at its price −
+   freight when it is short; same-body freight $2/kg. Flows are bookkeeping (option a): at its
+   close a colony buys from the cheapest landed partner that beats its own and Earth's landed
+   price, a fifth of its cover gap a day, capped by its store's room and by both ports' launch
+   capacity (100 t a day per unit of a port's fuel draw); stocks move and both days' flows see
+   it. Shadow money only: no transfer between treasuries. Two Martian colonies (a 100-person town
+   whose farm falls behind, a granary) meet at $5.65 and $3.35 a kg of food by day 30, 4.3 t
+   shipped; a Moon granary caps a Martian town's food at $358 landed (Earth's is $481).
+   Follow-ups: real cargo flights (shuttle runs, `DeliverySchedule`), a capacity-aware band, and
+   road links between same-body colonies. The game can already hold several colonies (the flight
+   session founds one per site), so this runs live.
 6. **UI.** A price chart per good ("why this price"), the labour market, invention news, and firm
    founding notices.
 

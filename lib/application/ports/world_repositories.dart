@@ -5,6 +5,7 @@
 
 import '../../domain/autonomy/cargo_schedule.dart';
 import '../../domain/colony/city/city_sim.dart';
+import '../../domain/colony/city/economy/world_economy.dart';
 import '../../domain/colony/colony.dart';
 import '../../domain/megastructure/megastructure.dart';
 import '../../domain/planetary/planet_atmosphere.dart';
@@ -30,11 +31,19 @@ abstract class ColonyRepository {
 /// nothing outside it may hold a divergent copy. A colony registered here keeps
 /// running whether or not its screen is mounted, which is the whole point of
 /// moving it out of the widget.
+///
+/// It also owns the ONE world market every colony it holds trades in
+/// ([worldEconomy]: Earth's market and the world's learning state,
+/// docs/plans/dynamic-markets.md phase 5): [add] joins a colony to it, and
+/// [remove] lets the colony go with a private copy.
 abstract class CityRepository {
   Iterable<CitySim> all();
   CitySim? byId(String id);
   void add(CitySim city);
   void remove(String id);
+
+  /// The shared world market of every colony held here.
+  WorldEconomy get worldEconomy;
 }
 
 /// Every body's gas inventory (docs/plans/terraforming.md §3.1): the air as
@@ -75,6 +84,10 @@ class NullCityRepository implements CityRepository {
   void add(CitySim city) {}
   @override
   void remove(String id) {}
+
+  /// A fresh, memberless world each time: this repository holds nothing.
+  @override
+  WorldEconomy get worldEconomy => WorldEconomy(shared: true);
 }
 
 abstract class WeatherRepository {

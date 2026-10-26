@@ -42,10 +42,12 @@ import '../factory/floor_blueprint.dart';
 import 'economy_contracts.dart';
 import 'entrepreneurs.dart';
 import 'firm_policy.dart';
+import 'inter_colony_trade.dart';
 import 'labour_market.dart';
 import 'learning.dart';
 import 'local_prices.dart';
 import 'markets.dart';
+import 'world_economy.dart';
 
 /// Funds (`CitySim.funds`, the treasury's §) per economy credit.
 ///
@@ -215,12 +217,55 @@ class ColonyEconomy {
   final SplayTreeMap<String, double> madeUnits = SplayTreeMap();
 
   /// What the colony knows how to make, and the world's learning and
-  /// invention timeline as this colony carries it (docs/plans/
-  /// dynamic-markets.md phase 2, `learning.dart`). Saved by `CitySim` under
-  /// its own key ('tech'), not here: a colony with no plant saves no plant
-  /// economy, but its world clock must survive a load. Reassignable so a
-  /// test can give a colony a synthetic catalog.
-  TechState tech = TechState();
+  /// invention timeline as this colony sees it (docs/plans/
+  /// dynamic-markets.md phase 2, `learning.dart`); its world half is
+  /// [world]'s ([WorldEconomy.tech]). Saved by `CitySim` under its own key
+  /// ('tech'), not here: a colony with no plant saves no plant economy, but
+  /// its world clock must survive a load. Reassignable so a test can give a
+  /// colony a synthetic catalog: in a shared world the new state reads the
+  /// shared world clock; a lone colony's private world takes the new
+  /// state's.
+  TechState get tech => _tech;
+  set tech(TechState t) {
+    _tech = t;
+    if (_world.shared) {
+      t.world = _world.tech;
+    } else {
+      _world.tech = t.world;
+    }
+  }
+
+  TechState _tech = TechState();
+
+  /// The world market this colony trades in: Earth's market and the world
+  /// learning state (docs/plans/dynamic-markets.md phase 5,
+  /// `world_economy.dart`). A private one until the host that holds every
+  /// colony joins it to the shared one ([attachWorld]).
+  WorldEconomy get world => _world;
+  late WorldEconomy _world = WorldEconomy()..tech = _tech.world;
+
+  /// Moves this colony into [w] (called by [WorldEconomy.join]): its
+  /// learning state reads [w]'s world clock from now on, and its cached
+  /// solve, which read the old world, is dropped.
+  void attachWorld(WorldEconomy w) {
+    _world = w;
+    _tech.world = w.tech;
+    market = null;
+  }
+
+  /// Leaves a shared world with a private copy of it as it stands
+  /// ([WorldEconomy.leave]).
+  void detachWorld() {
+    final copy = _world.privateCopy();
+    _world = copy;
+    _tech.world = copy.tech;
+    market = null;
+  }
+
+  /// The colony's trade with the other player colonies
+  /// (docs/plans/dynamic-markets.md phase 5, `inter_colony_trade.dart`).
+  /// Saved by `CitySim` under its own key ('trade').
+  final ColonyTrade trade = ColonyTrade();
 
   /// The colony's labour market: each skill tier's wage, the skill mix and
   /// the day's tallies (docs/plans/dynamic-markets.md phase 3,
@@ -267,11 +312,12 @@ class ColonyEconomy {
   /// day close seeds it from today's solve; saved with the rest.
   Market colonyMarket = Market();
 
-  /// Earth's world market as this colony sees it: seeded once from
-  /// `kEarthPricePerKg`, then moved by world supply and demand plus this
-  /// colony's own trade with it. Each colony carries its own copy until
-  /// phase 5's inter-colony trade gives the world market a single owner.
-  Market earthMarket = Market();
+  /// Earth's world market: [world]'s ([WorldEconomy.earth]), one for every
+  /// colony of a game since phase 5 of docs/plans/dynamic-markets.md. Seeded
+  /// from the derived costs on first use, then moved by world supply and
+  /// demand plus every colony's trade with it.
+  Market get earthMarket => _world.earth;
+  set earthMarket(Market m) => _world.earth = m;
 
   /// Per good, the share of supply that sold at the last close
   /// (`markets.dart` `sellThroughOf`): what revenue counts. Saved, so an
@@ -418,7 +464,9 @@ class ColonyEconomy {
         if (madeUnits.isNotEmpty) 'made': {...madeUnits},
         if (staffStarvedS.isNotEmpty) 'starved': {...staffStarvedS},
         if (!colonyMarket.isEmpty) 'mkt': colonyMarket.toJson(),
-        if (!earthMarket.isEmpty) 'earthMkt': earthMarket.toJson(),
+        // A shared world's Earth is saved once, by its owner.
+        if (!_world.shared && !earthMarket.isEmpty)
+          'earthMkt': earthMarket.toJson(),
         if (sellThrough.isNotEmpty) 'sell': {...sellThrough},
         'taxPs': corporateTaxFundsPerS,
         'defPs': industryDeficitFundsPerS,
@@ -433,7 +481,14 @@ class ColonyEconomy {
   /// few percent (the advanced class's 40-day half-life against a curve
   /// sliding ~15% a year), and re-seeding them at the anchor on every load
   /// would make them jump.
+  ///
+  /// In a shared world only the colony's own half is saved (its local
+  /// output, what it invented early): the world clock, world output and
+  /// Earth's market are saved once by the world's owner.
   Map<String, Object?>? techJson({required bool withEarth}) {
+    if (_world.shared) {
+      return tech.isLocalFresh ? null : tech.toJson(withWorld: false);
+    }
     if (tech.isFresh) return null;
     return {
       ...tech.toJson(),
@@ -484,7 +539,8 @@ class ColonyEconomy {
     // An old save has neither market: both stay empty and the next day
     // close seeds them from today's model.
     colonyMarket = Market.fromJson(m(j['mkt']));
-    earthMarket = Market.fromJson(m(j['earthMkt']));
+    // Never over a shared world's Earth: only a lone colony restores its own.
+    if (!_world.shared) earthMarket = Market.fromJson(m(j['earthMkt']));
     m(j['sell']).forEach((k, v) => sellThrough[k] = d(v));
     corporateTaxFundsPerS = d(j['taxPs']);
     industryDeficitFundsPerS = d(j['defPs']);
