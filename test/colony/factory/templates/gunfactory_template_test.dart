@@ -85,7 +85,7 @@ void main() {
     }
   });
 
-  test('steady state is the spec rate within 5%, and nothing else', skip: 'awaiting port redraw (#19)', () {
+  test('steady state is the spec rate within 5%, and nothing else', () {
     // Commodity units: a steel crate counts as ten steel, an ammo pallet
     // as fifty ammo. Swarf, cases and bullets never leave the plant.
     final spec = _spec;
@@ -108,18 +108,22 @@ void main() {
     );
   });
 
-  test('any reasonable warm-up and window reads the spec within 5%', skip: 'awaiting port redraw (#19)', () {
+  test('any reasonable warm-up and window reads the spec within 5%', () {
     // The floor ships in lumps (a 50-round pallet, a 10-gun case) and has
     // no exact cycle, so a reading that only passes on one hand-picked,
     // lump-aligned window proves little. Sweep misaligned warm-ups (the
-    // floor settles by ~180 s) against windows of 1800 s and more — one
-    // pallet is under 3% of those — plus the plan's own minimum (300 s
-    // warm-up, 1200 s window), where one pallet is 4.2% and the margin is
-    // thinnest. A floor still filling its belts (the old 1.2 blanks/s saw
-    // took ~600 s) reads its fill as intake and fails here.
+    // port floor settles by ~240 s: its part collectors hold ~100 parts,
+    // whose swarf the ammunition line works off by then) against windows
+    // of 1800 s and more — one pallet is under 3% of those — plus the
+    // plan's own minimum (300 s warm-up, 1200 s window), where one pallet
+    // is 4.2% and the margin is thinnest. A floor still filling its belts
+    // (the old 1.2 blanks/s saw took ~600 s) reads its fill as intake and
+    // fails here.
     for (final (warm, win) in [
-      (180.0, 1800.0),
+      (240.0, 1800.0),
       (kArmsMeasureSettings.warmupS, kArmsMeasureSettings.windowS),
+      (281.0, 1999.0),
+      (353.0, 1913.0),
       (263.0, 1837.0),
       (317.0, 1871.0),
       (409.0, 2003.0),
@@ -161,7 +165,7 @@ void main() {
   });
 
   test(
-    'a fresh worker isolate measures it, with or without the chain setup', skip: 'awaiting port redraw (#19)',
+    'a fresh worker isolate measures it, with or without the chain setup',
     () async {
       // The off-thread runner builds floors in an isolate whose registries
       // start empty and are filled only by ensureFactoryCatalog. Since the
@@ -221,7 +225,7 @@ void main() {
     );
   });
 
-  test('people and vehicles share the freight; nothing is lights-out', skip: 'awaiting port redraw (#19)', () {
+  test('people and vehicles share the freight; nothing is lights-out', () {
     // The user's brief: workers on their own or with forklifts and cranes,
     // and very few plants run from unloading to loading untouched.
     final bp = gunfactoryTemplate();
@@ -282,12 +286,14 @@ void main() {
     }
   });
 
-  test('a better design beats it: same output, far fewer jobs', skip: 'awaiting port redraw (#19)', () {
+  test('a better design beats it: same output, far fewer jobs', () {
     // "Fine, not great" (§3 Reward): one operator per station instead of
     // a manual pair — the fitting bench excepted, it sets the pace — and
-    // the nine walkers it really needs: 23 jobs against 35 (34% fewer) for
-    // the same guns and ammo, past the >= 15% the plan asks: the labour
-    // lever exists.
+    // nine walkers (the port floor's swarf and case walks need eight):
+    // 23 jobs against 35 (34% fewer) for the same guns and ammo, past the
+    // >= 15% the plan asks: the labour lever exists. Re-crewing changes no
+    // port: every station keeps its belts, and the walkers still work the
+    // centres' and the case packer's hand ports.
     final bp = gunfactoryTemplate();
     for (var i = 0; i < bp.placements.length; i++) {
       final p = bp.placements[i];
@@ -312,7 +318,7 @@ void main() {
     }
   });
 
-  test('deterministic, and save/load mid-run continues bit for bit', skip: 'awaiting port redraw (#19)', () {
+  test('deterministic, and save/load mid-run continues bit for bit', () {
     // Two builds must measure identically (aggregate mode re-measures
     // off-thread), and a colony save must not change what a plant makes.
     final a = FactoryFloor.fromBlueprint(gunfactoryTemplate());
