@@ -6,6 +6,7 @@
 import 'dart:convert';
 
 import 'package:acro_space_simulator/domain/colony/city/city_building_spec.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/dock_geometry.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_capex.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_colony_port.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities.dart';
@@ -18,6 +19,7 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_measure.
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_recipe.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/floor_blueprint.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/station_ports.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/templates/rocketfactory_template.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -42,7 +44,7 @@ void main() {
   /// Every dock rate within 5% of the spec, counted in commodity units,
   /// and nothing else in or out: the frames and harnesses are used up
   /// inside, so the colony sees only the spec's goods.
-  test('steady state is the spec rate within 5%, and nothing else', skip: 'awaiting port redraw (#19)', () {
+  test('steady state is the spec rate within 5%, and nothing else', () {
     final r = steady(FactoryFloor.fromBlueprint(rocketfactoryTemplate()));
     expect(r.inPerS.keys.toSet(), spec.inputs.keys.toSet(),
         reason: 'takes nothing but tubes and electronics: ${r.inPerS}');
@@ -64,7 +66,7 @@ void main() {
   /// colony gets. Start-up stock (belts and pads still filling, buffers
   /// still priming) counts as intake in so short a window, so this is the
   /// test that keeps the floor's stock small and quick to fill.
-  test('the game\'s standard re-measure reads the spec within 5%', skip: 'awaiting port redraw (#19)', () {
+  test('the game\'s standard re-measure reads the spec within 5%', () {
     final r = measureBlueprint(rocketfactoryTemplate(), FactoryFloor.fromBlueprint,
         settings: MeasureSettings.standard);
     expect(r.inPerS.keys.toSet(), spec.inputs.keys.toSet());
@@ -83,7 +85,7 @@ void main() {
   /// each read the spec within 1%, and the floor's stock is the same at the
   /// end of each. So a pass is not bought with a long window's averaging
   /// (with crates, 1200 s windows swung about ±6% on electronics).
-  test('back-to-back 1200 s windows each read the spec, stock flat', skip: 'awaiting port redraw (#19)', () {
+  test('back-to-back 1200 s windows each read the spec, stock flat', () {
     final f = FactoryFloor.fromBlueprint(rocketfactoryTemplate());
     final port = InfiniteColonyPort();
     f.step(300, port);
@@ -111,29 +113,28 @@ void main() {
     }
   });
 
-  /// The fleet's slack is what the library doc says it is: three forklifts
-  /// hold the long-run rate and two do not, and eight walkers hold even
-  /// the game's short re-measure. The template keeps four forklifts and
-  /// twelve walkers, so both are levers, not needs.
-  test('three forklifts and eight walkers hold the rate; two forklifts do not', skip: 'awaiting port redraw (#19)',
+  /// The fleet's slack is what the library doc says it is: four forklifts
+  /// hold the long-run rate and two do not, and four walkers hold even the
+  /// game's short re-measure. The template keeps five forklifts and nine
+  /// walkers, so both are levers, not needs.
+  test('four forklifts and four walkers hold the rate; two forklifts do not',
       () {
     FloorBlueprint crewed(HandlerKind k, int n) =>
         rocketfactoryTemplate()..roster[k] = n;
     final parts = spec.outputs[Commodity.rocketParts]!;
-    final three = steady(FactoryFloor.fromBlueprint(
-        crewed(HandlerKind.forklift, 3)));
-    expect(three.outPerS['rocketParts']!, closeTo(parts, parts * 0.05));
+    final four = steady(FactoryFloor.fromBlueprint(
+        crewed(HandlerKind.forklift, 4)));
+    expect(four.outPerS['rocketParts']!, closeTo(parts, parts * 0.05));
     final two = steady(FactoryFloor.fromBlueprint(
         crewed(HandlerKind.forklift, 2)));
     expect(two.outPerS['rocketParts']!, lessThan(parts * 0.95),
         reason: 'two forklifts should fall short: ${two.outPerS}');
-    final eight = measureBlueprint(
-        crewed(HandlerKind.onFoot, 8), FactoryFloor.fromBlueprint);
-    expect(eight.outPerS['rocketParts']!, closeTo(parts, parts * 0.05));
-    expect(kRocketPartsForklifts, greaterThan(3));
-    expect(kRocketPartsWalkers, greaterThan(8));
+    final walkers = measureBlueprint(
+        crewed(HandlerKind.onFoot, 4), FactoryFloor.fromBlueprint);
+    expect(walkers.outPerS['rocketParts']!, closeTo(parts, parts * 0.05));
+    expect(kRocketPartsForklifts, greaterThan(4));
+    expect(kRocketPartsWalkers, greaterThan(4));
   });
-
 
   /// Placing the plant with its template costs what the plant always cost,
   /// and the hall is a believable shed that fits the site.
@@ -150,15 +151,61 @@ void main() {
     expect(bp.hall.widthM, inInclusiveRange(40, 250));
     expect(bp.hall.depthM, inInclusiveRange(30, 200));
     expect(bp.plantType, kRocketPartsType);
+    // Every door is a door: its back edge on the hall's outer wall.
+    for (final p in bp.placements.where((p) => isDockKind(p.kind))) {
+      expect(dockOnOuterWall(p, bp.hall), isTrue, reason: '$p');
+    }
     expect(identical(rocketfactoryTemplate(), rocketfactoryTemplate()),
         isFalse, reason: 'each call is a fresh blueprint the caller may edit');
   });
 
+  /// The port layout (§10 item 19) as the template's doc draws it: every
+  /// tube and electronics door feeds its station's input port, every bay's
+  /// product port feeds the roller to its shipping door, and no arm is
+  /// left over to touch a machine.
+  test('every feed is a port: doors and rollers into ports, none by arm', () {
+    final bp = rocketfactoryTemplate();
+    expect(bp.placements.where((p) => p.kind == EntityKind.arm), isEmpty);
+    final belts = {
+      for (final p in bp.placements)
+        if (p.kind == EntityKind.belt) p.pos: p,
+    };
+    final docks = bp.placements
+        .where((p) => p.kind == EntityKind.receivingDock)
+        .toList();
+    final machines =
+        bp.placements.where((p) => p.kind == EntityKind.machine).toList();
+    var fedPorts = 0, productPorts = 0;
+    for (final m in machines) {
+      final r = FactoryRecipes.byId(m.recipe!)!;
+      for (final port in portsOf(m)) {
+        final q = recipeSlotItem(r, port);
+        if (q == null) continue;
+        if (port.role == PortRole.input) {
+          final b = belts[port.outside];
+          final dockEnd = docks.any((d) =>
+              d.item == q.item &&
+              d.footprint.contains(port.outside) &&
+              d.dir == port.feedDir);
+          if ((b != null && port.connectsBelt(b.dir)) || dockEnd) fedPorts++;
+        } else if (port.role == PortRole.output) {
+          final b = belts[port.outside];
+          if (b != null && port.connectsBelt(b.dir)) productPorts++;
+        }
+      }
+    }
+    // Six cells (tubes by roller) and six benches (electronics from the
+    // door's open end); the bays' frames and harnesses come by hand.
+    expect(fedPorts, 12);
+    // Six bays push rocket parts onto their door rollers.
+    expect(productPorts, 6);
+  });
+
   /// The user's brief: people work with forklifts and cranes, or on their
   /// own, and almost no plant is lights-out. So every station has a crew,
-  /// people really carry freight, a forklift really unloads, a crane really
-  /// lifts the heavy sections, and conveyors carry the steady tube flow.
-  test('a realistic, crewed plant: walkers, forklifts, cranes and belts', skip: 'awaiting port redraw (#19)', () {
+  /// walkers really carry the harnesses, forklifts really run the frames,
+  /// and the heavy rocket parts and the steady tube flow ride rollers.
+  test('a realistic, crewed plant: walkers, forklifts and belts', () {
     final f = FactoryFloor.fromBlueprint(rocketfactoryTemplate());
     final port = InfiniteColonyPort();
     f.step(300, port);
@@ -166,15 +213,11 @@ void main() {
     f.step(600, port);
     final l = f.takeLedger();
     final bp = f.blueprint;
-    expect(bp.roster.keys.toSet(),
-        {HandlerKind.onFoot, HandlerKind.forklift, HandlerKind.crane});
-    expect(l.itemMetres, greaterThan(0), reason: 'walkers carry freight');
+    expect(bp.roster.keys.toSet(), {HandlerKind.onFoot, HandlerKind.forklift});
+    expect(l.itemMetres, greaterThan(0), reason: 'handlers carry freight');
     expect(l.equipmentSeconds[HandlerKind.forklift], greaterThan(0));
-    expect(l.equipmentSeconds[HandlerKind.crane], greaterThan(0));
     expect(l.workerSeconds[WorkRole.handler], greaterThan(0));
     expect(bp.placements.where((p) => p.kind == EntityKind.belt), isNotEmpty);
-    expect(bp.placements.where((p) => p.kind == EntityKind.craneBay).length,
-        kRocketPartsCranes);
     final machines =
         bp.placements.where((p) => p.kind == EntityKind.machine).toList();
     for (final p in machines) {
@@ -186,11 +229,14 @@ void main() {
     expect(machines.where((p) => p.crew == MachineMode.manual).length,
         greaterThan(machines.length ~/ 2),
         reason: 'mostly hand work: this is a template, not a showpiece');
-    // Rocket parts are heavy: only the cranes can have moved them.
+    // Rocket parts are heavy: no handler here can lift one, so they leave
+    // only by the bays' rollers.
     expect(FactoryItems.rocketParts.loadClass, LoadClass.heavy);
+    for (final k in bp.roster.keys) {
+      expect(kHandlerSpecs[k]!.canLift(LoadClass.heavy), isFalse);
+    }
     expect(l.shipped['rocketParts'], greaterThan(0));
   });
-
   /// The chain registers only its own, prefixed ids, and doing it again is
   /// harmless (a save, the editor and a template may all ask first).
   test('chain registration is idempotent and prefixed', () {
@@ -210,7 +256,7 @@ void main() {
   /// leave room for a better design. Here a designer gives every manual
   /// station one operator and its controls instead of a two-person crew,
   /// and gets at least the same parts from far fewer people.
-  test('a re-crewed design matches the output with 15%+ fewer jobs', skip: 'awaiting port redraw (#19)', () {
+  test('a re-crewed design matches the output with 15%+ fewer jobs', () {
     final r0 = steady(FactoryFloor.fromBlueprint(rocketfactoryTemplate()));
     final bp = rocketfactoryTemplate();
     for (var i = 0; i < bp.placements.length; i++) {
@@ -225,7 +271,7 @@ void main() {
         greaterThanOrEqualTo(r0.outPerS['rocketParts']! * 0.98),
         reason: '${r1.outPerS} vs ${r0.outPerS}');
     // The gain is real, not bought with extra material: input per part
-    // stays the recipe's (crates land in lumps, hence the 5%).
+    // stays the recipe's (a window cuts a lump or two, hence the 5%).
     final p0 = r0.outPerS['rocketParts']!, p1 = r1.outPerS['rocketParts']!;
     for (final c in spec.inputs.keys) {
       expect(r1.inPerS[c]! / p1, lessThanOrEqualTo(r0.inPerS[c]! / p0 * 1.05),
@@ -246,10 +292,10 @@ void main() {
     expect(jsonEncode(b.toJson()), jsonEncode(a.toJson()));
   });
 
-  /// A save mid-run — tubes mid-belt, a crane mid-lift, walkers mid-trip,
+  /// A save mid-run — tubes mid-roller, a forklift mid-run, walkers mid-trip,
   /// a part-run sub-step in the carry — must continue exactly as if the
   /// game had never stopped.
-  test('save → load → step equals an uninterrupted run', skip: 'awaiting port redraw (#19)', () {
+  test('save → load → step equals an uninterrupted run', () {
     final a = FactoryFloor.fromBlueprint(rocketfactoryTemplate());
     final pa = InfiniteColonyPort();
     a.step(437.3, pa); // leaves 0.05 s in the sub-step carry
@@ -272,7 +318,7 @@ void main() {
 
   /// Nothing is made or lost: what is on the floor is what came in, less
   /// what went out, plus what the crafts turned it into.
-  test('conserves every commodity over its own run', skip: 'awaiting port redraw (#19)', () {
+  test('conserves every commodity over its own run', () {
     final f = FactoryFloor.fromBlueprint(rocketfactoryTemplate());
     final port = InfiniteColonyPort();
     for (final dt in [0.25, 37.3, 300.0, 600.0]) {
