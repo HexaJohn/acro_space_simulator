@@ -83,7 +83,7 @@ void main() {
   /// opening its floor must not change what the colony gets from it or
   /// what it costs. Rates are in COMMODITY units, so a pallet of ten tubes
   /// counts ten; nothing may come in or go out but the spec's goods.
-  test('steady state is the spec rate within 5%, nothing else in or out', skip: 'awaiting port redraw (#19)',
+  test('steady state is the spec rate within 5%, nothing else in or out',
       () {
     final r = _measure(missilefactoryTemplate());
     _expectSpecRates(r, 'steady');
@@ -96,7 +96,7 @@ void main() {
   /// template must read its spec rate on exactly that path, or opening and
   /// closing its floor would change the plant: a floor that settles slowly
   /// reads low, and a ten-unit crate is 17% of a 300 s window.
-  test("reads the spec rate under the colony's own measurement settings", skip: 'awaiting port redraw (#19)',
+  test("reads the spec rate under the colony's own measurement settings",
       () {
     final fresh = measureBlueprint(
         missilefactoryTemplate(), FactoryFloor.fromBlueprint);
@@ -176,11 +176,13 @@ void main() {
 
   /// The user's brief: workers move freight with forklifts, pallet jacks
   /// and cranes or on their own, and almost no plant is lights-out. So the
-  /// template unloads by hand and crane into staging (no dock conveyor),
-  /// walks the hand loads, belts the steady segment and round flows,
-  /// forklifts the airframe pallets, cranes the heavy lifts, and crews its
-  /// stations.
-  test('a realistic mix: people, forklifts, cranes, belts; crewed stations', skip: 'awaiting port redraw (#19)',
+  /// template unloads every door into staging (no dock conveyor), walks the
+  /// tubes into the saws' hand ports, swings electronics off its staging by
+  /// arm onto port belts, belts the steady segment, board, motor and round
+  /// flows, forklifts the airframe pallets, cranes the rocket parts, and
+  /// crews its stations. Under the port rules (§10 item 19) no arm touches
+  /// a machine.
+  test('a realistic mix: people, forklifts, cranes, belts; crewed stations',
       () {
     final bp = missilefactoryTemplate();
     final floor = FactoryFloor.fromBlueprint(bp);
@@ -223,6 +225,16 @@ void main() {
       for (final p in bp.placements)
         if (p.kind == EntityKind.machine) p,
     ];
+
+    // Arms work staging and belts only: neither end of any arm is a
+    // machine (they would do nothing there).
+    for (final a in bp.placements) {
+      if (a.kind != EntityKind.arm) continue;
+      for (final t in [a.pos.step(a.dir), a.pos.step(a.dir.opposite)]) {
+        expect(machines.any((m) => m.footprint.contains(t)), isFalse,
+            reason: '$a touches a machine at $t');
+      }
+    }
     final auto = machines.where((p) => p.crew == MachineMode.automated);
     expect(auto.map((p) => p.recipe).toSet(), {MissileRecipes.castMotor.id});
     expect(auto.length * 4, lessThan(machines.length));
@@ -236,12 +248,13 @@ void main() {
   });
 
   /// Engagement is optional but REWARDED (§3 "Reward"): the template must
-  /// leave a better design to find. Its dock crews are overstaffed: a
-  /// designer who releases most of the walkers holds the missile rate on a
-  /// third fewer jobs (the labour lever). Crewing the three kitting
-  /// stations — the pace — as assisted ships far more from the same floor
-  /// (the throughput lever).
-  test('a better design beats it: same output for fewer jobs, or more', skip: 'awaiting port redraw (#19)', () {
+  /// leave a better design to find. Its tube crews are overstaffed (the
+  /// saws' hand ports open onto the staging they idle on): a designer who
+  /// releases most of the walkers holds the missile rate on a third fewer
+  /// jobs (the labour lever). Crewing the three kitting stations — the pace
+  /// — as assisted ships far more from the same floor, up to the one
+  /// welder's ceiling (the throughput lever).
+  test('a better design beats it: same output for fewer jobs, or more', () {
     final r0 = _measure(missilefactoryTemplate());
 
     final lean = missilefactoryTemplate().copy()
@@ -280,7 +293,7 @@ void main() {
   /// A colony save holds the floor mid-run (§3 "Persistence"): workers
   /// mid-trip, cranes mid-lift, crates part-unpacked. Loading must go on
   /// bit for bit as if the game had never stopped.
-  test('save → load mid-run continues identically', skip: 'awaiting port redraw (#19)', () {
+  test('save → load mid-run continues identically', () {
     final a = FactoryFloor.fromBlueprint(missilefactoryTemplate());
     final pa = InfiniteColonyPort();
     a.step(437.3, pa); // leaves a part sub-step in the carry
@@ -304,7 +317,7 @@ void main() {
   /// Nothing is made from nothing: every commodity unit on the floor came
   /// through a receiving door or a craft, at every point of the run
   /// (start-up rush included), so the plant can't mint missiles.
-  test('conserves every commodity unit through its own run', skip: 'awaiting port redraw (#19)', () {
+  test('conserves every commodity unit through its own run', () {
     final f = FactoryFloor.fromBlueprint(missilefactoryTemplate());
     final port = InfiniteColonyPort();
     for (var i = 0; i < 12; i++) {

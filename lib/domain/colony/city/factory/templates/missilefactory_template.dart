@@ -4,14 +4,15 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 /// The Missile Plant's default floor (docs/plans/factory-floors.md §3
-/// "Templates", phase 6).
+/// "Templates", phase 6), laid for EXPLICIT PORTS (§10 item 19,
+/// `station_ports.dart`).
 ///
 /// Like every template it must measure at the spec's flat rate (within
 /// 5%), staff the spec's jobs and cost the spec's build ore, so opening the
 /// floor changes nothing for a colony; and it must be "fine, not great",
 /// so a designer has something to win. It is the plan's first real
 /// MULTI-INPUT assembly: three goods arrive by three routes and meet at one
-/// fixture.
+/// fixture, each through its own port.
 ///
 /// ## Spec: 0.4 tubes + 0.2 rocket parts + 0.2 electronics → 0.15 missiles /s, 60 jobs
 ///
@@ -26,12 +27,37 @@
 /// Nothing else leaves and nothing else comes in: the chain has no
 /// byproduct, and every intermediate is used up inside the hall.
 ///
+/// ## The port rules, and what they decide here
+///
+/// A belt feeds a machine only into an input port, pointing in, with that
+/// slot's item; outputs leave only by their output port; arms never touch a
+/// machine; handlers work a machine only at its hand port. So:
+///
+/// * **Integration takes each part by a different door.** Its recipe lists
+///   the airframe, the motor and guidance in that order, so motors drop
+///   down a belt into input 2 (the top), guidance comes up a belt into
+///   input 3 (bottom middle, from (15, 15) beside the forklift pad), and
+///   airframes come by forklift to the hand port (bottom right). Input 1
+///   (the west face) is left bare.
+/// * **Hand ports open onto each other, so handlers don't travel.** The
+///   welder faces west BELOW the forklift pad, so its hand port (16, 13)
+///   opens onto (16, 14), right under integration's (16, 15): a forklift
+///   parked on the 2 × 2 pad covers both, and a lift is a pick and a
+///   set-down. The two saws' hand ports (one saw faces north, one east)
+///   open onto the tube staging column itself, which is also the walkers'
+///   muster: a walker picks a tube where he stands and drops it at most
+///   two tiles on. The motor-kitting station faces west so its hand port
+///   opens onto the rocket-parts staging, under the crane's hook.
+/// * **Electronics never needs a hand.** Arms are allowed to work staging,
+///   so two arms swing ESD totes off the electronics staging onto two
+///   one-tile belts into the two kitting benches' input ports.
+///
 /// ## Measured the way the colony measures
 ///
 /// The colony re-measures a plant with `MeasureSettings.standard` (60 s of
 /// warm-up, then at most 300 s, stopping early when a 30 s sub-window
 /// agrees with the running mean), from a FRESH floor whenever its editor
-/// closes. Two rules follow, and the template is built around them:
+/// closes. Three rules follow, and the template is built around them:
 ///
 /// * **Settle inside a minute.** The pace is set at the FRONT: the three
 ///   kitting stations, the only ones that take a colony good, run flat out
@@ -41,76 +67,103 @@
 ///   ever fills up: there is no start-up stock to build or drain, and the
 ///   one transient is the pipeline's first pass. Every move on that
 ///   critical path is a belt, an arm, a crane hook over both ends or a
-///   forklift parked across both, so the first missile ships about a
-///   minute in, and the rates are flat from there.
-/// * **Lumps small next to 300 s.** Goods come loose, never in packs: a
-///   ten-unit crate arriving a moment either side of a window edge is 8%
-///   of a 300 s window of tubes and 17% of one of electronics, while the
-///   biggest lump here (a saw's two tubes) is under 2%. The kitting
-///   stations' cycles (10 s and 5 s) divide 30 s, so every sub-window
-///   takes the same inputs; the line ships 3 missiles every 20 s, so
-///   sub-windows alternate 4 and 5 and the early stop can never catch a
-///   lucky run of equal lumps (it measures the full 300 s, 45 missiles).
+///   forklift parked across both, and the belts are short (the missile belt
+///   is three tiles: the east wall is drawn close for it), so the first
+///   missiles ship inside the warm-up minute and the backlog of the first
+///   pass clears inside the window.
+/// * **Hand-fed stations wait for nobody far away.** A station asks for
+///   only two crafts' worth of each input, so a handler's round trip from
+///   where he idles must be well under two cycles, or the station starves
+///   while the plant looks overstaffed. Walkers idle at the first staging
+///   area (here the tube staging, which both saws' hand ports touch) and
+///   vehicles park where they finished (on the pad over both hand ports).
+///   The first port draft fed the benches from a staging 25 tiles from the
+///   muster and two welders five tiles apart; both read 40% low.
+/// * **Lumps small next to 300 s, and never equal.** Goods come loose,
+///   never in packs: the biggest lump here (a saw's two tubes) is under 2%
+///   of a 300 s window. Every stream runs in a 20 s rhythm: both saws feed
+///   ONE welder, which welds 3 sections every 20 s; the guidance bench
+///   builds 3 sections every 20 s from the two benches' boards; the casting
+///   cell casts 3 motors every 20 s. So the plant ships exactly 9 missiles
+///   in every 60 s, and two 30 s sub-windows in a row always count 4 and 5
+///   (in some order): the early stop can never catch a lucky run of equal
+///   lumps, and the colony measures the full 300 s, 45 missiles. (The first
+///   draft's two welders, each paced by its own saw, welded in 40 s rhythms
+///   and sent sections in clumps; a floor saved at 711 s read 4, 4, 4 and
+///   stopped at 0.133 missiles/s.)
 ///
-/// ## Layout (52 × 36 tiles = 104 × 72 m; the working floor, x 0-21)
+/// ## Layout (26 × 80 tiles = 52 × 160 m; the working floor, rows 0-26)
 ///
-/// Row 23 at the top, x = 0 at the west wall:
+/// x = 0 at the west wall, y = 0 at the south wall, north up:
 ///
-///     23 RKKK......R.......R...    R receiving doors: rocket parts (west
-///     22 RKKK.EEE..R.......R...      wall), electronics, tubes (north)
-///     21 _KKK.EEE___.....___...    _ staging at each door; the walkers'
-///     20 ..v..EEE___._______...      muster area between the two north
-///     19 .MMMM.v.___._______...      doors (x 12-15)
-///     18 .MMMMGGG.EEE....SSSSSS    S tube saws (pace)
-///     17 .MMMMGGG<EEE....SSSSSS    E electronics kitting (pace)
-///     16 .MMMMGGG.EEE....SSSSSS    K motor kitting (pace)
-///     15 ....v.v::WWW.....v..v.    G guidance bench   W welders
-///     14 ....III::WWW<|=======.    M lights-out motor casting cell
-///     13 ....III::WWW.|........    I integration      T test cell
-///     12 ....III::WWW.|........    D missile door     c forklift charger
-///     11 .....v.::WWW<|........    : forklift aisle   = | belts
-///     10 .....|.::WWW..........    < > ^ v arms
-///      9 .TTT.|.::.............
-///      8 .TTT<|.::.............    Crane runways (not drawn): over the
-///      7 .TTT...::.............    rocket-parts door, its staging and K;
-///      6 DD.....::.............    and over T and the missile door.
-///      2 .......::cc...........
+///     26 .....EEE..................   R receiving doors: tubes (south
+///     25 .._a>EEEv............___RR     wall), electronics (west), rocket
+///     24 .._..EEEv............___..     parts (east); D the missile door
+///     23 .._.....v.......MMMM.KKK..   _ staging at each door
+///     22 RR_..EEEv......vMMMM<KKK..   S tube saws (pace)
+///     21 .._a>EEEv......vMMMM.KKK..   E electronics kitting (pace)
+///     20 .._..EEEv......vMMMM......   K motor kitting (pace)
+///     19 ........v......v..........   W the welder   G guidance bench
+///     18 ........v.....III.TTT.....   M lights-out motor casting cell
+///     17 ........v.....III>TTT>>>DD   I integration  T test cell
+///     16 ........vGGG..III.TTT.....   : forklift pad c forklift charger
+///     15 ........>GGG>>>^::cc......   < > ^ v belts  a arms
+///     14 .........GGG....::cc......
+///     13 ...............WWW........   The crane runway (not drawn) spans
+///     12 ...............WWW<.......   x 21-23, rows 23-25: the hook works
+///     11 ...............WWW^.......   (21, 24), the rocket-parts staging
+///     10 ..................^.......   tile under the kitting station's
+///      9 ..................^.......   hand port, so a lift never travels.
+///      8 .........>>>>>>>>>^.......
+///      7 .........^SSS.....^.......
+///      6 .........^SSS>>>>>^.......
+///      5 .........^SSS.............
+///      4 .........^._..............
+///      3 ........SSS_..............
+///      2 ........SSS_..............
+///      1 ........SSSR..............
+///      0 ...........R..............
 ///
-/// * **People at the docks.** Tubes and electronics are set down in
-///   staging at the north doors, and workers on foot carry them, one at a
-///   time, to the saws and kitting benches whose sides the staging touches.
-/// * **Cranes over the heavy work.** Rocket parts are lifted off their door
-///   into the motor-kitting station, and certified missiles out of the test
-///   cell onto the truck; each crane's hook sits over both ends, so a lift
-///   is a pick and a set-down. Kits, motors and untested rounds are moved
-///   only by arm (live propellant is never carried by hand).
-/// * **Belts where flow is steady**: saw segments to the two welders, and
-///   rounds from integration to test.
+/// * **People at the docks.** Tubes are set down in the staging column
+///   inside the south door, and workers on foot carry them one at a time
+///   into the saws' hand ports, (11, 2) and (11, 4), both on that column.
+/// * **Belts where flow is steady**: the saws' segments (the west saw's up
+///   column 9 and along row 8, the east saw's along row 6, meeting in
+///   column 18) into the welder's input port; boards down column 8 into
+///   the guidance bench; guidance along row 15 and up into integration;
+///   kits, motors and
+///   untested rounds (the heavy loads, never carried by hand); and
+///   certified missiles out to their door.
+/// * **A crane for the heavy freight**: rocket parts off their staging into
+///   the motor-kitting station, hook over both.
 /// * **Forklifts in the core**: welded airframe sections are pallet loads,
-///   shuttled across the aisle to integration (and charged at its foot).
+///   lifted from the welder's hand port to integration's across the pad.
 /// * **Crewed stations.** Everything is manual (two hands each) but the
 ///   motor casting cell, the one lights-out station: propellant is cast
 ///   remotely behind blast walls, a technician's quarter-share.
-/// * **The open floor** east and south of the line is the separation the
-///   spec's "blast-distance spacing" asks for between the propellant cell
-///   and the rest of the hall, and room to grow. Hall area is build cost:
-///   a designer can give it back.
+/// * **The open floor** north of row 26 (rows 27-79) is the separation the
+///   spec's "blast-distance spacing" asks for between the propellant line
+///   and the rest of the site, and room to grow. Hall area is build cost,
+///   and it is what brings the template to the spec's 40 ore: a designer
+///   can give it back.
 ///
-/// Jobs: 10 manual stations × 2 + the casting cell's ¼ technician + 2
-/// crane drivers + 2 forklift drivers + 34 walkers = 58.25, the spec's 60
-/// within 3%. Build cost (`capexOf`) ≈ 39.5 ore, the spec's default 40.
+/// Jobs: 9 manual stations × 2 + the casting cell's ¼ technician + 1 crane
+/// driver + 2 forklift drivers + 38 walkers = 59.25, the spec's 60. Build
+/// cost (`capexOf`) 39.09 ore (hall 22.02, machines 11.40, conveyors 2.34,
+/// staging 0.15, vehicles 3.18), the spec's 40 within 3%.
 ///
 /// "Fine, not great": the floor is staffed the way a plant that never
-/// studied its docks is. Measured: half a dozen walkers keep the kitting
-/// stations fed, so releasing most of the 34 holds 0.15 missiles/s on a
-/// third fewer jobs; crewing the three kitting stations as assisted
-/// (faster) lifts the plant to ~0.2 missiles/s on the same floor before
-/// the welders, guidance bench and test cell run out of slack.
+/// studied its docks is. Four walkers keep the saws fed (two fall 5%
+/// short), so releasing most of the 38 holds 0.15 missiles/s on as few as
+/// 25 jobs; crewing the three kitting stations as assisted (faster) lifts
+/// the plant to 0.1875 missiles/s, the welder's ceiling, on the same
+/// floor.
 ///
 /// Measured (`InfiniteColonyPort`): with `MeasureSettings.standard` from a
 /// fresh floor, tubes 0.400, electronics 0.200, rocket parts 0.200 and
-/// missiles 0.147 (−2.2%: the first pass); re-measured from a settled
-/// floor, missiles 0.150 at any phase.
+/// missiles 0.150, the full 300 s; re-measured from floors saved at 100 s
+/// to 1500 s, the same at every phase; 600 s + 2400 s, the same. Mean draw
+/// 645 kW (`measureBlueprint(...).powerKw`).
 library;
 
 import '../factory_catalog.dart';
@@ -153,19 +206,19 @@ class MissileItems {
       loadClass: LoadClass.hand, kgPerUnit: 13);
 
   /// A quarter of one motor's case, nozzle, igniter and propellant charge,
-  /// inspected and kitted. Propellant is only ever moved by hoist, so it is
-  /// heavy-class (crane or arm).
+  /// inspected and kitted. Propellant is never carried by hand, so it is
+  /// heavy-class: it rides a belt (or a crane hook).
   static const motorKit = FactoryItem(
       id: 'missilefactory:motorKit', label: 'Motor Kit',
       loadClass: LoadClass.heavy, kgPerUnit: 33);
 
-  /// A cast solid-rocket motor: crane or arm work, like its kits.
+  /// A cast solid-rocket motor: belt or crane work, like its kits.
   static const motor = FactoryItem(
       id: 'missilefactory:motor', label: 'Rocket Motor',
       loadClass: LoadClass.heavy, kgPerUnit: 130);
 
-  /// An integrated missile before acceptance test: crane work, as the
-  /// certified missile it becomes.
+  /// An integrated missile before acceptance test: a tonne, belt or crane
+  /// work, like the certified missile it becomes.
   static const round = FactoryItem(
       id: 'missilefactory:round', label: 'Untested Missile',
       loadClass: LoadClass.heavy, kgPerUnit: 1000);
@@ -209,10 +262,13 @@ class MissileRecipes {
     station: StationKind.press,
     inputs: [ItemQty('missilefactory:segment', 4)],
     outputs: [ItemQty('missilefactory:airframe', 1)],
-    // 6 s: a manual welder (10 s) makes 0.1 sections/s; the two make 0.2
-    // against the plant's 0.15. Ten seconds, not more: it is on the
-    // first pass's critical path (see the library doc).
-    seconds: 6,
+    // 3.2 s: the one manual welder (5.33 s) makes 0.1875 sections/s
+    // against the plant's 0.15, a quarter's slack. One welder fed by both
+    // saws, not one per saw: two welders each paced by its own saw weld in
+    // a 40 s rhythm, and their sections reach integration in clumps (see
+    // the library doc's "Lumps"). Short, too: it is on the first pass's
+    // critical path.
+    seconds: 3.2,
     // Orbital welders and a stress-relief oven: the hall's biggest crewed
     // draw.
     powerKw: 150,
@@ -241,8 +297,8 @@ class MissileRecipes {
     inputs: [ItemQty('missilefactory:board', 4)],
     outputs: [ItemQty('missilefactory:guidance', 1)],
     // 3 s: the manual bench (5 s) makes 0.2 sections/s against 0.15. One
-    // bench, fed by arm from both kitting benches and handing on by arm,
-    // keeps the guidance path off the walkers.
+    // bench, fed by one belt that both kitting benches' boards join, and
+    // handing on by belt, keeps the guidance path off the walkers.
     seconds: 3,
     // Soldering, harness testers and clean-bench air.
     powerKw: 20,
@@ -258,8 +314,8 @@ class MissileRecipes {
     outputs: [ItemQty('missilefactory:motorKit', 3)],
     // 3 s: the manual station (5 s) takes exactly 0.2 units/s, the spec's
     // rate. A PACER. Unpacking, and an X-ray of every case and igniter.
-    // One unit a cycle is fine here: the crane over its door lifts each
-    // in two seconds.
+    // One unit a cycle is fine here: the crane's hook hangs over both the
+    // staging tile and the hand port, so it lifts each in two seconds.
     seconds: 3,
     // Inspection X-ray and a hoist.
     powerKw: 20,
@@ -282,6 +338,12 @@ class MissileRecipes {
     id: 'missilefactory:integrate',
     label: 'Integrate Missile',
     station: StationKind.assembler,
+    // Slot order is PORT order (`station_ports.dart`): the airframe's
+    // input 1 (west face) stays empty, it comes by forklift to the hand
+    // port; the motor rides a belt into input 2 (top), guidance one into
+    // input 3 (bottom middle). The order is also the product tree's walk
+    // order (`product_tree_test.dart`: the tube branch must be met before
+    // the electronics branch, whose pig iron it credits), so it is kept.
     inputs: [
       ItemQty('missilefactory:airframe', 1),
       ItemQty('missilefactory:motor', 1),
@@ -333,23 +395,25 @@ void registerMissileChain() {
   _registered = true;
 }
 
-/// Missile Plant hall: 52 × 36 tiles = 104 × 72 m. The line itself takes
-/// the west 44 m; the rest is the propellant cell's blast separation and
-/// what brings the template to the spec's 40 ore (hall area is build cost).
-const HallSize kMissileHall = HallSize(52, 36);
+/// Missile Plant hall: 26 × 80 tiles = 52 × 160 m. The line takes the
+/// south 54 m; the north is open floor, the propellant line's blast
+/// separation and what brings the template to the spec's 40 ore (hall area
+/// is build cost). The east wall stands three tiles past the test cell, so
+/// the missile belt is short (see the library doc's first-pass rule).
+const HallSize kMissileHall = HallSize(26, 80);
 
-/// Workers on foot: the dock crews carrying tubes and electronics to the
-/// kitting stations. Measured: six keep the stations fed, four fall ~45%
-/// short. 34 fill the spec's jobs: the template's labour slack (see the
-/// library doc).
-const int kMissileWalkers = 34;
+/// Workers on foot: the tube crews feeding the two saws from the staging
+/// they idle on. Four would do; 38 fill the spec's jobs: the template's
+/// labour slack (see the library doc).
+const int kMissileWalkers = 38;
 
-/// Forklifts shuttling airframe sections across the aisle: 0.15 lifts/s
-/// with no travel is light work for one; the second covers its charging.
+/// Forklifts lifting airframe sections from the welder to integration:
+/// 0.15 lifts/s with no travel is light work for one; the second covers
+/// its charging.
 const int kMissileForklifts = 2;
 
-/// One crane over the motor kitting bay, one over the test cells.
-const int kMissileCranes = 2;
+/// One crane over the rocket-parts staging and the motor-kitting station.
+const int kMissileCranes = 1;
 
 /// A fresh Missile Plant template (each call a new blueprint the caller
 /// may edit).
@@ -357,65 +421,75 @@ FloorBlueprint missilefactoryTemplate() {
   ensureFactoryCatalog();
   registerMissileChain();
   final l = TemplateLayout();
-  // ---- Receiving, north wall: people at the docks ----
-  // The walkers' muster area first: the first staging area is where idle
-  // walkers wait (`FactoryFloor`), so it sits between the two hand-fed
-  // doors. Each door's staging is small on purpose: it fills in under
-  // half a minute, so a fresh floor is not still stocking it when the
-  // colony starts measuring.
-  l.add(EntityKind.staging, 12, 19, span: (4, 2));
-  // Tubes: door, staging touching both saws' tops.
-  l.add(EntityKind.staging, 16, 19, span: (3, 3));
-  l.add(EntityKind.receivingDock, 18, 22, dir: Dir4.south, item: 'tubes');
-  l.machine(16, 16, MissileRecipes.cutTubes);
-  l.machine(19, 16, MissileRecipes.cutTubes);
-  // Segments by belt to the welders: an arm pulls for the first until it
-  // is full, the rest run on to the second.
-  l.arm(17, 15, Dir4.south);
-  l.arm(20, 15, Dir4.south);
-  l.beltRun(20, 14, 14, Dir4.west);
-  l.beltRun(14, 11, 13, Dir4.south);
-  l.arm(12, 14, Dir4.west);
-  l.arm(12, 11, Dir4.west);
-  // Electronics: door, staging touching both kitting benches.
-  l.add(EntityKind.staging, 8, 19, span: (3, 3));
-  l.add(EntityKind.receivingDock, 10, 22,
-      dir: Dir4.south, item: 'electronics');
-  l.machine(9, 16, MissileRecipes.kitElectronics);
+  void belt(int x, int y, Dir4 d) => l.add(EntityKind.belt, x, y, dir: d);
+
+  // ---- Tubes: people at the south door ----
+  // The tube staging column comes FIRST: the first staging area is the
+  // walkers' muster, so they idle on it. Both saws' hand ports, (11, 2)
+  // and (11, 4), open onto it.
+  l.add(EntityKind.staging, 11, 2, span: (1, 3));
+  l.add(EntityKind.receivingDock, 11, 0, dir: Dir4.north, item: 'tubes');
+  // Saw A faces north (hand port on its east face, segments out the top
+  // at (9, 4)); saw B faces east (hand port below, segments out at
+  // (13, 6)).
+  l.machine(8, 1, MissileRecipes.cutTubes, dir: Dir4.north);
+  l.machine(10, 5, MissileRecipes.cutTubes);
+  // Saw A's segments up column 9 and east along row 8; saw B's east along
+  // row 6 and up column 18, where row 8 joins from the side; one belt into
+  // the welder.
+  l.beltRun(4, 7, 9, Dir4.north);
+  l.beltRun(9, 17, 8, Dir4.east);
+  l.beltRun(13, 17, 6, Dir4.east);
+  l.beltRun(6, 11, 18, Dir4.north);
+  belt(18, 12, Dir4.west);
+  l.machine(15, 11, MissileRecipes.weld, dir: Dir4.west);
+  // The welder faces west: input port fed from (18, 12), hand port opening
+  // up onto (16, 14). Its west output port (14, 12) is left bare, so the
+  // sections wait at the hand port for a forklift.
+  // ---- Forklift pad over the welder's and integration's hand ports ----
+  // 2 × 2, so a forklift parked on it covers (16, 14) and (16, 15) at
+  // once; the charger beside it is where the forklifts start.
+  l.add(EntityKind.aisle, 16, 14, span: (2, 2));
+  l.add(EntityKind.chargingBay, 18, 14);
+  // ---- Electronics: west door, arms off staging onto port belts ----
+  l.add(EntityKind.staging, 2, 20, span: (1, 6));
+  l.add(EntityKind.receivingDock, 0, 22, item: 'electronics');
+  l.arm(3, 21, Dir4.east);
+  belt(4, 21, Dir4.east);
   l.machine(5, 20, MissileRecipes.kitElectronics);
-  // ---- Guidance: both kitting benches hand boards over by arm ----
-  l.arm(8, 17, Dir4.west);
-  l.arm(6, 19, Dir4.south);
-  l.machine(5, 16, MissileRecipes.guidance);
-  l.arm(6, 15, Dir4.south);
-  // ---- Weld bay: sections leave by forklift ----
-  l.machine(9, 13, MissileRecipes.weld);
-  l.machine(9, 10, MissileRecipes.weld);
-  // Forklift aisle between the welders and integration, charger at its
-  // foot.
-  l.add(EntityKind.aisle, 7, 1, span: (2, 15));
-  l.add(EntityKind.chargingBay, 9, 1);
-  // ---- Heavy column, west wall ----
-  // Integration takes motors and guidance by arm from above, sections by
-  // forklift from the aisle, and puts rounds on a short belt to test.
-  l.machine(4, 12, MissileRecipes.integrate);
-  l.arm(5, 11, Dir4.south);
-  l.beltRun(10, 8, 5, Dir4.south);
-  l.arm(4, 8, Dir4.west);
-  // The test cell's crane hook sits over the cell and the missile door.
-  l.machine(1, 7, MissileRecipes.checkout);
-  l.add(EntityKind.shippingDock, 0, 6, item: 'missiles');
-  l.add(EntityKind.craneBay, 0, 6, span: (4, 4));
-  // Motors: the lights-out cell, fed by arm from the kitting station, whose
-  // crane lifts rocket parts straight off their door's staging tile.
-  l.machine(1, 16, MissileRecipes.castMotor, mode: MachineMode.automated);
-  l.arm(4, 15, Dir4.south);
-  l.machine(1, 21, MissileRecipes.kitMotor);
-  l.arm(2, 20, Dir4.south);
-  l.add(EntityKind.staging, 0, 21, span: (1, 1));
-  l.add(EntityKind.receivingDock, 0, 22,
-      dir: Dir4.south, item: 'rocketParts');
-  l.add(EntityKind.craneBay, 0, 21, span: (4, 3));
+  l.arm(3, 25, Dir4.east);
+  belt(4, 25, Dir4.east);
+  l.machine(5, 24, MissileRecipes.kitElectronics);
+  // Boards: both benches' output ports, (8, 25) and (8, 21), sit on one
+  // southbound belt down column 8 that turns into the guidance bench's
+  // input port at (9, 15); guidance rides east along row 15 and turns up
+  // at (15, 15) into integration's input 3.
+  l.beltRun(25, 16, 8, Dir4.south);
+  belt(8, 15, Dir4.east);
+  l.machine(9, 14, MissileRecipes.guidance);
+  l.beltEast(12, 14, 15);
+  belt(15, 15, Dir4.north);
+  // ---- Motors: east door, staging, crane, kitting, the propellant cell ----
+  // The kitting station faces west: its hand port (21, 23) opens onto the
+  // staging tile (21, 24) the crane's hook works, its kits leave by
+  // (20, 22) straight into the casting cell's input port, and the cell's
+  // motors leave by (15, 22) down column 15 into integration's top port.
+  l.add(EntityKind.staging, 21, 24, span: (3, 2));
+  l.add(EntityKind.receivingDock, 24, 25, dir: Dir4.west, item: 'rocketParts');
+  l.add(EntityKind.craneBay, 21, 23, span: (3, 3));
+  l.machine(21, 21, MissileRecipes.kitMotor, dir: Dir4.west);
+  belt(20, 22, Dir4.west);
+  l.machine(16, 20, MissileRecipes.castMotor,
+      mode: MachineMode.automated, dir: Dir4.west);
+  l.beltRun(22, 19, 15, Dir4.south);
+  // ---- Integration and test ----
+  // Rounds by one belt tile into the test cell, missiles by three to the
+  // east-wall door.
+  l.machine(14, 16, MissileRecipes.integrate);
+  belt(17, 17, Dir4.east);
+  l.machine(18, 16, MissileRecipes.checkout);
+  l.beltEast(21, 23, 17);
+  l.add(EntityKind.shippingDock, 24, 17, dir: Dir4.west, item: 'missiles');
 
   return FloorBlueprint(
     name: 'Missile Plant',
