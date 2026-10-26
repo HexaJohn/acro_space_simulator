@@ -21,17 +21,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'factory_colony_fixture.dart';
 
-/// Templates still drawn for arms, skipped like their own tests until their
-/// port redraw (#19); their measured draw means nothing until then.
-const Set<String> _awaitingPortRedraw = {
-  'rocketfactory', 'gunfactory', 'missilefactory',
-};
-
 void main() {
-  final ready = [
-    for (final t in kFactoryPlantTypes)
-      if (!_awaitingPortRedraw.contains(t)) t,
-  ];
+  const ready = kFactoryPlantTypes;
   final measured = <String, MeasuredRates>{};
   setUpAll(() {
     for (final t in ready) {

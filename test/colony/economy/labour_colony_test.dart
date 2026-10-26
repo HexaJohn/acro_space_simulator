@@ -55,9 +55,10 @@ void main() {
     final sim = economyColony();
     final lot = placePlant(sim, 'rocketfactory');
     final shares = sim.floorLabourShares(lot);
-    // 32 bench jobs of 50 are engineering, the 18 handler operators skilled.
-    expect(shares[SkillTier.engineering], closeTo(32 / 50, 1e-12));
-    expect(shares[SkillTier.skilled], closeTo(18 / 50, 1e-12));
+    // 36 station jobs of 50 are engineering (port layout), the 14 handler
+    // operators skilled.
+    expect(shares[SkillTier.engineering], closeTo(36 / 50, 1e-12));
+    expect(shares[SkillTier.skilled], closeTo(14 / 50, 1e-12));
   });
 
   // In the shortage the books decide: the thriving firm is served first and

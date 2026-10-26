@@ -74,15 +74,16 @@ void main() {
       expect(kHandlerTier, SkillTier.skilled);
       expect(kMaintenanceTier, SkillTier.technical);
 
-      // The Missile Plant's template: 12 assembler jobs are engineering, its
-      // 8 press jobs and its automated motor caster's quarter technician
-      // technical, its 38 handler operators skilled. The tiers add up to the
+      // The Missile Plant's template (port layout, one welder): 12 assembler
+      // jobs are engineering, its 6 press jobs and its automated motor
+      // caster's quarter technician technical, its 41 handler operators
+      // skilled. The tiers add up to the
       // jobs the floor posts.
       final bp = factoryTemplateFor('missilefactory')!;
       final jobs = labourProfileOf(bp);
       expect(jobs[SkillTier.engineering], 12);
-      expect(jobs[SkillTier.technical], 8.25);
-      expect(jobs[SkillTier.skilled], 38);
+      expect(jobs[SkillTier.technical], 6.25);
+      expect(jobs[SkillTier.skilled], 41);
       var total = 0.0;
       for (final v in jobs.values) {
         total += v;

@@ -52,20 +52,9 @@ void main() {
     });
   }
 
-  // Explicit machine ports (§10 item 19) changed how stations connect; each
-  // template is checked once it is redrawn for them.
-  const awaitingPortRedraw = {'rocketfactory', 'gunfactory', 'missilefactory'};
-  test('measureSettingsFor reads every redrawn template within 5% of its spec',
-      () {
+  test('measureSettingsFor reads every template within 5% of its spec', () {
     ensureFactoryCatalog();
     for (final type in kFactoryPlantTypes) {
-      if (!awaitingPortRedraw.contains(type)) readsSpec(type);
-    }
-  });
-  test('measureSettingsFor reads the unredrawn templates within 5%',
-      skip: 'awaiting port redraw (#19)', () {
-    ensureFactoryCatalog();
-    for (final type in awaitingPortRedraw) {
       readsSpec(type);
     }
   });

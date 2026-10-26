@@ -84,9 +84,9 @@ const Map<String, double> kTemplateMeasuredKw = {
   'steelmill': 3986.887,
   'refinery': 4244.754, // port layout (#19)
   'electronics': 739.475, // port layout (#19)
-  'rocketfactory': 470.933,
-  'gunfactory': 394.452,
-  'missilefactory': 734.496,
+  'rocketfactory': 454.4, // port layout (#19)
+  'gunfactory': 310.26, // port layout (#19)
+  'missilefactory': 644.68, // port layout (#19)
   'rationsfactory': 118.417, // port layout (#19)
 };
 
