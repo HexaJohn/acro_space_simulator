@@ -4,16 +4,18 @@
 // To view a copy of this license, visit https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 /// The Electronics Plant's default floor (docs/plans/factory-floors.md §3
-/// "Templates", phase 6).
+/// "Templates", phase 6), laid for EXPLICIT PORTS (§10 item 19,
+/// `station_ports.dart`).
 ///
 /// Like every template it is a built-in [FloorBlueprint] whose MEASURED
 /// rate matches the plant's flat `CityBuildingSpec` rate within 5%, whose
-/// job demand is the spec's `jobs`, and whose build cost (`capexOf`) is the
-/// spec's `buildCost` (unset, so the default 40 ore). Opening the floor
-/// therefore changes nothing for a colony until someone designs a better
-/// one. It is "fine, not great" on purpose: almost every bench is a manual
-/// pair, the stamping press has no servo assist, the shield-can hauls run
-/// the length of the board shop and the hall is far bigger than the line.
+/// job demand is the spec's `jobs` (within 10%), and whose build cost
+/// (`capexOf`) is the spec's `buildCost` (unset, so the default 40 ore).
+/// Opening the floor therefore changes nothing for a colony until someone
+/// designs a better one. It is "fine, not great" on purpose: almost every
+/// bench is a manual pair, the stamping press has no servo assist, the
+/// shield press sits at the far end of the board shop from the westmost
+/// assembler, and the hall is far bigger than the line.
 ///
 /// ## The chain (spec: 0.5 steel → 0.6 electronics /s, 40 jobs)
 ///
@@ -43,72 +45,116 @@
 /// sets this plant's rate: one manual press at exactly one stroke per 10 s
 /// takes 0.5 steel/s and makes 0.6 chassis/s, and it never waits (measured:
 /// working every sampled second of steady state). Each station after it
-/// has ~20% headroom at that rate, so a designer who speeds the press
-/// (servo assist: an operator instead of a loader pair) gets ~15% more
-/// electronics before the benches bind — the throughput lever.
+/// has ~20% headroom at that rate (the board benches 25%), so a designer
+/// who speeds the press (servo assist: an operator instead of a loader
+/// pair) gets ~24% more electronics (measured 0.74 /s) before the
+/// de-palletiser and the benches bind: the throughput lever.
 ///
 /// ## The floor (hall 40 × 50 tiles = 80 × 100 m)
 ///
 /// The user's brief (2026-10-12): workers move freight with forklifts,
 /// pallet jacks and cranes or on their own, and very few plants have the
 /// logistics worked out to load and unload without anyone lifting a
-/// finger. So, from the truck court on the east wall westward:
+/// finger. Under ports the rule is: belts connect at a station's input and
+/// output ports, handlers work it at its hand port, and no arm touches a
+/// machine (arms only lift chassis off one belt onto another). Coordinates
+/// below are hall tiles, +y north; the line fills x 2..39, y 4..19.
 ///
-/// * **Steel arrives on pallets** (`crate:steel`) at a receiving door and
-///   is set down in a staging bay on the forklift aisle. The FORKLIFT takes
-///   each pallet to the de-palletiser beside the aisle, where two hands
-///   strip it.
-/// * **Sheet goes by arm into the stamping press** (manual: a loader and
-///   an operator). Its chassis drop by arm onto the CHASSIS BELT running
-///   west along the line; the skeleton goes by arm into the shield press
-///   beside it.
-/// * **Three final-assembly benches** take chassis off the belt by arm,
-///   and hand their units by arm to an operator-run TEST RIG beside each,
-///   which puts tested units on the OUTBOUND BELT running back east to the
-///   packer by the aisle. Belts carry the steady flows; nobody walks a
-///   chassis.
-/// * **The board shop is hand work.** North of the line, across the
-///   outbound belt, five manual benches build board kits. WALKERS carry
-///   trays of shield cans from the press to the benches and kits back
-///   across the belt on crossings to the assembly benches' north side.
-///   A walker takes whichever bench needs it, so the hauls vary: measured
-///   over a run, trays go 8-32 m (the press at x 26 to the bench at x 9 is
-///   17 tiles before the walk round the belts; [kElectronicsTrayHaulM])
-///   and kits 4-42 m (the east benches to the west assembly bench;
-///   [kElectronicsKitHaulM]), both ~15 m at the median. Those trips are
-///   the template's real handling.
-/// * The FORKLIFT also takes the packer's crates across the aisle to the
-///   shipping door, and charges at the bay beside it. One driver covers
-///   both doors: 0.11 pallets/s of short hops.
+///     y 19    ┌── chassis loop (buffer) ──┐
+///     y 15    └─► 3..9 ─► A1↓   ◄── 12..27 ◄── STAMP ◄── steel ◄── UNPACK
+///     y 13          feeder↓  arm↓      arm↓    offcut↓            ▲ forklift
+///     y 10..12      A1  B    A2  B     A3       SHIELD             │ (pallets
+///     y 9          crossings + shop walkway (muster at 25..27)     │  on the
+///     y 6..8        T1  B    T2  B     T3   B                      │  aisle)
+///     y 5     outbound belt 10 ─────────────────────► PACK ─► ship door
+///
+/// * **Receiving.** Steel arrives on pallets (`crate:steel`) at the
+///   receiving door (38, 12), which sets them down on a staging bay on the
+///   forklift aisle (x 36..37, y 7..18). The FORKLIFT takes each pallet to
+///   the de-palletiser's HAND PORT (33, 17) on a pad off the aisle; walkers
+///   can't lift a pallet. Two hands strip it.
+/// * **Steel goes by belt.** The de-palletiser (facing west) pushes sheet
+///   out of its output port onto one belt tile (31, 15), which points into
+///   the stamping press's input port (30, 15).
+/// * **The stamping press** (facing west, manual) has two output ports:
+///   chassis leave its west port onto the CHASSIS BELT (row 15, westbound);
+///   the skeleton leaves its south port onto one belt tile (29, 13) that
+///   points straight into the shield press's input port below it.
+/// * **Three cells.** Each is an assembler with an operator-run TEST RIG
+///   under it, both facing south (x 9, 16, 23). An assembler takes chassis
+///   at its north port (input 1); its units leave its south port down one
+///   belt tile (a CROSSING, so walkers can step over it) into the rig's
+///   north port; the rig's electronics leave its south port onto the
+///   OUTBOUND BELT (row 5, eastbound) to the packer. The two eastern cells
+///   get chassis from an ARM that lifts them off the chassis belt onto a
+///   one-tile feeder into the port: arms never feed machines, but they do
+///   move goods belt to belt, so an arm is this floor's only splitter. It
+///   takes a chassis only when the feeder has room, so a full cell lets the
+///   rest pass. The westmost cell is fed by the belt's own end.
+/// * **The chassis loop** (see "Mass balance" below). Past the two arms the
+///   belt climbs to row 19, runs west to x 2, comes back down and turns
+///   into the first cell: 44 belt tiles, room for ~176 chassis.
+/// * **Packing and shipping.** The packer (manual) takes electronics at its
+///   input port off the outbound belt's end and pushes its crates out of
+///   its output port down a three-tile belt into the shipping door
+///   (38, 5). (The pre-ports floor had the forklift carry crates too, but
+///   one forklift working both doors through hand ports measured 99% busy
+///   and blocked the packer 29% of the time: 0.53 electronics/s.)
+/// * **The board shop is hand work.** Five manual benches build board
+///   kits from can trays, with no belt at any of their ports: WALKERS carry
+///   trays from the shield press's hand port (27, 11) to the benches' hand
+///   ports, and kits from there to the assemblers' hand ports (input 2 is
+///   hand-fed while input 1 is belt-fed). Two benches stand in each gap
+///   between cells, their hand ports (x 15 and 22, y 8 and 12) beside the
+///   next cell's assembler hand port (y 10); the fifth stands by the shield
+///   press. Walkers cross the cells on the unit crossings in row 9. A
+///   bench takes trays from the nearest provider and an assembler kits
+///   from the nearest bench with stock, in placement-id order, so the
+///   benches nearest the press are placed (and served) first. Measured
+///   over 3000 s: trays go 10-34 m ([kElectronicsTrayHaulM]), ~16 m at the
+///   median; kits 4-46 m ([kElectronicsKitHaulM]), ~22 m, the westmost
+///   assembler fetching from the middle gap. Those trips are the
+///   template's real handling, and its weakness.
 /// * **No crane.** Nothing in an electronics fab is heavier than a pallet;
 ///   a crane here would be a driver with nothing to lift.
 ///
-/// The line fills the hall's south third; the rest is the clean-room
+/// The line fills the hall's south 40%; the rest is the clean-room
 /// envelope, test space and stores a fab carries. It is what puts the shed
 /// at its build cost, and shrinking it is a capex lever for a designer.
 ///
+/// ## Mass balance (and the trap this layout fixed)
+///
+/// Per stroke the press makes 6 chassis and the skeleton that becomes 1.5
+/// kits, and every 4 chassis need exactly 1 kit, so in steady state the
+/// chassis and kit flows are locked 4:1. But the kit side holds a lot of
+/// work in progress (offcut and trays in the presses' buffers, trays and
+/// kits in five benches' buffers, kits in the assemblers' and in walkers'
+/// hands), and every kit parked there leaves 4 chassis with nothing to
+/// meet: a permanent chassis surplus of ~80 once the shop fills. The first
+/// port draw ran the chassis belt straight to the first cell (20 tiles,
+/// ~90 chassis with the buffers) and that surplus filled it: the press
+/// then blocked, made less offcut, the shop fell behind, and the plant
+/// settled at 0.53 electronics/s with no way back (the 4:1 lock means a
+/// chassis surplus is never worked off). The loop gives the surplus
+/// somewhere to wait: measured, it holds a steady 82 chassis from 300 s on
+/// and the press never blocks. Shortening the loop is NOT a free capex win.
+///
 /// **Levers a designer has** (the Reward section): servo-assist the press
-/// (more output), give the benches an operator each (assisted: one job
-/// instead of two, and faster), move the shield press next to the benches
-/// so the walkers' hauls shrink, or shrink the hall.
+/// (more output), give the benches and assemblers an operator each
+/// (assisted: one job instead of two, and faster), put a bench beside the
+/// westmost assembler or the shield press in the middle of the shop so the
+/// walkers' hauls shrink, or shrink the hall.
 ///
 /// ## Measuring it (BLOCKING for whoever wires it in)
 ///
-/// The line holds ~140 units of work in progress (≈80 chassis queued on
-/// the chassis belt while the board shop's first kits come through, ~14
-/// staged steel pallets, trays, kits and units), so the first crate ships
-/// at ~220 s and the floor reads the spec rate only after ~240 s. It ships
-/// in crates of ten, so a 300 s window is ±1-2 crates (±5-11%) even once
-/// warm. Under `MeasureSettings.standard` (60 s warm-up, 300 s window) a
-/// fresh floor therefore reads 0.53 steel / 0.27 electronics per second,
-/// 56% under spec. Cutting the priming does not fix that: the press's
-/// first stroke alone is ~35 s in, and the crate lumps remain. So
-/// template floors must be measured with [kElectronicsMeasureSettings]
-/// (warm-up ≥ 300 s, window ≥ 1200 s): the lead passes it to
-/// `FloorMeasureRunner.measure` (or raises `kMeasureWarmupS` /
-/// `kMeasureWindowS` for all templates; the Steel Mill also reads 2-8% low
-/// under the standard settings) wherever a template floor is re-measured,
-/// e.g. closing the editor or "Reset to template".
+/// The line holds ~180 units of work in progress (≈82 chassis on the loop,
+/// ~14 staged steel pallets, trays, kits and units), so the first crate
+/// ships at ~212 s. It ships in crates of ten, so a 300 s window is ±1-2
+/// crates (±5-11%) even once warm. Under `MeasureSettings.standard` (60 s
+/// warm-up, 300 s window) a fresh floor therefore reads 0.57 steel / 0.30
+/// electronics per second, half the spec. So template floors must be
+/// measured with [kElectronicsMeasureSettings] (warm-up ≥ 300 s, window ≥
+/// 1200 s), which `measureSettingsFor('electronics')` returns.
 ///
 /// ## Registration (BLOCKING for whoever wires it in)
 ///
@@ -124,7 +170,7 @@
 /// (it ensures the base catalog too).
 ///
 /// Jobs: 12 manual stations × 2 + 3 assisted test rigs × 1 + 1 forklift
-/// driver + [kElectronicsWalkers] walkers = 40, the spec's count.
+/// driver + [kElectronicsWalkers] walkers = 41, the spec's 40 within 3%.
 library;
 
 import '../factory_catalog.dart';
@@ -141,36 +187,39 @@ import '../template_layout.dart';
 const String kElectronicsType = 'electronics';
 
 /// Hall: 40 × 50 tiles = 80 × 100 m, well inside the 600 × 450 m campus.
-/// The line uses the south third; the rest is the clean-room envelope a
-/// fab carries, sized so the whole floor costs the spec's 40 ore
-/// (`capexOf`, measured 40.3).
+/// The line uses the south 40%; the rest is the clean-room envelope a fab
+/// carries, sized so the whole floor costs the spec's 40 ore (`capexOf`,
+/// measured 39.9).
 const HallSize kElectronicsHall = HallSize(40, 50);
 
 /// Workers on foot carrying can trays and board kits, one at a time,
-/// 0.3 trips/s in all. Measured: ten hold the spec rate within 2%, eleven
-/// exactly; twelve keeps one spare so a busy moment never starves a bench.
-const int kElectronicsWalkers = 12;
+/// 0.3 trips/s in all. Measured: eleven hold the spec rate within 1.5%,
+/// twelve exactly; thirteen keeps one spare so a busy moment never starves
+/// a bench (and is the headcount the leaner design trims).
+const int kElectronicsWalkers = 13;
 
 /// How a template floor of this plant must be measured (see "Measuring
-/// it" in the library doc). 300 s of warm-up: the floor reaches the spec
-/// rate at ~240 s, so a minute of margin. 1200 s of window: one crate of
-/// ten is 1.4% of the ~720 units shipped, so crate lumps stay well inside
-/// the ±5% template budget (measured: within 1.4% for every warm-up from
-/// 300 to 540 s).
+/// it" in the library doc). 300 s of warm-up: the first crate ships at
+/// ~212 s and the chassis loop has settled by 300 s. 1200 s of window: one
+/// crate of ten is 1.4% of the ~720 units shipped, so crate lumps stay
+/// well inside the ±5% template budget (measured: exactly 0.6 /s for every
+/// warm-up from 300 to 540 s).
 const MeasureSettings kElectronicsMeasureSettings =
     MeasureSettings(warmupS: 300, windowS: 1200);
 
 /// Longest shield-can tray haul a walker makes, press to bench, in metres
-/// (measured over 3000 s: 16 tiles of path). Pinned by a test so the doc's
-/// handling figures can't drift from the layout.
-const double kElectronicsTrayHaulM = 32;
+/// (measured over 3000 s: the press's hand port to the west gap's benches,
+/// 17 tiles of path). Pinned by a test so the doc's handling figures can't
+/// drift from the layout.
+const double kElectronicsTrayHaulM = 34;
 
 /// Longest board-kit haul, bench to assembly bench, in metres (measured:
-/// 21 tiles, the east board benches to the west assembly bench).
-const double kElectronicsKitHaulM = 42;
+/// 23 tiles, a far bench to the westmost assembler).
+const double kElectronicsKitHaulM = 46;
 
-/// One forklift works both doors: 0.05 steel pallets/s in and 0.06 crates/s
-/// out, each a hop of a few metres across the aisle, with time to charge.
+/// One forklift works the receiving door: 0.05 steel pallets/s from the
+/// staging bay to the de-palletiser's hand port, a hop of a few metres, with
+/// time to charge (measured: its equipment runs ~46% of the time).
 const int kElectronicsForklifts = 1;
 
 // ---- items -----------------------------------------------------------------
@@ -337,20 +386,21 @@ void registerElectronicsChain() {
 
 // ---- layout ----------------------------------------------------------------
 
-/// x of the forklift aisle's west lane (two tiles wide), along the east
-/// wall's truck court.
-const int _aisleX = 33;
+/// x of the forklift aisle (two tiles wide) along the truck court.
+const int _aisleX = 36;
 
 /// x of the receiving and shipping doors, east of the aisle.
-const int _doorX = 35;
+const int _doorX = 38;
 
-/// x of each final-assembly bench, east to west (its test rig stands four
-/// tiles west of it).
-const List<int> _assemblyX = [21, 13, 5];
+/// x of each final-assembly cell's west column, west to east: the
+/// assembler on top, its test rig below, both facing south.
+const List<int> _cellX = [9, 16, 23];
 
-/// x of the board benches along the shop walkway, west to east (a fifth
-/// stands behind the easternmost).
-const List<int> _benchX = [9, 13, 17, 21];
+/// Row of the chassis belt (westbound, over the cells).
+const int _chassisY = 15;
+
+/// Row of the outbound electronics belt (eastbound, under the cells).
+const int _outY = 5;
 
 /// A fresh Electronics Plant template (each call a new blueprint the
 /// caller may edit).
@@ -358,53 +408,80 @@ FloorBlueprint electronicsTemplate() {
   ensureFactoryCatalog();
   registerElectronicsChain();
   final l = TemplateLayout();
-  // The walkers' muster area, mid-walkway in the board shop (the first
-  // staging area is where idle hands stand).
-  l.add(EntityKind.staging, 16, 8, span: (3, 1));
+  // The walkers' muster area on the shop walkway by the shield press (the
+  // first staging area is where idle hands stand).
+  l.add(EntityKind.staging, 25, 9, span: (3, 1));
 
-  // Receiving: a door in the east wall sets pallets down in a staging bay
-  // on the aisle; the forklift takes them to the de-palletiser.
-  l.add(EntityKind.aisle, _aisleX, 0, span: (2, 12));
-  l.add(EntityKind.receivingDock, _doorX, 1,
+  // Receiving: pallets set down on the aisle; the forklift takes them to
+  // the de-palletiser's hand port (33, 17) on a pad off the aisle.
+  l.add(EntityKind.aisle, _aisleX, 7, span: (2, 12));
+  l.add(EntityKind.receivingDock, _doorX, 12,
       dir: Dir4.west, item: FactoryItems.crateSteel.id);
-  l.add(EntityKind.staging, _aisleX, 0, span: (2, 3));
-  l.machine(30, 0, ElectronicsRecipes.unpack);
+  l.add(EntityKind.staging, _aisleX, 11, span: (2, 3));
+  l.add(EntityKind.aisle, 33, 17, span: (3, 2));
+  l.machine(32, 15, ElectronicsRecipes.unpack, dir: Dir4.west);
 
-  // Sheet by arm into the stamping press. Chassis go west by arm onto the
-  // line; the skeleton north by arm into the shield press.
-  l.arm(29, 1, Dir4.west);
-  l.machine(26, 0, ElectronicsRecipes.stamp);
-  l.arm(25, 1, Dir4.west, only: ElectronicsItems.chassis.id);
-  l.beltRun(24, 5, 1, Dir4.west);
-  l.arm(27, 3, Dir4.north, only: ElectronicsItems.offcut.id);
-  l.machine(26, 4, ElectronicsRecipes.shield);
+  // Steel: the de-palletiser's port (32, 15) onto (31, 15), into the
+  // stamping press's input port (30, 15).
+  l.add(EntityKind.belt, 31, 15, dir: Dir4.west);
+  l.machine(28, 14, ElectronicsRecipes.stamp, dir: Dir4.west);
+  // Chassis leave its west port (28, 15) onto the chassis belt; the
+  // skeleton its south port (29, 14) onto (29, 13), which points straight
+  // into the south-facing shield press's input port (29, 12). The shield
+  // press has no belt at its output port: its trays wait at its hand port.
+  l.beltRun(27, 12, _chassisY, Dir4.west);
+  // Past the two arms (x 24 and 17) the belt loops north to row 19, west to
+  // x 2 and back east along row 15 (the chassis buffer, see "Mass balance"
+  // in the library doc) before it turns down column 10 into the first
+  // cell's input port (10, 12).
+  l.beltRun(_chassisY, 18, 11, Dir4.north);
+  l.beltRun(11, 3, 19, Dir4.west);
+  l.beltRun(19, 16, 2, Dir4.south);
+  l.beltRun(2, 9, _chassisY, Dir4.east);
+  l.add(EntityKind.belt, 29, 13, dir: Dir4.south);
+  l.machine(28, 10, ElectronicsRecipes.shield, dir: Dir4.south);
 
-  // The line: each final-assembly bench takes chassis off the belt by arm
-  // and hands its units by arm west to a test rig, which puts them on the
-  // outbound belt. Walkers bring board kits to the benches' north side.
-  for (final x in _assemblyX) {
-    l.arm(x + 1, 2, Dir4.north);
-    l.machine(x, 3, ElectronicsRecipes.assemble);
-    l.arm(x - 1, 4, Dir4.west);
-    l.machine(x - 4, 3, ElectronicsRecipes.test, mode: MachineMode.assisted);
-    l.arm(x - 3, 6, Dir4.north);
+  // The cells, every station facing south. An assembler at (x, 10) takes
+  // chassis at its input port (x+1, 12) from (x+1, 13): the westmost from
+  // the belt's own end, the others from an arm that lifts them off the
+  // chassis belt (x+1, 15) onto that one-tile feeder. Its units leave its
+  // output port (x+1, 10) down the crossing (x+1, 9) into the rig's input
+  // port (x+1, 8); the rig's electronics leave (x+1, 6) onto the outbound
+  // belt (x+1, 5). The assembler's hand port opens onto (x-1, 10), where
+  // walkers bring board kits.
+  for (final x in _cellX) {
+    if (x == _cellX.first) {
+      l.beltRun(_chassisY, 13, x + 1, Dir4.south);
+    } else {
+      l.arm(x + 1, 14, Dir4.south);
+      l.add(EntityKind.belt, x + 1, 13, dir: Dir4.south);
+    }
+    l.machine(x, 10, ElectronicsRecipes.assemble, dir: Dir4.south);
+    l.add(EntityKind.crossing, x + 1, 9, dir: Dir4.south);
+    l.machine(x, 6, ElectronicsRecipes.test,
+        dir: Dir4.south, mode: MachineMode.assisted);
   }
-  // The outbound belt east to the packer, with a crossing over each
-  // assembly bench's kit drop and one by the shield press.
-  l.beltEast(2, 29, 7, crossings: {6, 14, 22, 25});
-  l.machine(30, 7, ElectronicsRecipes.pack);
+  // The outbound belt into the packer's input port (32, 5); its crates
+  // leave its output port (34, 5) down a belt into the shipping door.
+  l.beltEast(_cellX.first + 1, 31, _outY);
+  l.machine(32, 4, ElectronicsRecipes.pack);
+  l.beltEast(35, 37, _outY);
 
-  // The board shop north of the line: four benches along the walkway and
-  // a fifth behind the easternmost.
-  for (final x in _benchX) {
-    l.machine(x, 9, ElectronicsRecipes.board);
+  // The board shop, every bench facing north so its hand port opens on its
+  // east side: two benches in each gap between cells (hand ports at y 8
+  // and 12, beside the next cell's assembler hand port at y 10), and a
+  // fifth by the shield press, whose hand port is (27, 11). Placed nearest
+  // the press first: hand-fed inputs pull in placement-id order, so the
+  // nearest benches get the trays first and the walks stay short.
+  l.machine(26, 6, ElectronicsRecipes.board, dir: Dir4.north);
+  for (final x in [19, 12]) {
+    l.machine(x, 10, ElectronicsRecipes.board, dir: Dir4.north);
+    l.machine(x, 6, ElectronicsRecipes.board, dir: Dir4.north);
   }
-  l.machine(21, 13, ElectronicsRecipes.board);
 
-  // Shipping: the door beside the packer across the aisle, and the
-  // forklift's charging bay.
-  l.add(EntityKind.shippingDock, _doorX, 7);
-  l.add(EntityKind.chargingBay, _doorX, 9);
+  // Shipping: the door beside the aisle, and the forklift's charging bay.
+  l.add(EntityKind.shippingDock, _doorX, _outY);
+  l.add(EntityKind.chargingBay, _doorX, 8);
 
   return FloorBlueprint(
     name: 'Electronics Plant',

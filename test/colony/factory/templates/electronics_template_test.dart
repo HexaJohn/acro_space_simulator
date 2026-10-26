@@ -54,7 +54,7 @@ void main() {
   /// "Templates"): opening the plant's floor must not change what the
   /// colony gets from it, in commodity units, nor what it takes — steel in,
   /// electronics out, every byproduct (offcut, cans, kits) used up inside.
-  test('steady state is the spec rate within 5%, and nothing else moves', skip: 'awaiting port redraw (#19)', () {
+  test('steady state is the spec rate within 5%, and nothing else moves', () {
     final r = _measure(electronicsTemplate());
     final steelIn = _spec.inputs['steel']!;
     final elecOut = _spec.outputs['electronics']!;
@@ -72,7 +72,7 @@ void main() {
   /// must clear the priming with margin and make one crate a small share
   /// of the window, or "Reset to template" would cut the plant's
   /// off-screen output.
-  test('names measurement settings that clear its priming', skip: 'awaiting port redraw (#19)', () async {
+  test('names measurement settings that clear its priming', () async {
     expect(kElectronicsMeasureSettings.warmupS, greaterThanOrEqualTo(300));
     expect(kElectronicsMeasureSettings.windowS, greaterThanOrEqualTo(1200));
     // The settings as they cross to a measure worker survive the trip.
@@ -94,7 +94,7 @@ void main() {
   /// or the measure runner's worker) once `registerElectronicsChain` — and
   /// nothing else — has run there. Without it the floor's recipes are
   /// unknown, which is why the template's doc makes the hook blocking.
-  test('a fresh isolate loads a saved floor after only the chain setup', skip: 'awaiting port redraw (#19)',
+  test('a fresh isolate loads a saved floor after only the chain setup',
       () async {
     final f = FactoryFloor.fromBlueprint(electronicsTemplate());
     final pf = InfiniteColonyPort();
@@ -129,7 +129,7 @@ void main() {
   /// The doc's handling figures are measured, not guessed: walkers' longest
   /// tray and kit hauls (path walked while carrying) match the constants
   /// the doc cites, to a tile.
-  test('walker hauls match the documented figures', skip: 'awaiting port redraw (#19)', () {
+  test('walker hauls match the documented figures', () {
     final f = FactoryFloor.fromBlueprint(electronicsTemplate());
     final p = InfiniteColonyPort();
     final last = <int, (double, double, String?)>{};
@@ -178,10 +178,11 @@ void main() {
 
   /// The user's brief: people and vehicles move the freight, belts carry
   /// the steady flows, and almost nothing is lights-out. So every station
-  /// is manned or operator-assisted, the forklift really works the doors,
+  /// is manned or operator-assisted, the forklift really works the
+  /// receiving door (pallets to the de-palletiser's hand port),
   /// walkers really carry the board shop's trays and kits, and conveyors
   /// run the line.
-  test('a realistic mix: people, a forklift and belts all pull weight', skip: 'awaiting port redraw (#19)', () {
+  test('a realistic mix: people, a forklift and belts all pull weight', () {
     final bp = electronicsTemplate();
     final floor = FactoryFloor.fromBlueprint(bp);
     final port = InfiniteColonyPort();
@@ -209,9 +210,11 @@ void main() {
   /// leave room for better designs. Two of the levers its doc names are
   /// proved here — servo-assisting the pacemaker press buys output (more
   /// electronics within the docks' supply, with a job fewer), and giving
-  /// the board and assembly benches an operator each holds the output with
-  /// a quarter fewer jobs.
-  test('an improved design beats it', skip: 'awaiting port redraw (#19)', () {
+  /// the board and assembly benches an operator each, and trimming the
+  /// walkers' spare, holds the output with a quarter fewer jobs. Both are
+  /// recrews of the port layout itself: every belt still meets its port
+  /// and every handler its hand port, so neither needs a redraw.
+  test('an improved design beats it', () {
     final base = _measure(electronicsTemplate());
 
     final faster =
@@ -237,7 +240,7 @@ void main() {
   /// Measured rates feed the colony's aggregate mode, and saves hold full
   /// floor state: the same template must measure the same every time, and
   /// a save → load mid-run must continue bit for bit.
-  test('deterministic, and save/load mid-run continues identically', skip: 'awaiting port redraw (#19)', () {
+  test('deterministic, and save/load mid-run continues identically', () {
     final a = _measure(electronicsTemplate());
     final b = _measure(electronicsTemplate());
     expect(jsonEncode(b.toJson()), jsonEncode(a.toJson()));
