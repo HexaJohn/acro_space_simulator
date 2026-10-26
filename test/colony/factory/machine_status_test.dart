@@ -53,10 +53,11 @@ void main() {
   });
 
   test('unstaffed when the colony cannot crew it, by placement id', () {
+    // Row 1, so each hand port's standing tile (row 0) is on the floor.
     final l = Lay();
-    final a = l.add(EntityKind.machine, 0, 0,
+    final a = l.add(EntityKind.machine, 0, 1,
         recipe: SteelRecipes.smelt.id, mode: MachineMode.manual);
-    final b = l.add(EntityKind.machine, 5, 0,
+    final b = l.add(EntityKind.machine, 5, 1,
         recipe: SteelRecipes.smelt.id, mode: MachineMode.manual);
     final floor = FactoryFloor.fromBlueprint(l.blueprint(10, 5));
     expect(floor.jobDemand, 4);
@@ -65,12 +66,13 @@ void main() {
     expect(floor.statusOf(a), MachineStatus.unstaffed);
     expect(floor.statusOf(b), MachineStatus.unstaffed);
 
-    floor.step(1, StockColonyPort(staffingShare: 0.5));
+    // Operators walk in from the entrance (§10 item 20): give them time.
+    floor.step(30, StockColonyPort(staffingShare: 0.5));
     expect(floor.statusOf(a), MachineStatus.starved,
         reason: 'two of four jobs filled: the lower id gets its full crew');
     expect(floor.statusOf(b), MachineStatus.unstaffed);
 
-    floor.step(1, StockColonyPort(staffingShare: 0.7));
+    floor.step(30, StockColonyPort(staffingShare: 0.7));
     expect(floor.statusOf(b), MachineStatus.unstaffed,
         reason: 'floor(4 × 0.7) = 2: a station never runs short-handed');
   });

@@ -8,6 +8,8 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.da
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_recipe.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_scenario.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_sim_api.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_staffing.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/templates/rocketfactory_template.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -72,6 +74,9 @@ void main() {
     return id;
   }
 
+  /// The CREW panel's + on the 1st shift's Operators.
+  void hire() => f.hireStaff(0, StaffRole.operator, 1);
+
   void belt(int x0, int x1, int y, Dir4 dir) {
     for (var x = x0; x <= x1; x++) {
       place(EntityKind.belt, x, y, dir: dir);
@@ -113,7 +118,17 @@ void main() {
     }
     runFor(1);
 
-    // e. Feed: the cell starves until the belt's last tile points into its
+    // e. Hire: nobody is hired, so the cell is unstaffed until an operator
+    // is hired and has walked in from the entrance to its hand port.
+    expect(stepId(), 'hire');
+    runFor(5);
+    expect(stepId(), 'hire', reason: 'nobody hired yet');
+    expect(f.statusOf(cell), MachineStatus.unstaffed);
+    hire();
+    runUntil(() => stepId() != 'hire', limit: 120, what: 'the operator in');
+    expect(f.staffAt(cell), hasLength(1));
+
+    // f. Feed: the cell starves until the belt's last tile points into its
     // Input 1 port.
     expect(stepId(), 'feed');
     runFor(5);
@@ -121,7 +136,7 @@ void main() {
     place(EntityKind.belt, 20, 2);
     runUntil(() => stepId() != 'feed', limit: 10, what: 'the cell fed');
 
-    // f. Ship: frames leave only by the output port (23, 2), onto (24, 2).
+    // g. Ship: frames leave only by the output port (23, 2), onto (24, 2).
     // A dock alone ships nothing (nothing carries the frames to it); a belt
     // from the output port into it does, with no handler hired at all.
     expect(stepId(), 'ship');
@@ -134,7 +149,7 @@ void main() {
     runUntil(() => stepId() != 'ship', limit: 120, what: 'a frame shipped');
     expect(f.handlers, isEmpty, reason: 'no handler was needed');
 
-    // g. Second line: an electronics dock on the north wall, its belt into
+    // h. Second line: an electronics dock on the north wall, its belt into
     // a wiring bench's Input 1 port (6, 36) from (5, 36).
     expect(stepId(), 'secondLine');
     final bench = assembler(6, 35, RocketPartsRecipes.wireAvionics.id);
@@ -147,9 +162,12 @@ void main() {
     expect(stepId(), 'secondLine', reason: 'no belt into the port yet');
     place(EntityKind.belt, 5, 37, dir: Dir4.south);
     place(EntityKind.belt, 5, 36);
-    runUntil(() => stepId() != 'secondLine', limit: 10, what: 'bench fed');
+    runFor(5);
+    expect(stepId(), 'secondLine', reason: 'the bench has no operator yet');
+    hire();
+    runUntil(() => stepId() != 'secondLine', limit: 120, what: 'bench crewed');
 
-    // h. Assemble, the two-input puzzle: the bay replaces the frame dock so
+    // i. Assemble, the two-input puzzle: the bay replaces the frame dock so
     // the frame belt runs into its Input 1 (30, 2); the bench's harnesses
     // leave its output port (8, 36) onto (9, 36) and ride round into Input
     // 2 (31, 3) from (31, 4). Rocket parts are HEAVY: the bay blocks until
@@ -159,6 +177,7 @@ void main() {
         (p) => p.kind == EntityKind.shippingDock && p.pos == const TilePos(30, 2));
     expect(f.remove(frameDock.id).ok, isTrue);
     final bay = assembler(30, 1, RocketPartsRecipes.assemble.id);
+    hire();
     belt(9, 30, 36, Dir4.east);
     for (var y = 36; y >= 4; y--) {
       place(EntityKind.belt, 31, y, dir: Dir4.south);
@@ -174,7 +193,7 @@ void main() {
     place(EntityKind.shippingDock, 38, 2);
     runUntil(() => stepId() != 'assemble', limit: 30, what: 'a part shipped');
 
-    // i. Read: both UI flags, in either order.
+    // j. Read: both UI flags, in either order.
     expect(stepId(), 'read');
     run.noteBottlenecks(true);
     runFor(1);
@@ -227,7 +246,8 @@ void main() {
     boot();
     final done = playTutorial();
     expect(done.keys, [
-      'welcome', 'receive', 'move', 'make', 'feed', 'ship', 'secondLine',
+      'welcome', 'receive', 'move', 'make', 'hire', 'feed', 'ship',
+      'secondLine',
       'assemble', 'read',
     ]);
     // Monotone timestamps in sim seconds.
@@ -264,7 +284,8 @@ void main() {
   /// into and out of ports (§10 item 19). A port takes one belt, so each
   /// new cell and bench gets its own receiving dock, and their outputs
   /// side-merge into the frame belt and the harness belt. Assisted
-  /// stations (the palette's default crew) and no handlers at all.
+  /// stations (the palette's default crew), one hired operator each (§10
+  /// item 20), and no handlers at all.
   ({double to20, double rate, double jobs, Map<String, double> goals})
       buildReference() {
     boot();
@@ -276,6 +297,7 @@ void main() {
       place(EntityKind.receivingDock, 18, y + 1, item: 'tubes');
       place(EntityKind.belt, 20, y + 1);
       assembler(21, y, RocketPartsRecipes.weldFrame.id);
+      hire();
     }
     for (var y = 14; y >= 3; y--) {
       place(EntityKind.belt, 24, y, dir: Dir4.south);
@@ -287,7 +309,10 @@ void main() {
       place(EntityKind.receivingDock, 25, y + 1, item: 'electronics');
       place(EntityKind.belt, 27, y + 1);
       assembler(28, y, RocketPartsRecipes.wireAvionics.id);
+      hire();
     }
+    expect(f.crewOn(0).operators, f.operatorsNeeded,
+        reason: 'one operator per assisted station');
 
     final t0 = f.simSeconds;
     final to20 = runUntil(() => run.progress.goalMetAt.containsKey('ship20'),

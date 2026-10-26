@@ -7,6 +7,7 @@ import 'package:acro_space_simulator/domain/colony/city/factory/factory_entities
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_floor.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_grid.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/factory_scenario.dart';
+import 'package:acro_space_simulator/domain/colony/city/factory/factory_staffing.dart';
 import 'package:acro_space_simulator/domain/colony/city/factory/templates/rocketfactory_template.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/factory/factory_editor_controller.dart';
 import 'package:acro_space_simulator/infrastructure/flutter/screens/factory/factory_floor_screen.dart';
@@ -59,7 +60,7 @@ void main() {
     await open(t);
     expect(find.byKey(const Key('tutorial-panel')), findsOneWidget);
     expect(stepTitle(t), 'Welcome to the factory floor');
-    expect(find.textContaining('STEP 1 / 9'), findsOneWidget);
+    expect(find.textContaining('STEP 1 / 10'), findsOneWidget);
     await t.tap(find.byKey(const Key('tutorial-next')));
     await t.pump();
     expect(stepTitle(t), 'Bring tubes in');
@@ -154,8 +155,10 @@ void main() {
     put(const Placement(id: 0, kind: EntityKind.belt, pos: TilePos(13, 11)));
     put(const Placement(
         id: 0, kind: EntityKind.shippingDock, pos: TilePos(14, 11)));
-    // Until the first part ships: the assembler's operator walks in from
-    // the entrance first (§10 item 20: operators are people).
+    // The tutorial hires nobody (its 'hire' step teaches it): hire the
+    // assembler's operator, who walks in from the entrance first (§10 item
+    // 20: operators are people), then step until the first part ships.
+    floor.hireStaff(0, StaffRole.operator, 1);
     for (var i = 0; i < 300; i++) {
       if ((floor.lifetime.shipped['rocketParts'] ?? 0) > 0) break;
       floor.step(1, run.port);
@@ -184,7 +187,7 @@ void main() {
     await t.tap(find.byKey(const Key('tutorial-minimise')));
     await t.pump();
     expect(find.byKey(const Key('tutorial-panel')), findsNothing);
-    expect(find.text('Tutorial 1/9'), findsOneWidget);
+    expect(find.text('Tutorial 1/10'), findsOneWidget);
     await t.tap(find.byKey(const Key('tutorial-expand')));
     await t.pump();
     expect(find.byKey(const Key('tutorial-panel')), findsOneWidget);

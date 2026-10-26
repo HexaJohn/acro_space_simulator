@@ -27,17 +27,21 @@ void main() {
 
   const h = 3600.0;
 
-  /// A smelting line at row [y]: dock → belts → smelter ([mode]) → arms →
-  /// shipping docks. Returns the smelter's id.
+  /// A smelting line on rows [y] .. [y] + 4: dock → belts → the smelter's
+  /// ([mode]) input port; pig iron leaves its front port and slag its top
+  /// port, each by belt to a shipping dock (arms can't touch machines,
+  /// §10 item 19). [y] ≥ 1 keeps the hand port's standing tile (below the
+  /// smelter) on the floor, so its operator walks there. Returns the
+  /// smelter's id.
   int line(Lay l, int y, MachineMode mode) {
     l.add(EntityKind.receivingDock, 0, y + 1, item: 'ore');
     l.beltRow(2, 3, y + 1);
     final m = l.add(EntityKind.machine, 4, y,
         recipe: SteelRecipes.smelt.id, mode: mode);
-    l.add(EntityKind.arm, 8, y + 1);
+    l.add(EntityKind.belt, 8, y + 1);
     l.add(EntityKind.shippingDock, 9, y + 1);
-    l.add(EntityKind.arm, 8, y + 2);
-    l.add(EntityKind.shippingDock, 9, y + 2);
+    l.beltRow(6, 8, y + 4);
+    l.add(EntityKind.shippingDock, 9, y + 4);
     return m;
   }
 
@@ -78,7 +82,7 @@ void main() {
 
   test('an unstaffed station idles until an operator is hired', () {
     final l = Lay();
-    final m = line(l, 0, MachineMode.assisted);
+    final m = line(l, 1, MachineMode.assisted);
     final f = FactoryFloor.fromBlueprint(explicit(l.blueprint(12, 6)));
     f.step(60, port);
     expect(f.statusOf(m), MachineStatus.unstaffed);
@@ -95,7 +99,7 @@ void main() {
 
   test('a hired operator walks in to the station', () {
     final l = Lay();
-    final m = line(l, 0, MachineMode.assisted);
+    final m = line(l, 1, MachineMode.assisted);
     // The muster spot (the entrance) across the hall.
     l.add(EntityKind.staging, 22, 4, span: (1, 1));
     final f = FactoryFloor.fromBlueprint(explicit(l.blueprint(24, 6)));
@@ -120,10 +124,10 @@ void main() {
 
   test('nearest stations first; a pinned operator stays put', () {
     final l = Lay();
-    final near = line(l, 0, MachineMode.assisted);
-    final far = line(l, 6, MachineMode.assisted);
+    final near = line(l, 1, MachineMode.assisted);
+    final far = line(l, 7, MachineMode.assisted);
     // Entrance: a staging area by the near line.
-    l.add(EntityKind.staging, 10, 4, span: (1, 1));
+    l.add(EntityKind.staging, 11, 0, span: (1, 1));
     final f = FactoryFloor.fromBlueprint(explicit(l.blueprint(12, 12)));
     f.hireStaff(0, StaffRole.operator, 1);
     f.step(60, port);
@@ -147,7 +151,7 @@ void main() {
 
   test('the shift change swaps crews', () {
     final l = Lay();
-    final m = line(l, 0, MachineMode.assisted);
+    final m = line(l, 1, MachineMode.assisted);
     final f = FactoryFloor.fromBlueprint(explicit(l.blueprint(12, 6),
         crews: [ShiftCrew(operators: 1), ShiftCrew(operators: 1)],
         schedule: ShiftSchedule(const [0x1F, 0x1F, 0]),
@@ -164,8 +168,8 @@ void main() {
 
   test('off shift only automation and AGVs run', () {
     final l = Lay();
-    final manned = line(l, 0, MachineMode.assisted);
-    final auto = line(l, 6, MachineMode.automated);
+    final manned = line(l, 1, MachineMode.assisted);
+    final auto = line(l, 7, MachineMode.automated);
     final bp = explicit(l.blueprint(12, 12, walkers: 1),
         crews: [ShiftCrew(operators: 1, technicians: 1)],
         startS: 14 * h - 60);
@@ -206,7 +210,7 @@ void main() {
 
   test('skip jumps an idle floor to the next shift start', () {
     final l = Lay();
-    line(l, 0, MachineMode.assisted);
+    line(l, 1, MachineMode.assisted);
     final f = FactoryFloor.fromBlueprint(explicit(l.blueprint(12, 6),
         crews: [ShiftCrew(operators: 1)], startS: 14 * h - 60));
     f.step(240, port);
@@ -227,7 +231,7 @@ void main() {
 
   test('idleOffShift (auto-skip\'s test)', () {
     final l = Lay();
-    line(l, 0, MachineMode.assisted);
+    line(l, 1, MachineMode.assisted);
     final f = FactoryFloor.fromBlueprint(explicit(l.blueprint(12, 6),
         crews: [ShiftCrew(operators: 1)], startS: 14 * h - 120));
     f.step(60, port);
@@ -237,7 +241,7 @@ void main() {
 
     // A busy lights-out cell is never auto-skipped.
     final l2 = Lay();
-    line(l2, 0, MachineMode.automated);
+    line(l2, 1, MachineMode.automated);
     final g = FactoryFloor.fromBlueprint(explicit(l2.blueprint(12, 6),
         crews: [ShiftCrew(technicians: 1)], startS: 14 * h));
     g.step(60, port);
@@ -247,7 +251,7 @@ void main() {
 
   test('skip over a 16 h night with a lights-out line is fast', () {
     final l = Lay();
-    line(l, 0, MachineMode.automated);
+    line(l, 1, MachineMode.automated);
     final f = FactoryFloor.fromBlueprint(explicit(l.blueprint(12, 6),
         crews: [ShiftCrew(technicians: 1)], startS: 14 * h));
     final target = f.calendar.nextScheduledStart(f.schedule, 0);
@@ -283,8 +287,8 @@ void main() {
   test('save mid-shift-change equals an unbroken run; old saves migrate', () {
     FactoryFloor make() {
       final l = Lay();
-      line(l, 0, MachineMode.assisted);
-      final far = line(l, 6, MachineMode.manual);
+      line(l, 1, MachineMode.assisted);
+      final far = line(l, 7, MachineMode.manual);
       final bp = explicit(l.blueprint(12, 12, walkers: 1),
           crews: [ShiftCrew(operators: 3), ShiftCrew(operators: 2, handlers: 1)],
           schedule: ShiftSchedule(const [0x1F, 0x1F, 0]),
@@ -318,7 +322,7 @@ void main() {
     // An old save (no crew plan): auto crew, the old roster on the 1st
     // shift, every station crewed.
     final l = Lay();
-    final m = line(l, 0, MachineMode.manual);
+    final m = line(l, 1, MachineMode.manual);
     final old = l.blueprint(12, 6, walkers: 2).toJson()..remove('staff');
     final o = FactoryFloor.fromBlueprint(FloorBlueprint.fromJson(old));
     expect(o.autoCrew, isTrue);

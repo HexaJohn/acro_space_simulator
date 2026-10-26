@@ -383,11 +383,16 @@ extension _FloorCrew on FactoryFloor {
       final h = rt.people[e.key];
       if (h == null) continue;
       final g = _goalsFor(kWalkLayer, e.value);
-      if (g.isEmpty) continue;
+      final at = g.isNotEmpty ? g.first : _byId[e.value]?.pos;
+      if (at == null) continue;
       h
-        ..at = g.first
+        ..at = at
         ..next = null
         ..prog = 0;
+      // A post nobody can stand beside (its hand port faces the wall or a
+      // belt) is reached by the back corridor; the opening crew has
+      // already come that way, so it counts as walked.
+      if (g.isEmpty) h.timer = kBackCorridorS;
     }
     // The dry run booked nothing (dt 0) and derived only transient state.
   }

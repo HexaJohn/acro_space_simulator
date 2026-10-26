@@ -41,6 +41,7 @@ import 'factory_grid.dart';
 import 'factory_item.dart';
 import 'factory_recipe.dart';
 import 'factory_sim_api.dart';
+import 'factory_staffing.dart';
 import 'floor_blueprint.dart';
 import 'templates/rocketfactory_template.dart';
 
@@ -147,6 +148,9 @@ enum ScenarioHintTarget {
 
   /// The in-game Recipe info panel (direct components / raw total).
   recipeInfo,
+
+  /// The side panel's CREW block (hire operators per shift).
+  crew,
 }
 
 /// Where to look for the tool a step needs, and which on-screen controls
@@ -549,6 +553,11 @@ bool _fed(FactorySim sim, String recipeId, Set<String> items) {
   return false;
 }
 
+/// A station running [recipeId] has its crew at work (its status is
+/// anything but unstaffed: a starved but crewed cell counts).
+bool _crewed(FactorySim sim, String recipeId) => _running(sim, recipeId)
+    .any((p) => sim.statusOf(p.id) != MachineStatus.unstaffed);
+
 double _shipped(FactorySim sim, String commodity) =>
     sim.lifetime.shipped[commodity] ?? 0;
 
@@ -641,10 +650,14 @@ FactoryScenario rocketPartsScenario() {
   return FactoryScenario(
     id: 'rocketParts',
     title: 'Rocket Parts',
+    // An explicit crew plan with nobody hired (§10 item 20): the player
+    // hires each station's operator, which the 'hire' step teaches. An auto
+    // crew would staff stations silently and hide that people run them.
     blueprint: () => FloorBlueprint(
         name: 'Rocket Parts Tutorial',
         plantType: kRocketPartsType,
-        hall: kTutorialHall),
+        hall: kTutorialHall,
+        staff: FloorStaffPlan(auto: false)),
     supply: const {_tubes, _electronics},
     supplyOptions: const [
       SupplyOption(
@@ -713,6 +726,22 @@ FactoryScenario rocketPartsScenario() {
             '(or set it in the Inspector)', {ScenarioHintTarget.assembler}),
         check: (sim, p) => _running(sim, weld).isNotEmpty,
       ),
+      // Operators are hired people who walk in (§10 item 20): without one
+      // the cell reads "unstaffed" and never welds, however it is fed.
+      TutorialStep(
+        id: 'hire',
+        title: 'Hire an operator for each station',
+        body: 'Machines are run by people. An assisted station like this cell '
+            'needs one OPERATOR on shift, and nobody is hired yet, so it is '
+            '"unstaffed". In the side panel\'s CREW block, press + next to '
+            'Operators on the 1st shift. The new hire walks in from the '
+            'entrance to the nearest station without a crew and runs it '
+            'while standing at its white hand port. Hire one more for every '
+            'station you add later: "Layout needs" there counts them.',
+        hint: const ScenarioHint('Side panel ▸ CREW ▸ 1st shift Operators +',
+            {ScenarioHintTarget.crew}),
+        check: (sim, p) => _crewed(sim, weld),
+      ),
       // Steps 5 and 6 were the playtest's sticking point (§10 item 2), and
       // with ports they are where the puzzle starts: the belt has to meet
       // the right notch, pointing the right way.
@@ -753,25 +782,28 @@ FactoryScenario rocketPartsScenario() {
             '${FactoryItems.electronics.pickerLabel} — the LOOSE boards, not '
             'the ${FactoryItems.crateElectronics.pickerLabel}, which no bench '
             'here unpacks. Run a belt from in front of the dock into the '
-            'bench\'s Input 1 notch, the same way as the tubes. Its '
-            'harnesses will leave by its output port in the next step.',
+            'bench\'s Input 1 notch, the same way as the tubes, and hire the '
+            'bench its own operator (CREW, +). Its harnesses will leave by '
+            'its output port in the next step.',
         hint: ScenarioHint(
             'Receiving Dock (${FactoryItems.electronics.pickerLabel}), '
-            'Assembler (Wire Avionics), Belt → its Input 1',
+            'Assembler (Wire Avionics), Belt → its Input 1, CREW +1',
             const {
               ScenarioHintTarget.receivingDock,
               ScenarioHintTarget.assembler,
               ScenarioHintTarget.belt,
+              ScenarioHintTarget.crew,
             }),
         check: (sim, p) =>
             _hasDock(sim, _electronics) &&
-            _fed(sim, wire, {_electronics, avionics}),
+            _fed(sim, wire, {_electronics, avionics}) &&
+            _crewed(sim, wire),
       ),
       TutorialStep(
         id: 'assemble',
         title: 'Assemble rocket parts: two inputs',
         body: 'Place an Assembler set to Assemble Rocket Parts (1 frame + 1 '
-            'harness → 2 parts). It has TWO input ports: frames go into '
+            'harness → 2 parts) and hire its operator. It has TWO input ports: frames go into '
             'Input 1 (the back) and harnesses into Input 2 (the top). '
             'Replace the frame shipping dock with it so the frame belt runs '
             'into Input 1, then run a belt from the wiring bench\'s output '

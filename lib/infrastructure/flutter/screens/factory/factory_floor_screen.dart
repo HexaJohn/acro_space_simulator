@@ -1008,7 +1008,10 @@ class _SidePanel extends StatelessWidget {
             _Roster(c: c),
             const SizedBox(height: 14),
             FloorSkipControls(c: c),
-            FloorCrewPanel(c: c),
+            HintPulse(
+              on: c.hinted(ScenarioHintTarget.crew),
+              child: FloorCrewPanel(c: c),
+            ),
             const SizedBox(height: 14),
             _Readout(c: c),
           ],

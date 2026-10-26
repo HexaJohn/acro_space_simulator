@@ -134,16 +134,16 @@ void main() {
     await g.removePointer();
   });
 
-  // ---- 2. Tutorial steps 5 and 6 --------------------------------------------
+  // ---- 2. Tutorial steps 6 and 7 --------------------------------------------
 
-  test('tutorial steps 5 and 6 say which port the belt meets; the jack '
+  test('tutorial steps 6 and 7 say which port the belt meets; the jack '
       'comes later', () {
     final steps = rocketPartsScenario().steps;
     final ids = [for (final s in steps) s.id];
     final feed = steps[ids.indexOf('feed')];
     final ship = steps[ids.indexOf('ship')];
-    expect(ids.indexOf('feed'), 4, reason: 'step 5');
-    expect(ids.indexOf('ship'), 5, reason: 'step 6');
+    expect(ids.indexOf('feed'), 5, reason: 'step 6 (after hiring)');
+    expect(ids.indexOf('ship'), 6, reason: 'step 7');
     // Explicit ports (§10 item 19): the belt meets the input notch pointing
     // in, and the frames leave by the output notch.
     expect(feed.body, contains('INPUT port'));
@@ -152,7 +152,7 @@ void main() {
     expect(ship.body, contains('Shipping Dock'));
     expect(ship.body, isNot(contains('Pallet Jack')));
     expect(ship.hint!.targets, isNot(contains(ScenarioHintTarget.palletJack)));
-    final later = steps.skip(6).where((s) => s.body.contains('Pallet Jack'));
+    final later = steps.skip(7).where((s) => s.body.contains('Pallet Jack'));
     expect(later, isNotEmpty, reason: 'the jack is the later alternative');
     expect(later.first.body, contains('hand frames to a handler'));
   });
