@@ -52,17 +52,21 @@ void main() {
     });
   }
 
-  // Explicit machine ports (§10 item 19) changed how stations connect; the
-  // Steel Mill is redrawn for them, the other six are redrawn later.
-  test('measureSettingsFor reads every template within 5% of its spec', () {
-    ensureFactoryCatalog();
-    readsSpec(kSteelMillType);
-  });
-  test('measureSettingsFor reads the six unredrawn templates within 5%',
-      skip: 'awaiting port redraw (#19)', () {
+  // Explicit machine ports (§10 item 19) changed how stations connect; each
+  // template is checked once it is redrawn for them.
+  const awaitingPortRedraw = {'rocketfactory', 'gunfactory', 'missilefactory'};
+  test('measureSettingsFor reads every redrawn template within 5% of its spec',
+      () {
     ensureFactoryCatalog();
     for (final type in kFactoryPlantTypes) {
-      if (type != kSteelMillType) readsSpec(type);
+      if (!awaitingPortRedraw.contains(type)) readsSpec(type);
+    }
+  });
+  test('measureSettingsFor reads the unredrawn templates within 5%',
+      skip: 'awaiting port redraw (#19)', () {
+    ensureFactoryCatalog();
+    for (final type in awaitingPortRedraw) {
+      readsSpec(type);
     }
   });
 

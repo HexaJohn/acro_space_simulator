@@ -24,8 +24,7 @@ import 'factory_colony_fixture.dart';
 /// Templates still drawn for arms, skipped like their own tests until their
 /// port redraw (#19); their measured draw means nothing until then.
 const Set<String> _awaitingPortRedraw = {
-  'refinery', 'electronics', 'rocketfactory', 'gunfactory',
-  'missilefactory', 'rationsfactory',
+  'rocketfactory', 'gunfactory', 'missilefactory',
 };
 
 void main() {

@@ -82,12 +82,12 @@ const double kUnlockAutomationPop = 600;
 const Map<String, double> kTemplateMeasuredKw = {
   // Re-pinned for the port layout (#19): one automated smelter a line.
   'steelmill': 3986.887,
-  'refinery': 4063.818,
-  'electronics': 739.688,
+  'refinery': 4244.754, // port layout (#19)
+  'electronics': 739.475, // port layout (#19)
   'rocketfactory': 470.933,
   'gunfactory': 394.452,
   'missilefactory': 734.496,
-  'rationsfactory': 117.2,
+  'rationsfactory': 118.417, // port layout (#19)
 };
 
 /// Colony kW per floor-model kW for [spec]'s plant: the factor that makes its
